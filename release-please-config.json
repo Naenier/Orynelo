@@ -1,0 +1,15 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "go",
+  "include-v-in-tag": true,
+  "include-component-in-tag": false,
+  "initial-version": "0.1.0",
+  "pull-request-title-pattern": "chore${scope}: release${component} ${version}",
+  "packages": {
+    ".": {
+      "package-name": "opsdoctor",
+      "release-type": "go",
+      "changelog-path": "CHANGELOG.md"
+    }
+  }
+}

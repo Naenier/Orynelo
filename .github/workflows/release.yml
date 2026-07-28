@@ -1,0 +1,306 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Release Please
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+      sha: ${{ steps.release.outputs.sha }}
+      upload_url: ${{ steps.release.outputs.upload_url }}
+
+    steps:
+      - name: Create or update release
+        id: release
+        uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  cli-assets:
+    name: Package CLI
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out release SHA
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release-please.outputs.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build GoReleaser archives
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean --skip=publish
+
+      - name: Upload CLI archives
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-cli
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums-cli.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  desktop-assets:
+    name: Package desktop on ${{ matrix.os }}
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: Linux
+            arch: x86_64
+          - os: macos-15-intel
+            platform: Darwin
+            arch: x86_64
+          - os: macos-latest
+            platform: Darwin
+            arch: arm64
+          - os: windows-latest
+            platform: Windows
+            arch: x86_64
+
+    steps:
+      - name: Check out release SHA
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release-please.outputs.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install Linux desktop build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends \
+            gcc \
+            libgl1-mesa-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            xorg-dev \
+            xz-utils
+
+      - name: Install pinned Fyne packaging tool
+        if: runner.os != 'Windows'
+        run: go install fyne.io/tools/cmd/fyne@v1.7.2
+
+      - name: Build desktop binary
+        shell: bash
+        env:
+          VERSION: ${{ needs.release-please.outputs.version }}
+          COMMIT: ${{ needs.release-please.outputs.sha }}
+        run: |
+          mkdir -p package
+          suffix=""
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            suffix=".exe"
+          fi
+          build_date=$(git show -s --format=%cI "${COMMIT}")
+          go build \
+            -tags migrated_fynedo \
+            -trimpath \
+            -buildvcs=false \
+            -ldflags="-s -w -buildid= \
+              -X github.com/Naenier/opsdoctor/internal/buildinfo.version=${VERSION} \
+              -X github.com/Naenier/opsdoctor/internal/buildinfo.commit=${COMMIT} \
+              -X github.com/Naenier/opsdoctor/internal/buildinfo.buildDate=${build_date}" \
+            -o "package/opsdoctor-desktop${suffix}" \
+            ./cmd/opsdoctor-desktop
+          cp LICENSE README.md package/
+
+      - name: Create native Linux desktop archive
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          VERSION: ${{ needs.release-please.outputs.version }}
+          PLATFORM: ${{ matrix.platform }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          FYNE_PACKAGE_TOOL="$(go env GOPATH)/bin/fyne" \
+            ./scripts/package-desktop.sh \
+            linux \
+            "$GITHUB_WORKSPACE/package/opsdoctor-desktop" \
+            "$VERSION" \
+            "$GITHUB_RUN_NUMBER" \
+            "$GITHUB_WORKSPACE/opsdoctor-desktop_${VERSION}_${PLATFORM}_${ARCH}.tar.gz"
+
+      - name: Create native macOS application bundle
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          VERSION: ${{ needs.release-please.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          FYNE_PACKAGE_TOOL="$(go env GOPATH)/bin/fyne" \
+            ./scripts/package-desktop.sh \
+            darwin \
+            "$GITHUB_WORKSPACE/package/opsdoctor-desktop" \
+            "$VERSION" \
+            "$GITHUB_RUN_NUMBER" \
+            "$GITHUB_WORKSPACE/opsdoctor-desktop_${VERSION}_Darwin_${ARCH}.tar.gz"
+
+      - name: Create Windows desktop archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.release-please.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          Compress-Archive `
+            -Path package\* `
+            -DestinationPath "opsdoctor-desktop_${env:VERSION}_Windows_${env:ARCH}.zip"
+
+      - name: Upload desktop archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-desktop-${{ matrix.platform }}-${{ matrix.arch }}
+          path: opsdoctor-desktop_*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-assets:
+    name: Attach release assets
+    needs:
+      - release-please
+      - cli-assets
+      - desktop-assets
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out release scripts
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release-please.outputs.sha }}
+
+      - name: Download packaged assets
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate unified checksums
+        run: ./scripts/checksums.sh release-assets
+
+      - name: Upload assets to existing GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+        run: gh release upload "${TAG_NAME}" release-assets/* --clobber
+
+  container:
+    name: Publish CLI container
+    needs:
+      - release-please
+      - publish-assets
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Check out release SHA
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release-please.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare image metadata
+        id: image
+        shell: bash
+        env:
+          VERSION: ${{ needs.release-please.outputs.version }}
+          COMMIT: ${{ needs.release-please.outputs.sha }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          major="${VERSION%%.*}"
+          remainder="${VERSION#*.}"
+          minor="${remainder%%.*}"
+          build_date=$(git show -s --format=%cI "${COMMIT}")
+          {
+            echo "image=${image}"
+            echo "build_date=${build_date}"
+            echo "tags<<EOF"
+            echo "${image}:${VERSION}"
+            if [[ "${VERSION}" != *-* ]]; then
+              echo "${image}:v${major}"
+              echo "${image}:v${major}.${minor}"
+              echo "${image}:latest"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.image.outputs.tags }}
+          build-args: |
+            VERSION=${{ needs.release-please.outputs.version }}
+            COMMIT=${{ needs.release-please.outputs.sha }}
+            BUILD_DATE=${{ steps.image.outputs.build_date }}
+          provenance: mode=max
+          sbom: true

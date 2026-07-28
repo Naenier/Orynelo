@@ -1,0 +1,240 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Test, analyze, and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Validate GitHub Actions workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.10 -color=false
+
+      - name: Set up Python for YAML validation
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Validate YAML files
+        run: |
+          python3 -m pip install \
+            --disable-pip-version-check \
+            --no-deps \
+            pathspec==1.1.1 \
+            PyYAML==6.0.3 \
+            yamllint==1.38.0
+          yamllint --strict --config-file .yamllint.yml .
+
+      - name: Check Conventional Commit pull request title
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(feat|fix|docs|test|refactor|perf|build|ci|chore)(\([a-z0-9._/-]+\))?!?: .+'
+          if [[ ! "${PR_TITLE}" =~ ${pattern} ]]; then
+            echo "Pull request title must follow Conventional Commits." >&2
+            echo "Received: ${PR_TITLE}" >&2
+            exit 1
+          fi
+
+      - name: Install Linux desktop build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends \
+            gcc \
+            libgl1-mesa-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            xorg-dev \
+            xz-utils
+
+      - name: Verify modules
+        run: |
+          go mod verify
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Check formatting
+        run: make fmt-check
+
+      - name: Test version algorithm
+        run: make version-test
+
+      - name: Run go vet
+        run: make vet
+
+      - name: Run unit tests with coverage
+        run: make coverage
+
+      - name: Run offline pipeline integration tests
+        run: go test -tags=integration ./internal/diagnostics
+
+      - name: Run race detector
+        run: make test-race
+
+      - name: Run govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
+      - name: Compute build metadata
+        id: build
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          echo "version=$(./scripts/version.sh)" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Build CLI and desktop
+        run: |
+          make build \
+            VERSION="${{ steps.build.outputs.version }}" \
+            COMMIT="${GITHUB_SHA}" \
+            BUILD_DATE="${{ steps.build.outputs.build_date }}"
+
+      - name: Validate native Linux desktop package
+        env:
+          VERSION: ${{ steps.build.outputs.version }}
+        run: |
+          go install fyne.io/tools/cmd/fyne@v1.7.2
+          FYNE_PACKAGE_TOOL="$(go env GOPATH)/bin/fyne" \
+            ./scripts/package-desktop.sh \
+            linux \
+            "$GITHUB_WORKSPACE/bin/opsdoctor-desktop" \
+            "$VERSION" \
+            "$GITHUB_RUN_NUMBER" \
+            "$GITHUB_WORKSPACE/opsdoctor-desktop_${VERSION}_Linux_x86_64.tar.gz"
+
+      - name: Smoke-test CLI
+        run: ./bin/opsdoctor version --json
+
+      - name: Validate container build
+        run: |
+          docker build \
+            --build-arg VERSION="${{ steps.build.outputs.version }}" \
+            --build-arg COMMIT="${GITHUB_SHA}" \
+            --build-arg BUILD_DATE="${{ steps.build.outputs.build_date }}" \
+            --tag opsdoctor:ci \
+            .
+          docker run --rm opsdoctor:ci version --json
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-${{ steps.build.outputs.version }}
+          path: coverage.out
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload pull request binaries
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: opsdoctor-${{ steps.build.outputs.version }}-linux-amd64
+          path: |
+            bin/
+            opsdoctor-desktop_*_Linux_x86_64.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install Linux desktop build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends \
+            gcc \
+            libgl1-mesa-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            xorg-dev \
+            xz-utils
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12
+          args: --timeout=5m
+
+  platform-build:
+    name: Build ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-26.04
+          - macos-latest
+          - windows-latest
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install Linux desktop build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends \
+            gcc \
+            libgl1-mesa-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            xorg-dev
+
+      - name: Verify modules
+        run: go mod verify
+
+      - name: Compile and smoke-test native binaries
+        shell: bash
+        run: |
+          mkdir -p bin
+          suffix=""
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            suffix=".exe"
+          fi
+          go build -trimpath -buildvcs=false \
+            -o "bin/opsdoctor${suffix}" ./cmd/opsdoctor
+          go build -trimpath -buildvcs=false \
+            -tags migrated_fynedo \
+            -o "bin/opsdoctor-desktop${suffix}" ./cmd/opsdoctor-desktop
+          "./bin/opsdoctor${suffix}" version --json

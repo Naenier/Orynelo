@@ -1,0 +1,33 @@
+# Build output and test artifacts
+/bin/
+/dist/
+/coverage.out
+*.prof
+*.test
+*.log
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Local databases
+*.db
+*.db-shm
+*.db-wal
+
+# IDE and editor state
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/settings.shared.json
+!.vscode/tasks.json
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+
+# Fyne packaging output
+*.app/
+*.exe~

@@ -1,0 +1,68 @@
+version: 2
+
+project_name: opsdoctor
+
+snapshot:
+  version_template: '{{ envOrDefault "OPSDOCTOR_VERSION" .Version }}'
+
+before:
+  hooks:
+    - go mod download
+    - go mod verify
+
+builds:
+  - id: opsdoctor
+    main: ./cmd/opsdoctor
+    binary: opsdoctor
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+      - -buildvcs=false
+    ldflags:
+      - -s -w -buildid=
+      - -X github.com/Naenier/opsdoctor/internal/buildinfo.version={{ .Version }}
+      - -X github.com/Naenier/opsdoctor/internal/buildinfo.commit={{ .Commit }}
+      - -X github.com/Naenier/opsdoctor/internal/buildinfo.buildDate={{ .Date }}
+
+archives:
+  - id: opsdoctor
+    ids:
+      - opsdoctor
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+    wrap_in_directory: true
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums-cli.txt
+  algorithm: sha256
+
+changelog:
+  disable: true
+
+release:
+  disable: true
+
+metadata:
+  mod_timestamp: "{{ .CommitTimestamp }}"
