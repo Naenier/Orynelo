@@ -48,12 +48,12 @@ jobs:
 
     steps:
       - name: Check out release SHA
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.release-please.outputs.sha }}
           fetch-depth: 0
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -103,12 +103,12 @@ jobs:
 
     steps:
       - name: Check out release SHA
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.release-please.outputs.sha }}
           fetch-depth: 0
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -217,7 +217,7 @@ jobs:
 
     steps:
       - name: Check out release scripts
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.release-please.outputs.sha }}
 
@@ -251,7 +251,7 @@ jobs:
 
     steps:
       - name: Check out release SHA
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.release-please.outputs.sha }}
           fetch-depth: 0
