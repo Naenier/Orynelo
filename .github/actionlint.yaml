@@ -1,0 +1,5 @@
+# actionlint v1.7.10 predates GitHub's official ubuntu-26.04 preview label.
+# Keep this exception narrow so unknown runner labels still fail validation.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04

@@ -1,0 +1,55 @@
+// Package theme applies the supported OpsDoctor appearance preferences.
+package theme
+
+import (
+	"fmt"
+	"image/color"
+	"strings"
+
+	"fyne.io/fyne/v2"
+	fynetheme "fyne.io/fyne/v2/theme"
+
+	"github.com/Naenier/opsdoctor/internal/gui/localization"
+)
+
+const (
+	System = "system"
+	Light  = "light"
+	Dark   = "dark"
+)
+
+// Apply changes the Fyne application theme.
+func Apply(texts localization.Catalog, app fyne.App, appearance string) error {
+	texts = localization.Normalize(texts)
+	switch strings.ToLower(strings.TrimSpace(appearance)) {
+	case "", System:
+		app.Settings().SetTheme(fynetheme.DefaultTheme())
+	case Light:
+		app.Settings().SetTheme(fixedVariantTheme{
+			Theme:   fynetheme.DefaultTheme(),
+			variant: fynetheme.VariantLight,
+		})
+	case Dark:
+		app.Settings().SetTheme(fixedVariantTheme{
+			Theme:   fynetheme.DefaultTheme(),
+			variant: fynetheme.VariantDark,
+		})
+	default:
+		return fmt.Errorf(
+			texts.Text(localization.ThemeUnknownAppearanceFormat),
+			appearance,
+		)
+	}
+	return nil
+}
+
+// fixedVariantTheme keeps the current Fyne theme's fonts, icons, and metrics
+// while deliberately overriding the color variant selected by the system.
+type fixedVariantTheme struct {
+	fyne.Theme
+	variant fyne.ThemeVariant
+}
+
+func (t fixedVariantTheme) Color(name fyne.ThemeColorName, _ fyne.ThemeVariant) color.Color {
+	return t.Theme.Color(name, t.variant)
+}

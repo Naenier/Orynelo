@@ -1,0 +1,52 @@
+name: Feature request
+description: Propose a focused diagnostic, reporting, desktop, or developer improvement.
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Describe the diagnostic question or workflow that is difficult today.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Required evidence
+      description: What facts should OpsDoctor observe and present without overstating causality?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the CLI, desktop, report, or API behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety and privacy
+      description: Identify timeouts, bounds, cancellation, permissions, secret handling, or persistence concerns.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Note existing tools or smaller changes that could solve the problem.
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: >-
+            This does not require arbitrary remote command execution, privilege
+            escalation, telemetry, or automatic network changes.
+          required: true

@@ -1,0 +1,44 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+  allow-parallel-runners: true
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - durationcheck
+    - errorlint
+    - gosec
+    - misspell
+    - nilerr
+    - noctx
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+          - noctx
+      - path: internal/storage/history\.go
+        text: G202
+        linters:
+          - gosec
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    generated: lax
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

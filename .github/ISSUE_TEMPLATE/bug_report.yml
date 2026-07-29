@@ -1,0 +1,79 @@
+name: Bug report
+description: Report reproducible incorrect behavior without sharing sensitive infrastructure data.
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a problem. Remove credentials, private hostnames,
+        authorization or cookie headers, proxy URLs, tokens, and internal IP
+        addresses before attaching logs or reports. Security vulnerabilities
+        belong in a private security advisory.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the smallest deterministic steps using a local or redacted target.
+      placeholder: |
+        1. Run `opsdoctor diagnose ...`
+        2. Select ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: OpsDoctor version
+      description: Paste the version from `opsdoctor version`; remove nothing except local paths.
+      placeholder: "dev"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: interface
+    attributes:
+      label: Interface
+      options:
+        - CLI
+        - Desktop
+        - Both
+        - Build or packaging
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: Include distribution/version and architecture.
+      placeholder: "Ubuntu 26.04, amd64"
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Redacted output
+      description: Include only the minimum report or log excerpt needed to show the problem.
+      render: text
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Data safety
+      options:
+        - label: I removed credentials, tokens, cookies, private keys, proxy userinfo, and other secrets.
+          required: true
+        - label: This report is not a security vulnerability.
+          required: true
