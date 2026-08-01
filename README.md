@@ -22,9 +22,6 @@ as the primary target, is the development platform. CI checks formatting,
 static analysis, tests, and CLI/desktop builds on Linux. macOS and Windows
 remain manual preview targets and should not yet be treated as fully supported.
 
-No screenshots are included because the repository does not yet contain
-verified project screenshots.
-
 ## How it works
 
 ```mermaid
@@ -94,7 +91,12 @@ The CLI exit codes are:
 
 ## Desktop application
 
-On Ubuntu, install the native libraries required to compile Fyne:
+![OpsDoctor desktop application](docs/images/opsdoctor-desktop.png)
+
+Install the native libraries required to compile Fyne for your distribution.
+Go 1.26.5 or newer must also be available.
+
+### Debian and Ubuntu
 
 ```bash
 sudo apt-get update
@@ -103,7 +105,38 @@ sudo apt-get install --no-install-recommends \
   libgl1-mesa-dev \
   libxkbcommon-dev \
   libwayland-dev \
+  make \
   xorg-dev
+```
+
+### Arch Linux
+
+```bash
+sudo pacman -S --needed \
+  base-devel \
+  libxcursor \
+  libxi \
+  libxinerama \
+  libxkbcommon \
+  libxrandr \
+  wayland \
+  xorg-server-devel
+```
+
+### Fedora
+
+```bash
+sudo dnf install \
+  gcc \
+  libXcursor-devel \
+  libXi-devel \
+  libXinerama-devel \
+  libXrandr-devel \
+  libXxf86vm-devel \
+  libxkbcommon-devel \
+  make \
+  mesa-libGL-devel \
+  wayland-devel
 ```
 
 Then build or run the desktop entry point:
