@@ -17,7 +17,7 @@ settings, elevate privileges, or upload diagnostic data.
 ## Project status
 
 OpsDoctor is under active development. The report schema is versioned, but
-commands and storage migrations may still change. Linux, with Ubuntu 26.04 LTS
+commands and storage migrations may still change. Linux
 as the primary target, is the development platform. CI checks formatting,
 static analysis, tests, and CLI/desktop builds on Linux. macOS and Windows
 remain manual preview targets and should not yet be treated as fully supported.
