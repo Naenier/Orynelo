@@ -22,6 +22,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	appassets "github.com/Naenier/opsdoctor/assets"
 	"github.com/Naenier/opsdoctor/internal/application"
 	"github.com/Naenier/opsdoctor/internal/buildinfo"
 	targetcheck "github.com/Naenier/opsdoctor/internal/diagnostics/checks/target"
@@ -80,6 +81,7 @@ func Run(ctx context.Context, backend Backend, info buildinfo.Info) {
 		ctx = context.Background()
 	}
 	fyneApp := app.NewWithID("io.github.naenier.opsdoctor")
+	fyneApp.SetIcon(fyne.NewStaticResource("Icon.png", appassets.IconPNG()))
 	texts := localization.English{}
 	cfg := backend.Configuration()
 	_ = apptheme.Apply(texts, fyneApp, cfg.Appearance.Theme)
