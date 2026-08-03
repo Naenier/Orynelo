@@ -363,6 +363,7 @@ func (s *HistoryScreen) SetRows(rows []presenter.HistoryView) {
 	s.applyFilterAndSort()
 }
 
+// applyFilterAndSort derives visible rows from the loaded history snapshot.
 func (s *HistoryScreen) applyFilterAndSort() {
 	s.filtered = append(s.filtered[:0], s.rows...)
 	newest := s.order.Selected != s.texts.Text(localization.HistoryOldestFirst)
@@ -379,6 +380,7 @@ func (s *HistoryScreen) applyFilterAndSort() {
 	s.updateActionState()
 }
 
+// selectedRow returns the currently selected visible history entry.
 func (s *HistoryScreen) selectedRow() (presenter.HistoryView, bool) {
 	if s.selected < 0 || s.selected >= len(s.filtered) {
 		s.SetMessage(s.texts.Text(localization.HistorySelectFirst))
@@ -387,6 +389,7 @@ func (s *HistoryScreen) selectedRow() (presenter.HistoryView, bool) {
 	return s.filtered[s.selected], true
 }
 
+// updateContentState switches between loading, empty, error, and table content.
 func (s *HistoryScreen) updateContentState() {
 	if len(s.filtered) == 0 {
 		if s.hasActiveFilter() {
@@ -413,6 +416,7 @@ func (s *HistoryScreen) updateContentState() {
 	s.actionBar.Show()
 }
 
+// updateActionState enables row actions only when a valid selection exists.
 func (s *HistoryScreen) updateActionState() {
 	hasSelection := !s.loading && s.selected >= 0 && s.selected < len(s.filtered)
 	setButtonEnabled(s.open, hasSelection && s.actions.Open != nil)
@@ -422,10 +426,12 @@ func (s *HistoryScreen) updateActionState() {
 	setButtonEnabled(s.clear, !s.loading && len(s.filtered) > 0 && s.actions.Clear != nil)
 }
 
+// hasActiveFilter reports whether search or status filters constrain the list.
 func (s *HistoryScreen) hasActiveFilter() bool {
 	return strings.TrimSpace(s.search.Text) != "" || s.statusValue() != "all"
 }
 
+// historyToolbarField gives a toolbar control a stable desktop width.
 func historyToolbarField(width float32, object fyne.CanvasObject) fyne.CanvasObject {
 	return container.NewGridWrap(
 		fyne.NewSize(width, object.MinSize().Height),
@@ -433,12 +439,14 @@ func historyToolbarField(width float32, object fyne.CanvasObject) fyne.CanvasObj
 	)
 }
 
+// historyColumnsLayout assigns stable proportions to the history table columns.
 type historyColumnsLayout struct {
 	width        float32
 	targetWidth  float32
 	versionWidth float32
 }
 
+// Layout positions history cells using the configured column proportions.
 func (l *historyColumnsLayout) Layout(
 	objects []fyne.CanvasObject,
 	size fyne.Size,
@@ -486,6 +494,7 @@ func (l *historyColumnsLayout) Layout(
 	}
 }
 
+// MinSize returns the minimum width required by a history row.
 func (*historyColumnsLayout) MinSize(
 	objects []fyne.CanvasObject,
 ) fyne.Size {
@@ -499,6 +508,7 @@ func (*historyColumnsLayout) MinSize(
 	)
 }
 
+// setButtonEnabled updates a button only when it is available.
 func setButtonEnabled(button *widget.Button, enabled bool) {
 	if enabled {
 		button.Enable()
@@ -507,6 +517,7 @@ func setButtonEnabled(button *widget.Button, enabled bool) {
 	button.Disable()
 }
 
+// statusValue maps the localized status selector to the domain vocabulary.
 func (s *HistoryScreen) statusValue() string {
 	switch s.status.Selected {
 	case s.texts.Text(localization.HistoryFilterPassed):

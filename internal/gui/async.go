@@ -19,6 +19,7 @@ import (
 	"github.com/Naenier/opsdoctor/internal/privacy"
 )
 
+// historyReadAction identifies how a loaded diagnosis will be consumed.
 type historyReadAction uint8
 
 const (
@@ -27,11 +28,13 @@ const (
 	historyReadExport
 )
 
+// historyReadResult pairs a stored diagnosis with its requested GUI action.
 type historyReadResult struct {
 	Action    historyReadAction
 	Diagnosis model.Diagnosis
 }
 
+// historyMutationAction distinguishes deletion of one diagnosis from clearing all.
 type historyMutationAction uint8
 
 const (
@@ -39,10 +42,12 @@ const (
 	historyMutationClear
 )
 
+// historyMutationResult records the completed history mutation.
 type historyMutationResult struct {
 	Action historyMutationAction
 }
 
+// profileMutationAction identifies a save, duplicate, or delete request.
 type profileMutationAction uint8
 
 const (
@@ -51,22 +56,26 @@ const (
 	profileMutationDelete
 )
 
+// profileMutationResult carries the affected profile and mutation kind.
 type profileMutationResult struct {
 	Action profileMutationAction
 	Saved  model.Profile
 }
 
+// settingsSaveResult carries persisted configuration and completion messaging.
 type settingsSaveResult struct {
 	Config   application.Config
 	Complete func(message string)
 }
 
+// reportPrepareResult contains rendered bytes and destination metadata.
 type reportPrepareResult struct {
 	Session  uint64
 	Filename string
 	Content  []byte
 }
 
+// reportInspectResult records whether the selected destination already exists.
 type reportInspectResult struct {
 	Session     uint64
 	Destination fyne.URI
@@ -74,12 +83,15 @@ type reportInspectResult struct {
 	Exists      bool
 }
 
+// reportWriteResult describes a completed report write.
 type reportWriteResult struct {
 	Session     uint64
 	Destination fyne.URI
 	Atomic      bool
 }
 
+// buildTaskScopes creates independently replaceable asynchronous operation
+// streams for every controller workflow.
 func (c *controller) buildTaskScopes() error {
 	var err error
 	c.diagnoseTask, err = taskrunner.NewScope(c.tasks, "diagnose", c.observeDiagnosis)
@@ -126,6 +138,8 @@ func (c *controller) buildTaskScopes() error {
 	return err
 }
 
+// diagnoseRequest converts explicit GUI controls and a pending profile into an
+// application request without inventing adapter defaults.
 func (c *controller) diagnoseRequest(input presenter.DiagnoseInput) application.DiagnoseRequest {
 	c.mu.Lock()
 	profile := c.pendingProfile
@@ -208,6 +222,7 @@ func (c *controller) diagnoseRequest(input presenter.DiagnoseInput) application.
 	return request
 }
 
+// observeDiagnosis applies current diagnosis lifecycle transitions on the GUI thread.
 func (c *controller) observeDiagnosis(snapshot taskrunner.Snapshot[model.Diagnosis]) {
 	switch snapshot.State {
 	case taskrunner.StateLoading:
@@ -229,6 +244,7 @@ func (c *controller) observeDiagnosis(snapshot taskrunner.Snapshot[model.Diagnos
 	}
 }
 
+// loadConfiguration starts the initial backend settings read.
 func (c *controller) loadConfiguration() {
 	_, err := c.configurationTask.StartRead(func(context.Context) (application.Config, error) {
 		return c.backend.Configuration(), nil
@@ -238,6 +254,7 @@ func (c *controller) loadConfiguration() {
 	}
 }
 
+// observeConfiguration enables diagnostics only after settings load succeeds.
 func (c *controller) observeConfiguration(snapshot taskrunner.Snapshot[application.Config]) {
 	if snapshot.State != taskrunner.StateSuccess {
 		return
@@ -245,6 +262,8 @@ func (c *controller) observeConfiguration(snapshot taskrunner.Snapshot[applicati
 	c.applyConfiguration(snapshot.Value, true)
 }
 
+// applyConfiguration updates controller defaults, theme, and optionally the
+// settings screen from one configuration snapshot.
 func (c *controller) applyConfiguration(cfg application.Config, rebuildSettings bool) {
 	c.mu.Lock()
 	c.configuration = cfg
@@ -277,6 +296,7 @@ func (c *controller) applyConfiguration(cfg application.Config, rebuildSettings 
 	}
 }
 
+// startHistoryLoad submits a bounded read for filtered history rows.
 func (c *controller) startHistoryLoad(search string, status model.Status) {
 	_, err := c.historyLoadTask.StartRead(func(ctx context.Context) ([]presenter.HistoryView, error) {
 		entries, loadErr := c.backend.ListHistory(ctx, search, status)
@@ -295,6 +315,7 @@ func (c *controller) startHistoryLoad(search string, status model.Status) {
 	}
 }
 
+// observeHistoryLoad updates loading, error, and row state for the History page.
 func (c *controller) observeHistoryLoad(snapshot taskrunner.Snapshot[[]presenter.HistoryView]) {
 	switch snapshot.State {
 	case taskrunner.StateLoading:
@@ -310,6 +331,7 @@ func (c *controller) observeHistoryLoad(snapshot taskrunner.Snapshot[[]presenter
 	}
 }
 
+// startHistoryRead loads one diagnosis for opening, rerunning, or exporting.
 func (c *controller) startHistoryRead(action historyReadAction, id string) {
 	_, err := c.historyReadTask.StartRead(func(ctx context.Context) (historyReadResult, error) {
 		diagnosis, readErr := c.backend.GetDiagnosis(ctx, id)
@@ -320,6 +342,7 @@ func (c *controller) startHistoryRead(action historyReadAction, id string) {
 	}
 }
 
+// observeHistoryRead dispatches a loaded diagnosis to the requested workflow.
 func (c *controller) observeHistoryRead(snapshot taskrunner.Snapshot[historyReadResult]) {
 	switch snapshot.State {
 	case taskrunner.StateLoading:
@@ -341,6 +364,7 @@ func (c *controller) observeHistoryRead(snapshot taskrunner.Snapshot[historyRead
 	}
 }
 
+// startHistoryMutation serializes deletion or clearing through the mutation queue.
 func (c *controller) startHistoryMutation(action historyMutationAction, id string) {
 	_, err := c.historyMutationTask.StartMutation(func(ctx context.Context) (historyMutationResult, error) {
 		result := historyMutationResult{Action: action}
@@ -354,6 +378,7 @@ func (c *controller) startHistoryMutation(action historyMutationAction, id strin
 	}
 }
 
+// observeHistoryMutation refreshes History after a successful mutation.
 func (c *controller) observeHistoryMutation(snapshot taskrunner.Snapshot[historyMutationResult]) {
 	switch snapshot.State {
 	case taskrunner.StateLoading:
@@ -378,6 +403,7 @@ func (c *controller) observeHistoryMutation(snapshot taskrunner.Snapshot[history
 	}
 }
 
+// startProfilesLoad submits a bounded read for all saved profiles.
 func (c *controller) startProfilesLoad() {
 	_, err := c.profilesLoadTask.StartRead(func(ctx context.Context) ([]presenter.ProfileView, error) {
 		profiles, loadErr := c.backend.ListProfiles(ctx)
@@ -396,6 +422,7 @@ func (c *controller) startProfilesLoad() {
 	}
 }
 
+// observeProfilesLoad updates loading, error, and row state for Profiles.
 func (c *controller) observeProfilesLoad(snapshot taskrunner.Snapshot[[]presenter.ProfileView]) {
 	switch snapshot.State {
 	case taskrunner.StateLoading:
@@ -411,6 +438,7 @@ func (c *controller) observeProfilesLoad(snapshot taskrunner.Snapshot[[]presente
 	}
 }
 
+// startProfileMutation serializes profile creation, update, or duplication.
 func (c *controller) startProfileMutation(action profileMutationAction, profile model.Profile) {
 	_, err := c.profileMutationTask.StartMutation(func(ctx context.Context) (profileMutationResult, error) {
 		saved, saveErr := c.backend.SaveProfile(ctx, profile)
@@ -421,6 +449,7 @@ func (c *controller) startProfileMutation(action profileMutationAction, profile 
 	}
 }
 
+// startProfileDelete serializes removal of one profile by identifier.
 func (c *controller) startProfileDelete(id int64) {
 	_, err := c.profileMutationTask.StartMutation(func(ctx context.Context) (profileMutationResult, error) {
 		return profileMutationResult{Action: profileMutationDelete}, c.backend.DeleteProfile(ctx, id)
@@ -430,6 +459,7 @@ func (c *controller) startProfileDelete(id int64) {
 	}
 }
 
+// observeProfileMutation reports the result and refreshes the profile list.
 func (c *controller) observeProfileMutation(snapshot taskrunner.Snapshot[profileMutationResult]) {
 	switch snapshot.State {
 	case taskrunner.StateLoading:
@@ -456,6 +486,7 @@ func (c *controller) observeProfileMutation(snapshot taskrunner.Snapshot[profile
 	}
 }
 
+// startSettingsSave persists configuration through the shared mutation queue.
 func (c *controller) startSettingsSave(
 	cfg application.Config,
 	complete func(message string),
@@ -475,6 +506,7 @@ func (c *controller) startSettingsSave(
 	}
 }
 
+// observeSettingsSave applies persisted settings or reports a boundary-safe error.
 func (c *controller) observeSettingsSave(snapshot taskrunner.Snapshot[settingsSaveResult]) {
 	complete := snapshot.Value.Complete
 	if complete == nil {
@@ -502,6 +534,7 @@ func (c *controller) observeSettingsSave(snapshot taskrunner.Snapshot[settingsSa
 	}
 }
 
+// prepareReport starts privacy projection and report rendering off the GUI thread.
 func (c *controller) prepareReport(
 	diagnosis model.Diagnosis,
 	format string,
@@ -518,6 +551,7 @@ func (c *controller) prepareReport(
 	}
 }
 
+// observeReportPrepare opens destination selection for the current report session.
 func (c *controller) observeReportPrepare(snapshot taskrunner.Snapshot[reportPrepareResult]) {
 	if snapshot.State == taskrunner.StateError {
 		c.showUserError(snapshot.Err)
@@ -560,6 +594,7 @@ func (c *controller) observeReportPrepare(snapshot taskrunner.Snapshot[reportPre
 	picker.Show()
 }
 
+// inspectReportDestination checks for an existing file before any write occurs.
 func (c *controller) inspectReportDestination(
 	session uint64,
 	destination fyne.URI,
@@ -586,6 +621,7 @@ func (c *controller) inspectReportDestination(
 	}
 }
 
+// observeReportInspect requests overwrite consent or proceeds with a safe write.
 func (c *controller) observeReportInspect(snapshot taskrunner.Snapshot[reportInspectResult]) {
 	if snapshot.State == taskrunner.StateError {
 		c.showUserError(snapshot.Err)
@@ -611,6 +647,7 @@ func (c *controller) observeReportInspect(snapshot taskrunner.Snapshot[reportIns
 	c.writeReport(result.Session, result.Destination, result.Content, false)
 }
 
+// writeReport commits rendered content to the selected destination asynchronously.
 func (c *controller) writeReport(
 	session uint64,
 	destination fyne.URI,
@@ -633,6 +670,7 @@ func (c *controller) writeReport(
 	}
 }
 
+// observeReportWrite reports completion for the current export session.
 func (c *controller) observeReportWrite(snapshot taskrunner.Snapshot[reportWriteResult]) {
 	if snapshot.State == taskrunner.StateError {
 		c.showUserError(snapshot.Err)
@@ -652,6 +690,7 @@ func (c *controller) observeReportWrite(snapshot taskrunner.Snapshot[reportWrite
 	)
 }
 
+// beginReportSession invalidates older export callbacks and returns a new generation.
 func (c *controller) beginReportSession() uint64 {
 	c.cancelReportTasks()
 	c.mu.Lock()
@@ -660,6 +699,7 @@ func (c *controller) beginReportSession() uint64 {
 	return session
 }
 
+// cancelReportTasks invalidates all work associated with the previous export session.
 func (c *controller) cancelReportTasks() {
 	for _, cancel := range []func(){
 		func() {
@@ -685,12 +725,14 @@ func (c *controller) cancelReportTasks() {
 	c.mu.Unlock()
 }
 
+// reportSessionCurrent reports whether an export callback belongs to the active session.
 func (c *controller) reportSessionCurrent(session uint64) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return !c.closing && c.reportSession == session
 }
 
+// cancelScreenTasks invalidates asynchronous work owned by a page being left.
 func (c *controller) cancelScreenTasks(screen string) {
 	switch screen {
 	case "diagnose":
@@ -728,6 +770,7 @@ func (c *controller) cancelScreenTasks(screen string) {
 	c.cancelReportTasks()
 }
 
+// userFacingError renders a typed application error as localized, privacy-safe text.
 func (c *controller) userFacingError(err error) string {
 	view := application.ToErrorView(err)
 	if view == nil {
@@ -763,6 +806,7 @@ func (c *controller) userFacingError(err error) string {
 	)
 }
 
+// applicationErrorFieldLabel maps stable validation field names to localized labels.
 func applicationErrorFieldLabel(texts localization.Catalog, field string) string {
 	switch field {
 	case "target":
@@ -786,6 +830,7 @@ func applicationErrorFieldLabel(texts localization.Catalog, field string) string
 	}
 }
 
+// showUserError presents a boundary-safe error dialog.
 func (c *controller) showUserError(err error) {
 	if err == nil || errors.Is(err, context.Canceled) {
 		return
@@ -793,6 +838,7 @@ func (c *controller) showUserError(err error) {
 	dialog.ShowError(errors.New(c.userFacingError(err)), c.window)
 }
 
+// guiBoundaryError wraps an adapter failure in the application's stable error contract.
 func guiBoundaryError(
 	err error,
 	category application.ErrorCategory,
@@ -814,6 +860,7 @@ func guiBoundaryError(
 	return application.WrapError(err, category, code, messageID, arguments)
 }
 
+// guiTaskStartError classifies a failure to enqueue GUI background work.
 func guiTaskStartError(err error, operation string) error {
 	return guiBoundaryError(
 		err,

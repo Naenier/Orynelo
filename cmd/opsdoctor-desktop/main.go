@@ -1,3 +1,5 @@
+// Binary opsdoctor-desktop provides the graphical interface to the shared
+// diagnostic application service.
 package main
 
 import (
@@ -11,10 +13,12 @@ import (
 	"github.com/Naenier/opsdoctor/internal/gui"
 )
 
+// main exits the process with the desktop runtime result.
 func main() {
 	os.Exit(run())
 }
 
+// run initializes the runtime, starts the GUI, and coordinates cancellation.
 func run() int {
 	info := buildinfo.Current()
 	runtime, err := bootstrap.OpenRuntime(info)

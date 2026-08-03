@@ -390,6 +390,7 @@ func NewSettings(
 
 const settingsReadableWidth float32 = 980
 
+// parseSettingsDuration accepts the duration syntax exposed by the settings form.
 func parseSettingsDuration(value string) (time.Duration, error) {
 	value = strings.TrimSpace(strings.ToLower(value))
 	if strings.HasSuffix(value, "d") {
@@ -406,6 +407,7 @@ func parseSettingsDuration(value string) (time.Duration, error) {
 	return time.ParseDuration(value)
 }
 
+// formatSettingsDuration renders a stable editable duration value.
 func formatSettingsDuration(value time.Duration) string {
 	const day = 24 * time.Hour
 	if value != 0 && value%day == 0 {
@@ -414,10 +416,12 @@ func formatSettingsDuration(value time.Duration) string {
 	return value.String()
 }
 
+// readableWidthLayout centers one object and caps its maximum content width.
 type readableWidthLayout struct {
 	maxWidth float32
 }
 
+// Layout centers the child while respecting its minimum and configured maximum.
 func (layout readableWidthLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 	width := fyne.Min(size.Width, layout.maxWidth)
 	for _, object := range objects {
@@ -429,6 +433,7 @@ func (layout readableWidthLayout) Layout(objects []fyne.CanvasObject, size fyne.
 	}
 }
 
+// MinSize returns the child's intrinsic minimum size.
 func (layout readableWidthLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 	minimum := fyne.NewSize(0, 0)
 	for _, object := range objects {
@@ -440,10 +445,12 @@ func (layout readableWidthLayout) MinSize(objects []fyne.CanvasObject) fyne.Size
 	return minimum
 }
 
+// newReadableWidth wraps content in the centered readable-width layout.
 func newReadableWidth(object fyne.CanvasObject, maxWidth float32) *fyne.Container {
 	return container.New(readableWidthLayout{maxWidth: maxWidth}, object)
 }
 
+// reverseLabels builds a localized-label-to-domain-value lookup map.
 func reverseLabels(values map[string]string) map[string]string {
 	result := make(map[string]string, len(values))
 	for label, value := range values {

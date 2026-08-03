@@ -12,9 +12,13 @@ import (
 	"github.com/Naenier/opsdoctor/internal/gui/localization"
 )
 
+// Supported appearance preference values.
 const (
+	// System follows the desktop environment's current appearance.
 	System = "system"
+	// Light forces the light Fyne color variant.
 	Light  = "light"
+	// Dark forces the dark Fyne color variant.
 	Dark   = "dark"
 )
 
@@ -50,6 +54,7 @@ type fixedVariantTheme struct {
 	variant fyne.ThemeVariant
 }
 
+// Color resolves colors using the explicitly selected light or dark variant.
 func (t fixedVariantTheme) Color(name fyne.ThemeColorName, _ fyne.ThemeVariant) color.Color {
 	return t.Theme.Color(name, t.variant)
 }

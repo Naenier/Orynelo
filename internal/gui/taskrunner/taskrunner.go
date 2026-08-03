@@ -10,15 +10,23 @@ import (
 	"sync"
 )
 
+// DefaultMaxConcurrentReads bounds background reads when no explicit limit is supplied.
 const DefaultMaxConcurrentReads = 4
 
 var (
+	// ErrNilDispatcher reports that GUI-thread delivery cannot be scheduled.
 	ErrNilDispatcher         = errors.New("taskrunner: dispatcher is nil")
+	// ErrInvalidReadLimit reports a negative read-concurrency limit.
 	ErrInvalidReadLimit      = errors.New("taskrunner: maximum concurrent reads must not be negative")
+	// ErrNilRunner reports an attempt to create a scope without a runner.
 	ErrNilRunner             = errors.New("taskrunner: runner is nil")
+	// ErrRunnerClosed reports work submitted after runner shutdown.
 	ErrRunnerClosed          = errors.New("taskrunner: runner is closed")
+	// ErrScopeClosed reports work submitted after scope shutdown.
 	ErrScopeClosed           = errors.New("taskrunner: scope is closed")
+	// ErrNilTask reports an attempt to schedule a nil task.
 	ErrNilTask               = errors.New("taskrunner: task is nil")
+	// ErrInvalidOperationClass reports an unsupported scheduling class.
 	ErrInvalidOperationClass = errors.New("taskrunner: invalid operation class")
 )
 
@@ -38,10 +46,15 @@ type Options struct {
 type State string
 
 const (
+	// StateIdle indicates that a scope has no active operation.
 	StateIdle      State = "idle"
+	// StateLoading indicates that an operation is queued or running.
 	StateLoading   State = "loading"
+	// StateSuccess indicates successful completion.
 	StateSuccess   State = "success"
+	// StateError indicates completion with an application error.
 	StateError     State = "error"
+	// StateCancelled indicates explicit cancellation or deadline expiry.
 	StateCancelled State = "cancelled"
 )
 
@@ -59,10 +72,13 @@ func (state State) Valid() bool {
 type OperationClass uint8
 
 const (
+	// ReadOperation identifies bounded concurrent read-only work.
 	ReadOperation OperationClass = iota + 1
+	// MutationOperation identifies globally serialized mutating work.
 	MutationOperation
 )
 
+// valid reports whether class is supported by the scheduler.
 func (class OperationClass) valid() bool {
 	return class == ReadOperation || class == MutationOperation
 }
@@ -95,6 +111,7 @@ type OperationTask[T any] func(context.Context, OperationID) (T, error)
 // Observer receives state transitions on the injected Dispatcher.
 type Observer[T any] func(Snapshot[T])
 
+// scopeLifecycle lets Runner close heterogeneous generic scopes uniformly.
 type scopeLifecycle interface {
 	runnerClosed()
 }
@@ -118,6 +135,7 @@ type Runner struct {
 	tasks sync.WaitGroup
 }
 
+// scheduledTask contains scheduler callbacks and panic recovery handling.
 type scheduledTask struct {
 	ctx      context.Context
 	run      func()
@@ -206,6 +224,7 @@ func (runner *Runner) Wait() {
 	runner.tasks.Wait()
 }
 
+// register adds a scope to runner-owned shutdown handling.
 func (runner *Runner) register(scope scopeLifecycle) error {
 	runner.mu.Lock()
 	defer runner.mu.Unlock()
@@ -216,12 +235,14 @@ func (runner *Runner) register(scope scopeLifecycle) error {
 	return nil
 }
 
+// unregister removes a scope from runner-owned shutdown handling.
 func (runner *Runner) unregister(scope scopeLifecycle) {
 	runner.mu.Lock()
 	defer runner.mu.Unlock()
 	delete(runner.scopes, scope)
 }
 
+// schedule accepts a read or mutation while enforcing its execution policy.
 func (runner *Runner) schedule(class OperationClass, task scheduledTask) error {
 	if !class.valid() {
 		return ErrInvalidOperationClass
@@ -254,6 +275,7 @@ func (runner *Runner) schedule(class OperationClass, task scheduledTask) error {
 	return nil
 }
 
+// signalMutationWorker wakes the serialized mutation loop without blocking callers.
 func (runner *Runner) signalMutationWorker() {
 	select {
 	case runner.mutationReady <- struct{}{}:
@@ -261,6 +283,7 @@ func (runner *Runner) signalMutationWorker() {
 	}
 }
 
+// runMutations drains accepted mutations in FIFO order.
 func (runner *Runner) runMutations() {
 	for range runner.mutationReady {
 		for {
@@ -286,6 +309,7 @@ func (runner *Runner) runMutations() {
 	}
 }
 
+// runScheduled invokes scheduler work while translating panics through its callback.
 func runScheduled(task scheduledTask) {
 	defer func() {
 		if recovered := recover(); recovered != nil && task.panicked != nil {
@@ -376,6 +400,7 @@ func (scope *Scope[T]) StartMutationOperation(task OperationTask[T]) (OperationI
 	return scope.start(MutationOperation, task)
 }
 
+// start replaces the current generation and schedules its loading transition.
 func (scope *Scope[T]) start(class OperationClass, task OperationTask[T]) (OperationID, error) {
 	if task == nil {
 		return 0, ErrNilTask
@@ -451,6 +476,7 @@ func (scope *Scope[T]) start(class OperationClass, task OperationTask[T]) (Opera
 	return id, nil
 }
 
+// invoke runs an operation task and converts a task panic into an error.
 func invoke[T any](
 	ctx context.Context,
 	id OperationID,
@@ -464,6 +490,7 @@ func invoke[T any](
 	return task(ctx, id)
 }
 
+// finish commits a terminal snapshot only if id is still the active generation.
 func (scope *Scope[T]) finish(id OperationID, ctx context.Context, value T, err error) {
 	scope.mu.Lock()
 	if scope.closed || scope.snapshot.OperationID != id || scope.snapshot.State != StateLoading {
@@ -567,10 +594,12 @@ func (scope *Scope[T]) Close() {
 	scope.runner.unregister(scope)
 }
 
+// runnerClosed closes the scope when its owner begins shutdown.
 func (scope *Scope[T]) runnerClosed() {
 	scope.close()
 }
 
+// close performs the synchronized, idempotent scope shutdown transition.
 func (scope *Scope[T]) close() {
 	scope.mu.Lock()
 	defer scope.mu.Unlock()
@@ -589,6 +618,7 @@ func (scope *Scope[T]) close() {
 	}
 }
 
+// deliver dispatches a snapshot only while its scope revision remains current.
 func (scope *Scope[T]) deliver(snapshot Snapshot[T], revision uint64) {
 	if scope.observer == nil {
 		return
