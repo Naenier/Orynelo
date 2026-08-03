@@ -63,6 +63,12 @@ Sensitive query keys include:
 ```text
 token
 access_token
+code
+code_verifier
+jwt
+session_id
+assertion
+ticket
 api_key
 apikey
 key
