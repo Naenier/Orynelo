@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
-	"github.com/Naenier/opsdoctor/internal/redaction"
+	"github.com/Naenier/opsdoctor/internal/privacy"
 )
 
 // Format is a supported report encoding.
@@ -45,11 +45,20 @@ type JSONDocument struct {
 }
 
 // Write streams a report in the requested format.
-func Write(writer io.Writer, diagnosis model.Diagnosis, format Format) error {
+func Write(
+	writer io.Writer,
+	diagnosis model.Diagnosis,
+	format Format,
+	modes ...privacy.Mode,
+) error {
 	if writer == nil {
 		return errors.New("report writer is nil")
 	}
-	diagnosis = sanitizeDiagnosis(diagnosis)
+	projection, err := projectionFor(modes)
+	if err != nil {
+		return err
+	}
+	diagnosis = projection.Diagnosis(diagnosis)
 	switch format {
 	case FormatText:
 		return writeText(writer, diagnosis)
@@ -62,46 +71,24 @@ func Write(writer io.Writer, diagnosis model.Diagnosis, format Format) error {
 	}
 }
 
-func sanitizeDiagnosis(input model.Diagnosis) model.Diagnosis {
-	result := input
-	result.Target.Original = redaction.RedactURL(input.Target.Original)
-	result.Target.Normalized = redaction.RedactURL(input.Target.Normalized)
-	result.Target.RequestURL = ""
-	result.Options.Target = redaction.RedactURL(input.Options.Target)
-	result.Options.UserAgent = redaction.RedactText(input.Options.UserAgent)
-	result.Summary.Title = redaction.RedactText(input.Summary.Title)
-	result.Summary.Description = redaction.RedactText(input.Summary.Description)
-	result.Summary.Recommendations = sanitizeRecommendations(input.Summary.Recommendations)
-	result.Checks = make([]model.CheckResult, len(input.Checks))
-	for index, check := range input.Checks {
-		result.Checks[index] = check
-		result.Checks[index].Summary = redaction.RedactText(check.Summary)
-		result.Checks[index].Evidence = make([]model.Evidence, len(check.Evidence))
-		for evidenceIndex, evidence := range check.Evidence {
-			result.Checks[index].Evidence[evidenceIndex] = evidence
-			result.Checks[index].Evidence[evidenceIndex].Message = redaction.RedactText(evidence.Message)
-			result.Checks[index].Evidence[evidenceIndex].Details = redaction.RedactMap(evidence.Details)
-		}
-		result.Checks[index].Recommendations = sanitizeRecommendations(check.Recommendations)
+func projectionFor(modes []privacy.Mode) (privacy.Projection, error) {
+	if len(modes) == 0 {
+		return privacy.Standard(), nil
 	}
-	return result
-}
-
-func sanitizeRecommendations(values []model.Recommendation) []model.Recommendation {
-	if values == nil {
-		return nil
+	if len(modes) != 1 {
+		return privacy.Projection{}, errors.New("report accepts at most one anonymization mode")
 	}
-	result := append([]model.Recommendation(nil), values...)
-	for index := range result {
-		result[index].Message = redaction.RedactText(result[index].Message)
-	}
-	return result
+	return privacy.New(modes[0])
 }
 
 // Render returns a report as bytes.
-func Render(diagnosis model.Diagnosis, format Format) ([]byte, error) {
+func Render(
+	diagnosis model.Diagnosis,
+	format Format,
+	modes ...privacy.Mode,
+) ([]byte, error) {
 	var buffer bytes.Buffer
-	if err := Write(&buffer, diagnosis, format); err != nil {
+	if err := Write(&buffer, diagnosis, format, modes...); err != nil {
 		return nil, err
 	}
 	return buffer.Bytes(), nil
@@ -123,6 +110,13 @@ func writeText(writer io.Writer, diagnosis model.Diagnosis) error {
 		"Status: " + string(diagnosis.Summary.Status),
 		"Started: " + formatTime(diagnosis.StartedAt),
 		"Duration: " + formatDuration(diagnosis.Duration),
+		"Redirect policy: " + redirectPolicyText(diagnosis.Options),
+		fmt.Sprintf(
+			"Redirect limits: %d hops, %d bytes per Location; actual HTTP reserve: %s",
+			diagnosis.Options.MaxRedirects,
+			diagnosis.Options.MaxRedirectLocationBytes,
+			formatDuration(diagnosis.Options.ActualHTTPReserve),
+		),
 		"",
 		"Summary: " + safePlain(diagnosis.Summary.Title),
 		safePlain(diagnosis.Summary.Description),
@@ -148,6 +142,11 @@ func writeText(writer io.Writer, diagnosis model.Diagnosis) error {
 		}
 		if result.ErrorCode != "" {
 			if _, err := fmt.Fprintf(writer, "   Error code: %s\n", result.ErrorCode); err != nil {
+				return err
+			}
+		}
+		if result.Role != "" {
+			if _, err := fmt.Fprintf(writer, "   Role: %s\n", safePlain(string(result.Role))); err != nil {
 				return err
 			}
 		}
@@ -204,11 +203,15 @@ func writeMarkdown(writer io.Writer, diagnosis model.Diagnosis) error {
 		return err
 	}
 	header := fmt.Sprintf(
-		"\n- **Target:** `%s`\n- **Status:** %s\n- **Started:** %s\n- **Duration:** %s\n\n## %s\n\n%s\n\n## Checks\n",
+		"\n- **Target:** `%s`\n- **Status:** %s\n- **Started:** %s\n- **Duration:** %s\n- **Redirect policy:** %s\n- **Redirect limits:** %d hops, %d bytes per `Location`\n- **Actual HTTP reserve:** %s\n\n## %s\n\n%s\n\n## Checks\n",
 		escapeCode(displayTarget(diagnosis.Target)),
 		escapeMarkdown(string(diagnosis.Summary.Status)),
 		formatTime(diagnosis.StartedAt),
 		formatDuration(diagnosis.Duration),
+		escapeMarkdown(redirectPolicyText(diagnosis.Options)),
+		diagnosis.Options.MaxRedirects,
+		diagnosis.Options.MaxRedirectLocationBytes,
+		formatDuration(diagnosis.Options.ActualHTTPReserve),
 		escapeMarkdown(diagnosis.Summary.Title),
 		escapeMarkdown(diagnosis.Summary.Description),
 	)
@@ -228,6 +231,11 @@ func writeMarkdown(writer io.Writer, diagnosis model.Diagnosis) error {
 		}
 		if result.ErrorCode != "" {
 			if _, err := fmt.Fprintf(writer, "- **Error code:** `%s`\n", escapeCode(result.ErrorCode)); err != nil {
+				return err
+			}
+		}
+		if result.Role != "" {
+			if _, err := fmt.Fprintf(writer, "- **Role:** `%s`\n", escapeCode(string(result.Role))); err != nil {
 				return err
 			}
 		}
@@ -304,6 +312,18 @@ func writeMarkdown(writer io.Writer, diagnosis model.Diagnosis) error {
 		}
 	}
 	return nil
+}
+
+func redirectPolicyText(options model.DiagnoseOptions) string {
+	downgrade := "block HTTPS-to-HTTP downgrade"
+	if options.AllowInsecureRedirects {
+		downgrade = "allow HTTPS-to-HTTP downgrade (explicit opt-in)"
+	}
+	privateNetwork := "block public-to-private network transitions"
+	if options.AllowPrivateRedirects {
+		privateNetwork = "allow public-to-private network transitions (explicit opt-in)"
+	}
+	return downgrade + "; " + privateNetwork + "; strip sensitive headers cross-origin"
 }
 
 func writeTextDetails(writer io.Writer, details map[string]string, indent string) error {

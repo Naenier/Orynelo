@@ -33,63 +33,65 @@ type DiagnoseActions struct {
 type DiagnoseScreen struct {
 	Root fyne.CanvasObject
 
-	content           *fyne.Container
-	target            *widget.Entry
-	mode              *widget.Select
-	ipVersion         *widget.Select
-	timeout           *widget.Entry
-	checkTimeout      *widget.Entry
-	method            *widget.Select
-	noProxy           *widget.Check
-	insecure          *widget.Check
-	maxRedirects      *widget.Entry
-	verbosity         *widget.Select
-	run               *widget.Button
-	cancel            *widget.Button
-	postActions       *fyne.Container
-	inputError        *widget.Label
-	inputErrorRow     *fyne.Container
-	inputViewport     *container.Scroll
-	inputCard         *widget.Card
-	advancedToggle    *widget.Button
-	advancedFields    *fyne.Container
-	inputCollapsed    float32
-	advancedExpanded  bool
-	idleState         fyne.CanvasObject
-	resultView        fyne.CanvasObject
-	overview          *fyne.Container
-	overviewViewport  *container.Scroll
-	overviewFooter    *fyne.Container
-	resultPanels      *container.Split
-	explorer          *container.Split
-	timelineCard      *widget.Card
-	detailsCard       *widget.Card
-	summaryTitle      *widget.Label
-	summaryTarget     *widget.Label
-	summaryDetail     *widget.Label
-	summaryStatus     *fyne.Container
-	summaryNextStep   *fyne.Container
-	summaryNextText   *widget.Label
-	activity          *widget.ProgressBarInfinite
-	timingDisclosure  *widget.Accordion
-	timeline          *widget.List
-	checks            []presenter.CheckView
-	selectedCheck     int
-	detailTitle       *widget.Label
-	detailStatus      *fyne.Container
-	detailTiming      *widget.Label
-	detailSummary     *widget.Label
-	detailEvidence    *widget.Label
-	detailRecommend   *widget.Label
-	detailTechnical   *widget.Label
-	detailRaw         *widget.Entry
-	detailsViewport   *container.Scroll
-	recommendSection  *fyne.Container
-	technicalSections *widget.Accordion
-	waterfall         *components.TimingWaterfall
-	actions           DiagnoseActions
-	texts             localization.Catalog
-	running           bool
+	content                *fyne.Container
+	target                 *widget.Entry
+	mode                   *widget.Select
+	ipVersion              *widget.Select
+	timeout                *widget.Entry
+	checkTimeout           *widget.Entry
+	method                 *widget.Select
+	noProxy                *widget.Check
+	insecure               *widget.Check
+	allowInsecureRedirects *widget.Check
+	allowPrivateRedirects  *widget.Check
+	maxRedirects           *widget.Entry
+	verbosity              *widget.Select
+	run                    *widget.Button
+	cancel                 *widget.Button
+	postActions            *fyne.Container
+	inputError             *widget.Label
+	inputErrorRow          *fyne.Container
+	inputViewport          *container.Scroll
+	inputCard              *widget.Card
+	advancedToggle         *widget.Button
+	advancedFields         *fyne.Container
+	inputCollapsed         float32
+	advancedExpanded       bool
+	idleState              fyne.CanvasObject
+	resultView             fyne.CanvasObject
+	overview               *fyne.Container
+	overviewViewport       *container.Scroll
+	overviewFooter         *fyne.Container
+	resultPanels           *container.Split
+	explorer               *container.Split
+	timelineCard           *widget.Card
+	detailsCard            *widget.Card
+	summaryTitle           *widget.Label
+	summaryTarget          *widget.Label
+	summaryDetail          *widget.Label
+	summaryStatus          *fyne.Container
+	summaryNextStep        *fyne.Container
+	summaryNextText        *widget.Label
+	activity               *widget.ProgressBarInfinite
+	timingDisclosure       *widget.Accordion
+	timeline               *widget.List
+	checks                 []presenter.CheckView
+	selectedCheck          int
+	detailTitle            *widget.Label
+	detailStatus           *fyne.Container
+	detailTiming           *widget.Label
+	detailSummary          *widget.Label
+	detailEvidence         *widget.Label
+	detailRecommend        *widget.Label
+	detailTechnical        *widget.Label
+	detailRaw              *widget.Entry
+	detailsViewport        *container.Scroll
+	recommendSection       *fyne.Container
+	technicalSections      *widget.Accordion
+	waterfall              *components.TimingWaterfall
+	actions                DiagnoseActions
+	texts                  localization.Catalog
+	running                bool
 }
 
 // NewDiagnose creates the responsive Diagnose screen.
@@ -131,6 +133,14 @@ func (s *DiagnoseScreen) buildInputs() {
 	s.method.SetSelected(s.texts.Text(localization.OptionGET))
 	s.noProxy = widget.NewCheck(s.texts.Text(localization.CommonDisableProxy), nil)
 	s.insecure = widget.NewCheck(s.texts.Text(localization.DiagnoseInsecureTLS), nil)
+	s.allowInsecureRedirects = widget.NewCheck(
+		s.texts.Text(localization.DiagnoseAllowInsecureRedirects),
+		nil,
+	)
+	s.allowPrivateRedirects = widget.NewCheck(
+		s.texts.Text(localization.DiagnoseAllowPrivateRedirects),
+		nil,
+	)
 	s.maxRedirects = widget.NewEntry()
 	s.maxRedirects.SetText(s.texts.Text(localization.DiagnoseDefaultMaxRedirects))
 	s.verbosity = widget.NewSelect([]string{
@@ -195,7 +205,11 @@ func (s *DiagnoseScreen) buildInputs() {
 			field(s.texts.Text(localization.CommonMaximumRedirects), s.maxRedirects),
 			field(s.texts.Text(localization.DiagnoseReportVerbosity), s.verbosity),
 		),
-		container.NewHBox(s.noProxy, s.insecure),
+		container.NewVBox(
+			container.NewHBox(s.noProxy, s.insecure),
+			s.allowInsecureRedirects,
+			s.allowPrivateRedirects,
+		),
 	)
 	s.advancedFields.Hide()
 	s.advancedToggle = widget.NewButtonWithIcon(
@@ -520,13 +534,13 @@ func (s *DiagnoseScreen) triggerRun() {
 // Input validates and returns the current Diagnose controls.
 func (s *DiagnoseScreen) Input() (presenter.DiagnoseInput, error) {
 	timeout, err := time.ParseDuration(strings.TrimSpace(s.timeout.Text))
-	if err != nil || timeout <= 0 {
+	if err != nil || timeout <= 0 || timeout > 24*time.Hour {
 		return presenter.DiagnoseInput{}, errors.New(
 			s.texts.Text(localization.DiagnoseInvalidTimeout),
 		)
 	}
 	checkTimeout, err := time.ParseDuration(strings.TrimSpace(s.checkTimeout.Text))
-	if err != nil || checkTimeout <= 0 {
+	if err != nil || checkTimeout <= 0 || checkTimeout > timeout {
 		return presenter.DiagnoseInput{}, errors.New(
 			s.texts.Text(localization.DiagnoseInvalidCheckTimeout),
 		)
@@ -544,16 +558,18 @@ func (s *DiagnoseScreen) Input() (presenter.DiagnoseInput, error) {
 		)
 	}
 	return presenter.DiagnoseInput{
-		Target:       target,
-		Mode:         s.modeValue(),
-		IPVersion:    s.ipVersionValue(),
-		Timeout:      timeout,
-		CheckTimeout: checkTimeout,
-		Method:       s.methodValue(),
-		NoProxy:      s.noProxy.Checked,
-		Insecure:     s.insecure.Checked,
-		MaxRedirects: redirects,
-		Verbosity:    s.verbosityValue(),
+		Target:                 target,
+		Mode:                   s.modeValue(),
+		IPVersion:              s.ipVersionValue(),
+		Timeout:                timeout,
+		CheckTimeout:           checkTimeout,
+		Method:                 s.methodValue(),
+		NoProxy:                s.noProxy.Checked,
+		Insecure:               s.insecure.Checked,
+		AllowInsecureRedirects: s.allowInsecureRedirects.Checked,
+		AllowPrivateRedirects:  s.allowPrivateRedirects.Checked,
+		MaxRedirects:           redirects,
+		Verbosity:              s.verbosityValue(),
 	}, nil
 }
 
@@ -599,6 +615,8 @@ func (s *DiagnoseScreen) SetProfile(profile presenter.ProfileView) {
 	}
 	s.noProxy.SetChecked(profile.NoProxy)
 	s.insecure.SetChecked(profile.Insecure)
+	s.allowInsecureRedirects.SetChecked(profile.AllowInsecureRedirects)
+	s.allowPrivateRedirects.SetChecked(profile.AllowPrivateRedirects)
 	s.maxRedirects.SetText(strconv.Itoa(profile.MaxRedirects))
 	if profile.Method != "" {
 		switch strings.ToUpper(profile.Method) {
@@ -882,6 +900,8 @@ func (s *DiagnoseScreen) setInputsEnabled(enabled bool) {
 		s.method.Enable()
 		s.noProxy.Enable()
 		s.insecure.Enable()
+		s.allowInsecureRedirects.Enable()
+		s.allowPrivateRedirects.Enable()
 		s.maxRedirects.Enable()
 		s.verbosity.Enable()
 		return
@@ -894,6 +914,8 @@ func (s *DiagnoseScreen) setInputsEnabled(enabled bool) {
 	s.method.Disable()
 	s.noProxy.Disable()
 	s.insecure.Disable()
+	s.allowInsecureRedirects.Disable()
+	s.allowPrivateRedirects.Disable()
 	s.maxRedirects.Disable()
 	s.verbosity.Disable()
 }
@@ -1004,7 +1026,8 @@ func preferredCheckIndex(checks []presenter.CheckView) int {
 		}
 	}
 	for index := len(checks) - 1; index >= 0; index-- {
-		if !strings.EqualFold(checks[index].Status, "skipped") {
+		if !strings.EqualFold(checks[index].Status, "skipped") &&
+			!strings.EqualFold(checks[index].Status, "not_applicable") {
 			return index
 		}
 	}

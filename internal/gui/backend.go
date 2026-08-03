@@ -5,6 +5,7 @@ import (
 
 	"github.com/Naenier/opsdoctor/internal/application"
 	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
+	"github.com/Naenier/opsdoctor/internal/privacy"
 )
 
 // Backend is the application-layer contract used by the desktop interface.
@@ -25,5 +26,5 @@ type Backend interface {
 	SaveProfile(context.Context, model.Profile) (model.Profile, error)
 	DeleteProfile(context.Context, int64) error
 
-	RenderReport(string, model.Diagnosis) ([]byte, error)
+	RenderReport(string, model.Diagnosis, privacy.Mode) ([]byte, error)
 }

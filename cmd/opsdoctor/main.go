@@ -12,6 +12,7 @@ import (
 	"github.com/Naenier/opsdoctor/internal/cli"
 	"github.com/Naenier/opsdoctor/internal/config"
 	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
+	"github.com/Naenier/opsdoctor/internal/privacy"
 )
 
 func main() {
@@ -78,12 +79,13 @@ func (l *lazyApplication) Diagnose(
 func (l *lazyApplication) RenderReport(
 	format string,
 	diagnosis model.Diagnosis,
+	mode privacy.Mode,
 ) ([]byte, error) {
 	runtime, err := l.runtime()
 	if err != nil {
 		return nil, err
 	}
-	return runtime.Service.RenderReport(format, diagnosis)
+	return runtime.Service.RenderReport(format, diagnosis, mode)
 }
 
 func (l *lazyApplication) SetLogLevel(level string) error {

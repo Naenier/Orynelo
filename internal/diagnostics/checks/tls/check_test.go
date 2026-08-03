@@ -99,6 +99,27 @@ func (f dialerFunc) DialContext(ctx context.Context, network, address string) (n
 	return f(ctx, network, address)
 }
 
+func TestCheckDistinguishesNotApplicableFromMissingPrerequisite(t *testing.T) {
+	t.Parallel()
+	check := New(nil)
+
+	notApplicable := model.NewState(
+		model.Target{Kind: model.TargetHTTP, UseTLS: false},
+		model.DefaultDiagnoseOptions("http://example.test"),
+	)
+	if result := check.Run(context.Background(), notApplicable); result.Status != model.StatusNotApplicable {
+		t.Fatalf("disabled TLS status = %q, want not_applicable", result.Status)
+	}
+
+	missingTCP := model.NewState(
+		model.Target{Kind: model.TargetHTTP, UseTLS: true},
+		model.DefaultDiagnoseOptions("https://example.test"),
+	)
+	if result := check.Run(context.Background(), missingTCP); result.Status != model.StatusSkipped {
+		t.Fatalf("missing-prerequisite TLS status = %q, want skipped", result.Status)
+	}
+}
+
 func TestCheckVerifiedCertificate(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)

@@ -23,6 +23,8 @@ flowchart TD
     CONFIG["internal/config"]
     REPORT["internal/report"]
     REDACT["internal/redaction"]
+    PRIVACY["internal/privacy"]
+    SECUREIO["internal/secureio"]
 
     CLI --> APP
     GUI --> APP
@@ -36,6 +38,7 @@ flowchart TD
     BOOT --> REPORT
     APP --> PORTS
     APP --> MODEL
+    APP --> PRIVACY
     RUNNER --> ENGINE
     RUNNER --> CHECKS
     RUNNER --> SUMMARY
@@ -45,7 +48,11 @@ flowchart TD
     SUMMARY --> MODEL
     STORE -. implements .-> PORTS
     CONFIG -. implements .-> PORTS
-    STORE --> REDACT
+    STORE --> PRIVACY
+    REPORT --> PRIVACY
+    PRIVACY --> REDACT
+    CLI --> SECUREIO
+    GUI --> SECUREIO
 ```
 
 Arrows point from a caller to a dependency. In particular:
@@ -91,6 +98,13 @@ The diagnostic runner creates a global timeout context for the run. The engine
 derives a per-check timeout without extending the parent deadline. Cancelling
 the caller context propagates through DNS, dial, TLS, HTTP, event production,
 and persistence boundaries.
+
+Before the direct-origin comparison can consume the global deadline, the
+runner reserves part of it for the actual HTTP route. When a proxy is selected,
+direct DNS, route, TCP, and TLS results are explicitly marked as auxiliary
+comparisons; the proxy-backed HTTP request remains the authoritative client
+path. Invalid proxy configuration skips those direct network probes and fails
+closed.
 
 ## Diagnostic pipeline
 
@@ -172,11 +186,24 @@ Reports are snapshots. They must never contain authorization headers, cookies,
 proxy credentials, URL userinfo, sensitive query values, or a full response
 body.
 
+`internal/privacy` is the single typed projection used by reports, history,
+profiles, events, and clipboard text. Standard mode removes credentials and
+secret-like values. User-selected strict mode additionally hides paths, query
+values, internal hosts and addresses, and local filesystem paths.
+
+`internal/secureio` atomically replaces local report files after a complete
+write, sync, close, and private-mode temporary file. CLI and desktop file
+exports use that same boundary. URI providers that expose only a write-closer
+receive complete-write and close checks but are reported honestly as
+non-atomic.
+
 ## Build metadata
 
 `internal/buildinfo` is the single source of runtime build metadata for the CLI
-version command, GUI About screen, and stored history. Make builds inject the
-commit, build date, and source-tree modification state, while
+version command, GUI About screen, and stored history. Stage 1 is version
+`0.2.0`. Make builds inject the version, commit, build date, and source-tree
+modification state, while
 `runtime/debug.ReadBuildInfo` supplies VCS and module fallbacks for local or
-`go install` builds. When no module version is available, the displayed build
-version is `dev`. Nothing rewrites a tracked Go source file during a build.
+`go install` builds. When no injected or module version is available, the
+displayed build version is the current stage version. Nothing rewrites a
+tracked Go source file during a build.

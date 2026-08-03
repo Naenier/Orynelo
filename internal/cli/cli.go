@@ -4,12 +4,10 @@ package cli
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -20,6 +18,9 @@ import (
 	"github.com/Naenier/opsdoctor/internal/buildinfo"
 	"github.com/Naenier/opsdoctor/internal/diagnostics"
 	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
+	"github.com/Naenier/opsdoctor/internal/privacy"
+	"github.com/Naenier/opsdoctor/internal/report"
+	"github.com/Naenier/opsdoctor/internal/secureio"
 )
 
 const (
@@ -33,7 +34,7 @@ const (
 // Application is the CLI-facing application contract.
 type Application interface {
 	Diagnose(context.Context, model.DiagnoseOptions, model.EventSink) (model.Diagnosis, error)
-	RenderReport(string, model.Diagnosis) ([]byte, error)
+	RenderReport(string, model.Diagnosis, privacy.Mode) ([]byte, error)
 }
 
 // Options configures a root command without process-global output state.
@@ -130,17 +131,20 @@ func Execute(ctx context.Context, root *cobra.Command, stderr io.Writer) int {
 }
 
 type diagnoseFlags struct {
-	timeout      time.Duration
-	checkTimeout time.Duration
-	ipVersion    string
-	format       string
-	output       string
-	noProxy      bool
-	insecure     bool
-	maxRedirects int
-	method       string
-	logLevel     string
-	verbose      bool
+	timeout                time.Duration
+	checkTimeout           time.Duration
+	ipVersion              string
+	format                 string
+	anonymize              string
+	output                 string
+	noProxy                bool
+	insecure               bool
+	allowInsecureRedirects bool
+	allowPrivateRedirects  bool
+	maxRedirects           int
+	method                 string
+	logLevel               string
+	verbose                bool
 }
 
 func newDiagnose(options Options) *cobra.Command {
@@ -198,15 +202,15 @@ func newDiagnose(options Options) *cobra.Command {
 					flags.noProxy = true
 				}
 			}
-			format := strings.ToLower(strings.TrimSpace(flags.format))
-			switch format {
-			case "text", "json", "markdown":
-			default:
-				return &ExitError{
-					Code: ExitInput,
-					Err:  fmt.Errorf("format must be text, json, or markdown, got %q", flags.format),
-				}
+			parsedFormat, err := report.ParseFormat(flags.format)
+			if err != nil {
+				return &ExitError{Code: ExitInput, Err: err}
 			}
+			anonymization, err := privacy.ParseMode(flags.anonymize)
+			if err != nil {
+				return &ExitError{Code: ExitInput, Err: err}
+			}
+			format := string(parsedFormat)
 			ipVersion, err := parseIPVersion(flags.ipVersion)
 			if err != nil {
 				return &ExitError{Code: ExitInput, Err: err}
@@ -220,8 +224,14 @@ func newDiagnose(options Options) *cobra.Command {
 					Err:  fmt.Errorf("method %q is not a safe diagnostic HTTP method", method),
 				}
 			}
-			if flags.timeout <= 0 || flags.checkTimeout <= 0 {
-				return &ExitError{Code: ExitInput, Err: errors.New("timeouts must be greater than zero")}
+			if flags.timeout <= 0 || flags.timeout > 24*time.Hour || flags.checkTimeout <= 0 {
+				return &ExitError{
+					Code: ExitInput,
+					Err:  errors.New("global timeout must be greater than zero and at most 24h"),
+				}
+			}
+			if flags.checkTimeout > flags.timeout {
+				return &ExitError{Code: ExitInput, Err: errors.New("check timeout must not exceed global timeout")}
 			}
 			if flags.maxRedirects < 0 || flags.maxRedirects > 50 {
 				return &ExitError{Code: ExitInput, Err: errors.New("maximum redirects must be between 0 and 50")}
@@ -233,6 +243,8 @@ func newDiagnose(options Options) *cobra.Command {
 			diagnoseOptions.IPVersion = ipVersion
 			diagnoseOptions.NoProxy = flags.noProxy
 			diagnoseOptions.Insecure = flags.insecure
+			diagnoseOptions.AllowInsecureRedirects = flags.allowInsecureRedirects
+			diagnoseOptions.AllowPrivateRedirects = flags.allowPrivateRedirects
 			diagnoseOptions.MaxRedirects = flags.maxRedirects
 			diagnoseOptions.Method = method
 			if flags.verbose {
@@ -253,12 +265,26 @@ func newDiagnose(options Options) *cobra.Command {
 				}
 				return &ExitError{Code: ExitInternal, Err: err}
 			}
-			content, err := options.Application.RenderReport(format, diagnosis)
+			content, err := options.Application.RenderReport(format, diagnosis, anonymization)
 			if err != nil {
 				return &ExitError{Code: ExitInternal, Err: err}
 			}
 			if err := writeOutput(options.Stdout, flags.output, content); err != nil {
 				return &ExitError{Code: ExitInternal, Err: err}
+			}
+			if flags.output != "" && flags.output != "-" {
+				destination, err := filepath.Abs(filepath.Clean(flags.output))
+				if err != nil {
+					return &ExitError{Code: ExitInternal, Err: fmt.Errorf("resolve report output path: %w", err)}
+				}
+				message := fmt.Sprintf("Report saved atomically to %s\n", destination)
+				written, err := io.WriteString(options.Stderr, message)
+				if err != nil {
+					return &ExitError{Code: ExitInternal, Err: fmt.Errorf("write report destination: %w", err)}
+				}
+				if written != len(message) {
+					return &ExitError{Code: ExitInternal, Err: fmt.Errorf("write report destination: %w", io.ErrShortWrite)}
+				}
 			}
 			if errors.Is(command.Context().Err(), context.Canceled) ||
 				diagnosis.Summary.Status == model.StatusCancelled {
@@ -273,10 +299,28 @@ func newDiagnose(options Options) *cobra.Command {
 	command.Flags().DurationVar(&flags.timeout, "timeout", 15*time.Second, "Global diagnostic timeout")
 	command.Flags().DurationVar(&flags.checkTimeout, "check-timeout", 5*time.Second, "Timeout for an individual check")
 	command.Flags().StringVar(&flags.ipVersion, "ip-version", "auto", "Address family: auto, 4, or 6")
-	command.Flags().StringVar(&flags.format, "format", "text", "Report format: text, json, or markdown")
+	command.Flags().StringVar(&flags.format, "format", "text", "Report format: text, json, markdown, or md")
+	command.Flags().StringVar(
+		&flags.anonymize,
+		"anonymize",
+		string(privacy.ModeStandard),
+		"Export anonymization: standard or strict",
+	)
 	command.Flags().StringVarP(&flags.output, "output", "o", "", "Write the report to a private file instead of stdout")
 	command.Flags().BoolVar(&flags.noProxy, "no-proxy", false, "Disable proxy use for this diagnosis")
 	command.Flags().BoolVar(&flags.insecure, "insecure", false, "Disable TLS verification (unsafe; reported as a warning)")
+	command.Flags().BoolVar(
+		&flags.allowInsecureRedirects,
+		"allow-insecure-redirects",
+		false,
+		"Allow HTTPS-to-HTTP redirects (unsafe; explicit opt-in)",
+	)
+	command.Flags().BoolVar(
+		&flags.allowPrivateRedirects,
+		"allow-private-redirects",
+		false,
+		"Allow redirects from public hosts to private or local networks (unsafe; explicit opt-in)",
+	)
 	command.Flags().IntVar(&flags.maxRedirects, "max-redirects", 10, "Maximum HTTP redirects")
 	command.Flags().StringVar(&flags.method, "method", "GET", "Safe HTTP method: GET, HEAD, or OPTIONS")
 	command.Flags().StringVar(&flags.logLevel, "log-level", "info", "Log level: debug, info, warn, or error")
@@ -329,87 +373,10 @@ func writeOutput(stdout io.Writer, path string, content []byte) error {
 		return nil
 	}
 
-	clean := filepath.Clean(path)
-	root, err := os.OpenRoot(filepath.Dir(clean))
-	if err != nil {
-		return fmt.Errorf("open report output directory for %q: %w", path, err)
-	}
-	defer root.Close()
-
-	name := filepath.Base(clean)
-	if err := validateReportDestination(root, name, path); err != nil {
-		return err
-	}
-	file, temporaryName, err := createReportTemporary(root)
-	if err != nil {
-		return fmt.Errorf("create temporary report output for %q: %w", path, err)
-	}
-	committed := false
-	defer func() {
-		_ = file.Close()
-		if !committed {
-			_ = root.Remove(temporaryName)
-		}
-	}()
-
-	written, writeErr := file.Write(content)
-	syncErr := file.Sync()
-	closeErr := file.Close()
-	if writeErr != nil {
-		return fmt.Errorf("write report output %q: %w", path, writeErr)
-	}
-	if written != len(content) {
-		return fmt.Errorf("write report output %q: %w", path, io.ErrShortWrite)
-	}
-	if syncErr != nil {
-		return fmt.Errorf("sync report output %q: %w", path, syncErr)
-	}
-	if closeErr != nil {
-		return fmt.Errorf("close report output %q: %w", path, closeErr)
-	}
-	if err := validateReportDestination(root, name, path); err != nil {
-		return err
-	}
-	if err := root.Rename(temporaryName, name); err != nil {
-		return fmt.Errorf("replace report output %q: %w", path, err)
-	}
-	committed = true
-	return nil
-}
-
-func validateReportDestination(root *os.Root, name, displayPath string) error {
-	info, err := root.Lstat(name)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("inspect report output %q: %w", displayPath, err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("report output %q is a symbolic link", displayPath)
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("report output %q is not a regular file", displayPath)
+	if err := secureio.WriteFile(path, content); err != nil {
+		return fmt.Errorf("write report output: %w", err)
 	}
 	return nil
-}
-
-func createReportTemporary(root *os.Root) (*os.File, string, error) {
-	var suffix [16]byte
-	if _, err := rand.Read(suffix[:]); err != nil {
-		return nil, "", err
-	}
-	name := fmt.Sprintf(".opsdoctor-report-%x", suffix)
-	file, err := root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return nil, "", err
-	}
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
-		_ = root.Remove(name)
-		return nil, "", err
-	}
-	return file, name, nil
 }
 
 func newVersion(info buildinfo.Info) *cobra.Command {

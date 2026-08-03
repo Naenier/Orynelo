@@ -32,6 +32,9 @@ import (
 	"github.com/Naenier/opsdoctor/internal/gui/presenter"
 	"github.com/Naenier/opsdoctor/internal/gui/screens"
 	apptheme "github.com/Naenier/opsdoctor/internal/gui/theme"
+	"github.com/Naenier/opsdoctor/internal/privacy"
+	"github.com/Naenier/opsdoctor/internal/redaction"
+	"github.com/Naenier/opsdoctor/internal/secureio"
 )
 
 const (
@@ -132,7 +135,8 @@ func (c *controller) buildScreens() {
 		ExportMarkdown: func() { c.exportLast("markdown") },
 		SaveProfile:    c.saveLastAsProfile,
 		CopyStep: func(check presenter.CheckView) {
-			c.app.Clipboard().SetContent(presenter.CheckDetailsText(c.texts, check))
+			text := presenter.CheckDetailsText(c.texts, check)
+			c.app.Clipboard().SetContent(privacy.Standard().Text(text))
 		},
 	})
 	cfg := c.backend.Configuration()
@@ -153,8 +157,8 @@ func (c *controller) buildScreens() {
 	})
 	c.profiles = screens.NewProfiles(c.texts, screens.ProfileActions{
 		Load:      c.loadProfiles,
-		Create:    func() { c.showProfileEditor(nil) },
-		Edit:      func(profile presenter.ProfileView) { c.showProfileEditor(&profile) },
+		Create:    func() { c.showProfileEditor(nil, false) },
+		Edit:      func(profile presenter.ProfileView) { c.showProfileEditor(&profile, false) },
 		Duplicate: c.duplicateProfile,
 		Delete:    c.confirmDeleteProfile,
 		Run:       c.runProfile,
@@ -352,6 +356,8 @@ func (c *controller) runDiagnostic(input presenter.DiagnoseInput) {
 	options.IPVersion = model.IPVersion(input.IPVersion)
 	options.NoProxy = input.NoProxy
 	options.Insecure = input.Insecure
+	options.AllowInsecureRedirects = input.AllowInsecureRedirects
+	options.AllowPrivateRedirects = input.AllowPrivateRedirects
 	options.EnableTLS = input.Mode == "tls"
 	options.MaxRedirects = input.MaxRedirects
 	options.Method = input.Method
@@ -393,6 +399,7 @@ func (c *controller) runDiagnostic(input presenter.DiagnoseInput) {
 				}
 				return
 			}
+			diagnosis = privacy.Standard().Diagnosis(diagnosis)
 			c.lastDiagnosis = diagnosis
 			c.haveDiagnosis = true
 			c.diagnose.ShowDiagnosis(presenter.Diagnosis(c.texts, diagnosis))
@@ -405,6 +412,7 @@ func (c *controller) handleEvent(runID uint64, event model.CheckEvent) {
 	if !c.shouldPresent(runID) {
 		return
 	}
+	event = privacy.Standard().Event(event)
 	var check presenter.CheckView
 	switch event.Type {
 	case model.EventCheckStarted:
@@ -625,8 +633,9 @@ func (c *controller) copySummary() {
 	if !c.haveDiagnosis {
 		return
 	}
-	text := c.lastDiagnosis.Summary.Title + "\n\n" + c.lastDiagnosis.Summary.Description
-	c.app.Clipboard().SetContent(text)
+	diagnosis := privacy.Standard().Diagnosis(c.lastDiagnosis)
+	text := diagnosis.Summary.Title + "\n\n" + diagnosis.Summary.Description
+	c.app.Clipboard().SetContent(privacy.Standard().Text(text))
 }
 
 func (c *controller) exportLast(format string) {
@@ -642,34 +651,169 @@ func (c *controller) exportLast(format string) {
 }
 
 func (c *controller) exportDiagnosis(diagnosis model.Diagnosis, format string) {
-	content, err := c.backend.RenderReport(format, diagnosis)
+	extension := exportExtension(format)
+	standardLabel := c.texts.Text(localization.DialogExportStandard)
+	strictLabel := c.texts.Text(localization.DialogExportStrict)
+	choice := widget.NewRadioGroup([]string{standardLabel, strictLabel}, nil)
+	choice.SetSelected(standardLabel)
+	filename := widget.NewEntry()
+	filename.SetText(c.texts.Text(localization.DialogReportFilenameBase) + extension)
+	content := container.NewVBox(
+		widget.NewLabel(c.texts.Text(localization.DialogExportPrivacyBody)),
+		choice,
+		widget.NewForm(widget.NewFormItem(c.texts.Text(localization.DialogExportFilename), filename)),
+	)
+	dialog.NewCustomConfirm(
+		c.texts.Text(localization.DialogExportPrivacyTitle),
+		c.texts.Text(localization.DialogExportContinue),
+		c.texts.Text(localization.CommonCancel),
+		content,
+		func(confirmed bool) {
+			if !confirmed {
+				return
+			}
+			mode := privacy.ModeStandard
+			if choice.Selected == strictLabel {
+				mode = privacy.ModeStrict
+			}
+			name, err := normalizeExportFilename(filename.Text, extension)
+			if err != nil {
+				dialog.ShowError(err, c.window)
+				return
+			}
+			c.exportDiagnosisWithPrivacy(diagnosis, format, mode, name)
+		},
+		c.window,
+	).Show()
+}
+
+func (c *controller) exportDiagnosisWithPrivacy(
+	diagnosis model.Diagnosis,
+	format string,
+	mode privacy.Mode,
+	filename string,
+) {
+	content, err := c.backend.RenderReport(format, diagnosis, mode)
 	if err != nil {
 		dialog.ShowError(err, c.window)
 		return
 	}
-	extension := ".json"
-	if format == "markdown" {
-		extension = ".md"
-	}
-	save := dialog.NewFileSave(func(writer fyne.URIWriteCloser, saveErr error) {
-		if saveErr != nil {
-			dialog.ShowError(saveErr, c.window)
+	picker := dialog.NewFolderOpen(func(folder fyne.ListableURI, pickErr error) {
+		if pickErr != nil {
+			dialog.ShowError(pickErr, c.window)
 			return
 		}
-		if writer == nil {
+		if folder == nil {
 			return
 		}
-		_, writeErr := writer.Write(content)
-		closeErr := writer.Close()
-		if writeErr != nil {
-			dialog.ShowError(writeErr, c.window)
-		} else if closeErr != nil {
-			dialog.ShowError(closeErr, c.window)
+		destination, err := exportDestination(folder, filename)
+		if err != nil {
+			dialog.ShowError(err, c.window)
+			return
 		}
+		commit := func(replaceExisting bool) {
+			atomic, err := writeExportURI(destination, content, replaceExisting)
+			if err != nil {
+				dialog.ShowError(err, c.window)
+				return
+			}
+			messageKey := localization.DialogExportSavedURIFormat
+			if atomic {
+				messageKey = localization.DialogExportSavedAtomicFormat
+			}
+			dialog.ShowInformation(
+				c.texts.Text(localization.DialogExportSavedTitle),
+				fmt.Sprintf(c.texts.Text(messageKey), destination.String()),
+				c.window,
+			)
+		}
+		exists, err := storage.Exists(destination)
+		if err != nil {
+			dialog.ShowError(fmt.Errorf("inspect export destination %q: %w", destination.String(), err), c.window)
+			return
+		}
+		if exists {
+			dialog.ShowConfirm(
+				c.texts.Text(localization.DialogExportOverwriteTitle),
+				fmt.Sprintf(c.texts.Text(localization.DialogExportOverwriteFormat), destination.String()),
+				func(confirmed bool) {
+					if confirmed {
+						commit(true)
+					}
+				},
+				c.window,
+			)
+			return
+		}
+		commit(false)
 	}, c.window)
-	save.SetFilter(storage.NewExtensionFileFilter([]string{extension}))
-	save.SetFileName(c.texts.Text(localization.DialogReportFilenameBase) + extension)
-	save.Show()
+	picker.Show()
+}
+
+func exportExtension(format string) string {
+	if format == "markdown" || format == "md" {
+		return ".md"
+	}
+	return ".json"
+}
+
+func normalizeExportFilename(input, extension string) (string, error) {
+	name := strings.TrimSpace(input)
+	if !validExportComponent(name) {
+		return "", errors.New("export file name must be a single safe path component")
+	}
+	if !strings.HasSuffix(strings.ToLower(name), strings.ToLower(extension)) {
+		name += extension
+	}
+	return name, nil
+}
+
+func exportDestination(folder fyne.URI, filename string) (fyne.URI, error) {
+	if folder == nil {
+		return nil, errors.New("export folder is unavailable")
+	}
+	if !validExportComponent(filename) {
+		return nil, errors.New("export file name must be a single safe path component")
+	}
+	return storage.Child(folder, filename)
+}
+
+func validExportComponent(value string) bool {
+	if value == "" || value == "." || value == ".." || len(value) > 255 ||
+		strings.ContainsAny(value, `/\\`) {
+		return false
+	}
+	for _, char := range value {
+		if char < 0x20 || char == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func writeExportURI(destination fyne.URI, content []byte, replaceExisting bool) (bool, error) {
+	if destination == nil {
+		return false, errors.New("export destination is unavailable")
+	}
+	if destination.Scheme() == "file" &&
+		(destination.Authority() == "" || destination.Authority() == "localhost") {
+		write := secureio.WriteFileIfAbsent
+		if replaceExisting {
+			write = secureio.WriteFile
+		}
+		if err := write(destination.Path(), content); err != nil {
+			return true, err
+		}
+		return true, nil
+	}
+	writer, err := storage.Writer(destination)
+	if err != nil {
+		return false, fmt.Errorf("open export URI %q: %w", destination.String(), err)
+	}
+	if err := secureio.WriteAndClose(writer, content); err != nil {
+		return false, fmt.Errorf("write export URI %q: %w", destination.String(), err)
+	}
+	return false, nil
 }
 
 func (c *controller) saveLastAsProfile() {
@@ -682,7 +826,7 @@ func (c *controller) saveLastAsProfile() {
 		return
 	}
 	view := profileViewFromDiagnosis(c.lastDiagnosis)
-	c.showProfileEditor(&view)
+	c.showProfileEditor(&view, c.lastDiagnosis.Target.PrivacyRedacted)
 }
 
 func (c *controller) loadHistory(search, status string) ([]presenter.HistoryView, error) {
@@ -712,6 +856,7 @@ func (c *controller) openHistory(row presenter.HistoryView) {
 
 func (c *controller) presentHistoricalDiagnosis(diagnosis model.Diagnosis) {
 	c.cancelActive()
+	diagnosis = privacy.Standard().Diagnosis(diagnosis)
 	c.lastDiagnosis = diagnosis
 	c.haveDiagnosis = true
 	c.diagnose.SetProfile(profileViewFromDiagnosis(diagnosis))
@@ -836,7 +981,10 @@ func (c *controller) startProfile(profile presenter.ProfileView) {
 	c.diagnose.TriggerRun()
 }
 
-func (c *controller) showProfileEditor(existing *presenter.ProfileView) {
+func (c *controller) showProfileEditor(
+	existing *presenter.ProfileView,
+	targetWasRedacted bool,
+) {
 	autoOption := strings.ToLower(c.texts.Text(localization.OptionAuto))
 	tcpOption := strings.ToLower(c.texts.Text(localization.OptionTCP))
 	tlsOption := strings.ToLower(c.texts.Text(localization.OptionTLS))
@@ -924,7 +1072,7 @@ func (c *controller) showProfileEditor(existing *presenter.ProfileView) {
 				return
 			}
 			checkTimeoutValue, err := time.ParseDuration(strings.TrimSpace(checkTimeout.Text))
-			if err != nil || checkTimeoutValue <= 0 {
+			if err != nil || checkTimeoutValue <= 0 || checkTimeoutValue > timeoutValue {
 				dialog.ShowError(
 					errors.New(c.texts.Text(localization.ProfilesInvalidCheckTimeout)),
 					c.window,
@@ -974,14 +1122,45 @@ func (c *controller) showProfileEditor(existing *presenter.ProfileView) {
 				)
 				return
 			}
-			if _, err := c.backend.SaveProfile(context.Background(), profile); err != nil {
-				dialog.ShowError(err, c.window)
+			projected, changed := projectProfileForSave(profile, targetWasRedacted)
+			saveProjected := func() {
+				if _, err := c.backend.SaveProfile(context.Background(), projected); err != nil {
+					dialog.ShowError(err, c.window)
+					return
+				}
+				c.profiles.Reload()
+			}
+			if changed {
+				dialog.ShowConfirm(
+					c.texts.Text(localization.DialogProfileRedactedTitle),
+					fmt.Sprintf(
+						c.texts.Text(localization.DialogProfileRedactedFormat),
+						projected.Target,
+					),
+					func(confirmed bool) {
+						if confirmed {
+							saveProjected()
+						}
+					},
+					c.window,
+				)
 				return
 			}
-			c.profiles.Reload()
+			saveProjected()
 		},
 		c.window,
 	).Show()
+}
+
+func projectProfileForSave(
+	input model.Profile,
+	privacyRedacted ...bool,
+) (model.Profile, bool) {
+	projected := privacy.Standard().Profile(input)
+	changed := projected.Target != strings.TrimSpace(input.Target)
+	alreadyRedacted := strings.Contains(input.Target, redaction.Replacement)
+	redactionProvenance := len(privacyRedacted) > 0 && privacyRedacted[0]
+	return projected, changed || alreadyRedacted || redactionProvenance
 }
 
 func profileMethodLabel(texts localization.Catalog, method string) string {
@@ -1040,17 +1219,19 @@ func profileViewFromDiagnosis(diagnosis model.Diagnosis) presenter.ProfileView {
 		mode = "tls"
 	}
 	return presenter.ProfileView{
-		Name:         diagnosis.Target.DisplayHost,
-		Target:       diagnosis.Target.Original,
-		Mode:         mode,
-		IPVersion:    string(diagnosis.Options.IPVersion),
-		Timeout:      diagnosis.Options.Timeout,
-		CheckTimeout: diagnosis.Options.CheckTimeout,
-		NoProxy:      diagnosis.Options.NoProxy,
-		MaxRedirects: diagnosis.Options.MaxRedirects,
-		Method:       diagnosis.Options.Method,
-		Insecure:     diagnosis.Options.Insecure,
-		Verbosity:    string(diagnosis.Options.ReportVerbosity),
+		Name:                   diagnosis.Target.DisplayHost,
+		Target:                 diagnosis.Target.Original,
+		Mode:                   mode,
+		IPVersion:              string(diagnosis.Options.IPVersion),
+		Timeout:                diagnosis.Options.Timeout,
+		CheckTimeout:           diagnosis.Options.CheckTimeout,
+		NoProxy:                diagnosis.Options.NoProxy,
+		MaxRedirects:           diagnosis.Options.MaxRedirects,
+		Method:                 diagnosis.Options.Method,
+		Insecure:               diagnosis.Options.Insecure,
+		AllowInsecureRedirects: diagnosis.Options.AllowInsecureRedirects,
+		AllowPrivateRedirects:  diagnosis.Options.AllowPrivateRedirects,
+		Verbosity:              string(diagnosis.Options.ReportVerbosity),
 	}
 }
 

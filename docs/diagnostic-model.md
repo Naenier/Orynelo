@@ -40,6 +40,7 @@ stateDiagram-v2
     [*] --> pending
     pending --> running
     pending --> skipped
+    pending --> not_applicable
     pending --> cancelled
     running --> passed
     running --> warning
@@ -49,6 +50,7 @@ stateDiagram-v2
     warning --> [*]
     failed --> [*]
     skipped --> [*]
+    not_applicable --> [*]
     cancelled --> [*]
 ```
 
@@ -56,7 +58,10 @@ stateDiagram-v2
 - `warning` means transport may work but a relevant risk or application-level
   problem was observed.
 - `failed` means a required condition was not met.
-- `skipped` states why a check did not apply or could not safely run.
+- `skipped` means an applicable check could not safely run because a
+  prerequisite or reserved auxiliary budget was unavailable.
+- `not_applicable` means the check does not apply to the selected target or
+  diagnostic mode.
 - `cancelled` is distinct from timeout or network failure.
 
 HTTP 4xx and 5xx results do not retroactively fail successful DNS, TCP, or TLS
@@ -70,6 +75,7 @@ Every result contains:
 type CheckResult struct {
     ID              string
     Name            string
+    Role            CheckRole
     Status          Status
     StartedAt       time.Time
     FinishedAt      time.Time
@@ -91,6 +97,16 @@ Technical errors retain structured classification after redaction. Stable
 codes such as `TCP_CONNECTION_REFUSED`, `TCP_TIMEOUT`,
 `TCP_NETWORK_UNREACHABLE`, and `TCP_CANCELLED` are preferred over matching
 operating-system error strings.
+
+`Role` distinguishes the actual client path from a temporary
+`auxiliary_direct_comparison`. This prevents a direct-origin preflight result
+from being presented as if it described a selected proxy route.
+
+Address-specific route and TCP work has a separate attempt lifecycle:
+`queued`, `running`, `completed`, `cancelled`, and `skipped`. Final state and
+evidence contain only attempts that actually started. If a run is cancelled,
+already completed attempts remain available while never-started addresses do
+not produce placeholder IP families, errors, or evidence.
 
 ## Target semantics
 
@@ -132,10 +148,37 @@ stores results in deterministic plan order.
 Events are not a durable audit log. The complete final diagnosis is the source
 of truth for reporting and history.
 
+Before any event leaves the application layer, the same typed privacy
+projection used by reports and history is applied to its result and timestamp.
+
+## Proxy and redirect contracts
+
+`ProxySelection` records the source environment variable, redacted proxy URL,
+validity, and bypass reason. Its request-capable URL is runtime-only. Invalid
+configuration has the stable `PROXY_CONFIG_INVALID` code and cannot turn into
+an implicit direct request. Configured, selected, `NO_PROXY`-bypassed,
+explicitly disabled, and non-applicable states remain distinct.
+
+Redirect evidence records each safe source and destination, cross-origin
+state, sensitive headers actually removed, network scopes, and the policy
+decision. HTTPS downgrade and public-to-private/local transitions are blocked
+unless the corresponding unsafe option was explicitly selected. Hop count,
+each `Location` value, and the global request chain are bounded.
+
 ## Summary rules
 
-A summary selects the earliest meaningful failure and then considers mixed or
-upper-layer outcomes. Claims must remain within the evidence.
+A summary first gathers all facts, creates conclusion candidates, and then
+ranks them by semantic severity: blocker, interrupted run, degraded-path
+warning, and informational note. Rule specificity breaks ties inside a
+severity. Plan order alone never allows an earlier route or partial TCP warning
+to hide a later TLS or HTTP blocker. Claims must remain within the evidence.
+
+`CHECK_TIMEOUT` is distinct from a network timeout and records the check/stage,
+configured per-check budget, elapsed time, and a dedicated evidence ID. A
+completed HTTP response is evidence about the actual client path. Failed
+direct preflight checks that conflict with that response are presented as a
+path discrepancy (and as auxiliary direct comparison when a proxy was used),
+not as proof that the actual request failed.
 
 For example:
 

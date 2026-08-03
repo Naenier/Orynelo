@@ -5,6 +5,7 @@ GOLANGCI_LINT ?= golangci-lint
 DOCKER ?= docker
 
 MODULE := github.com/Naenier/opsdoctor
+VERSION ?= 0.2.0
 COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || printf '%s' unknown)
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 MODIFIED ?= $(shell if test -n "$$(git status --porcelain --untracked-files=normal 2>/dev/null)"; then printf '%s' true; else printf '%s' false; fi)
@@ -12,6 +13,7 @@ IMAGE ?= opsdoctor:dev
 GUI_TAGS ?= migrated_fynedo
 
 LDFLAGS := -s -w -buildid= \
+	-X $(MODULE)/internal/buildinfo.version=$(VERSION) \
 	-X $(MODULE)/internal/buildinfo.commit=$(COMMIT) \
 	-X $(MODULE)/internal/buildinfo.buildDate=$(BUILD_DATE) \
 	-X $(MODULE)/internal/buildinfo.modified=$(MODIFIED)
@@ -64,6 +66,7 @@ run-gui: ## Run the desktop application.
 
 docker-build: ## Build the non-root CLI container image.
 	$(DOCKER) build \
+		--build-arg VERSION="$(VERSION)" \
 		--build-arg COMMIT="$(COMMIT)" \
 		--build-arg BUILD_DATE="$(BUILD_DATE)" \
 		--build-arg MODIFIED="$(MODIFIED)" \

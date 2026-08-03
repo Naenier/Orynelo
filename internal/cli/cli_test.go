@@ -16,6 +16,7 @@ import (
 	"github.com/Naenier/opsdoctor/internal/buildinfo"
 	"github.com/Naenier/opsdoctor/internal/config"
 	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
+	"github.com/Naenier/opsdoctor/internal/privacy"
 )
 
 type fakeApplication struct {
@@ -23,6 +24,7 @@ type fakeApplication struct {
 	err       error
 	options   model.DiagnoseOptions
 	format    string
+	mode      privacy.Mode
 	content   []byte
 }
 
@@ -51,8 +53,13 @@ func (f *fakeApplication) Diagnose(
 	return f.diagnosis, f.err
 }
 
-func (f *fakeApplication) RenderReport(format string, _ model.Diagnosis) ([]byte, error) {
+func (f *fakeApplication) RenderReport(
+	format string,
+	_ model.Diagnosis,
+	mode privacy.Mode,
+) ([]byte, error) {
 	f.format = format
+	f.mode = mode
 	return f.content, nil
 }
 
@@ -66,6 +73,7 @@ func TestDiagnoseCommand(t *testing.T) {
 		appErr     error
 		wantCode   int
 		wantFormat string
+		wantMode   privacy.Mode
 	}{
 		{
 			name:       "successful JSON report",
@@ -73,6 +81,15 @@ func TestDiagnoseCommand(t *testing.T) {
 			status:     model.StatusPassed,
 			wantCode:   ExitOK,
 			wantFormat: "json",
+			wantMode:   privacy.ModeStandard,
+		},
+		{
+			name:       "markdown alias with strict anonymization",
+			args:       []string{"diagnose", "https://example.test", "--format", "md", "--anonymize", "strict"},
+			status:     model.StatusPassed,
+			wantCode:   ExitOK,
+			wantFormat: "markdown",
+			wantMode:   privacy.ModeStrict,
 		},
 		{
 			name:       "failed critical check",
@@ -80,6 +97,7 @@ func TestDiagnoseCommand(t *testing.T) {
 			status:     model.StatusFailed,
 			wantCode:   ExitFailure,
 			wantFormat: "text",
+			wantMode:   privacy.ModeStandard,
 		},
 		{
 			name:     "invalid IP preference",
@@ -90,6 +108,18 @@ func TestDiagnoseCommand(t *testing.T) {
 		{
 			name:     "unsafe method",
 			args:     []string{"diagnose", "host.test", "--method", "DELETE"},
+			status:   model.StatusPassed,
+			wantCode: ExitInput,
+		},
+		{
+			name:     "per-check timeout exceeds global timeout",
+			args:     []string{"diagnose", "host.test", "--timeout", "2s", "--check-timeout", "3s"},
+			status:   model.StatusPassed,
+			wantCode: ExitInput,
+		},
+		{
+			name:     "global timeout exceeds application limit",
+			args:     []string{"diagnose", "host.test", "--timeout", "25h"},
 			status:   model.StatusPassed,
 			wantCode: ExitInput,
 		},
@@ -125,6 +155,9 @@ func TestDiagnoseCommand(t *testing.T) {
 			if tt.wantFormat != "" && app.format != tt.wantFormat {
 				t.Errorf("render format = %q, want %q", app.format, tt.wantFormat)
 			}
+			if tt.wantMode != "" && app.mode != tt.wantMode {
+				t.Errorf("anonymization mode = %q, want %q", app.mode, tt.wantMode)
+			}
 			if tt.wantCode == ExitOK && !strings.Contains(stdout.String(), "report") {
 				t.Errorf("stdout = %q, want report", stdout.String())
 			}
@@ -155,6 +188,13 @@ func TestDiagnoseWritesPrivateOutput(t *testing.T) {
 	}
 	if string(content) != "# report\n" {
 		t.Fatalf("report = %q", content)
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), absolute) {
+		t.Fatalf("success message does not contain exact output path %q: %q", absolute, stderr.String())
 	}
 	if runtime.GOOS != "windows" {
 		info, err := os.Stat(path)
@@ -267,6 +307,43 @@ func TestDiagnoseUsesPersistedDefaultsUnlessFlagChanged(t *testing.T) {
 		app.options.MaxRedirects != 3 ||
 		!app.options.NoProxy {
 		t.Errorf("persisted options not applied: %+v", app.options)
+	}
+}
+
+func TestDiagnoseRedirectPolicyRequiresExplicitFlags(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name      string
+		args      []string
+		downgrade bool
+		private   bool
+	}{
+		{name: "safe defaults", args: []string{"diagnose", "host.test"}},
+		{
+			name:      "explicit opt-ins",
+			args:      []string{"diagnose", "host.test", "--allow-insecure-redirects", "--allow-private-redirects"},
+			downgrade: true,
+			private:   true,
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			app := &fakeApplication{
+				diagnosis: model.Diagnosis{Summary: model.Summary{Status: model.StatusPassed}},
+				content:   []byte("report\n"),
+			}
+			var stdout, stderr bytes.Buffer
+			root := NewRoot(Options{Application: app, Stdout: &stdout, Stderr: &stderr})
+			root.SetArgs(test.args)
+			if code := Execute(context.Background(), root, &stderr); code != ExitOK {
+				t.Fatalf("Execute() = %d; stderr=%q", code, stderr.String())
+			}
+			if app.options.AllowInsecureRedirects != test.downgrade ||
+				app.options.AllowPrivateRedirects != test.private {
+				t.Fatalf("options = %+v", app.options)
+			}
+		})
 	}
 }
 

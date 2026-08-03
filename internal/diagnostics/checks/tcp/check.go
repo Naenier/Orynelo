@@ -37,6 +37,11 @@ type Check struct {
 	Now    func() time.Time
 }
 
+type attemptSlot struct {
+	attempt model.TCPAttempt
+	started bool
+}
+
 // New constructs a direct TCP check.
 func New(dialer Dialer) *Check {
 	if dialer == nil {
@@ -50,7 +55,7 @@ func (*Check) Name() string { return "TCP connection" }
 
 func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 	resolved := state.DNS()
-	addresses := append(append([]net.IP(nil), resolved.IPv4...), resolved.IPv6...)
+	addresses := usableAddresses(resolved.IPv4, resolved.IPv6)
 	if len(addresses) == 0 {
 		return model.CheckResult{
 			ID:      c.ID(),
@@ -60,7 +65,13 @@ func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 		}
 	}
 
-	attempts := make([]model.TCPAttempt, len(addresses))
+	slots := make([]attemptSlot, len(addresses))
+	for index, remote := range addresses {
+		slots[index].attempt = model.TCPAttempt{
+			RemoteIP: append(net.IP(nil), remote...),
+			State:    model.AttemptStateQueued,
+		}
+	}
 	jobs := make(chan int)
 	workers := state.Options.MaxConcurrency
 	if workers < 1 {
@@ -78,59 +89,104 @@ func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 				remote := addresses[index]
 				address := net.JoinHostPort(remote.String(), strconv.Itoa(int(state.Target.Port)))
 				started := c.now()
+				attempt := slots[index].attempt
+				attempt.State = model.AttemptStateRunning
+				slots[index] = attemptSlot{attempt: attempt, started: true}
 				connection, err := c.Dialer.DialContext(ctx, "tcp", address)
-				attempt := model.TCPAttempt{
-					RemoteIP: remote,
-					Duration: c.now().Sub(started),
-					Success:  err == nil,
-				}
+				attempt.Duration = c.now().Sub(started)
+				attempt.Success = err == nil
 				if err == nil {
-					attempt.LocalAddr = connection.LocalAddr().String()
+					if connection.LocalAddr() != nil {
+						attempt.LocalAddr = connection.LocalAddr().String()
+					}
 					_ = connection.Close()
+					attempt.State = model.AttemptStateCompleted
 				} else {
 					attempt.ErrorCode = ClassifyError(err)
 					attempt.Error = err.Error()
+					attempt.State = model.AttemptStateCompleted
+					if ctx.Err() != nil {
+						attempt.State = model.AttemptStateCancelled
+					}
 				}
-				attempts[index] = attempt
+				slots[index] = attemptSlot{attempt: attempt, started: true}
 			}
 		}()
 	}
+	cancelled := false
 	for index := range addresses {
+		if ctx.Err() != nil {
+			cancelled = true
+			break
+		}
 		select {
 		case jobs <- index:
 		case <-ctx.Done():
-			close(jobs)
-			wait.Wait()
-			state.SetTCP(attempts)
-			return c.result(attempts, true)
+			cancelled = true
+		}
+		if cancelled {
+			break
 		}
 	}
 	close(jobs)
 	wait.Wait()
+	if ctx.Err() != nil {
+		cancelled = true
+	}
+	attempts := startedAttempts(slots)
 	state.SetTCP(attempts)
-	return c.result(attempts, ctx.Err() != nil)
+	return c.result(attempts, len(addresses), cancelled)
 }
 
-func (c *Check) result(attempts []model.TCPAttempt, cancelled bool) model.CheckResult {
+func startedAttempts(slots []attemptSlot) []model.TCPAttempt {
+	attempts := make([]model.TCPAttempt, 0, len(slots))
+	for _, slot := range slots {
+		if slot.started {
+			attempts = append(attempts, slot.attempt)
+		}
+	}
+	return attempts
+}
+
+func (c *Check) result(attempts []model.TCPAttempt, total int, cancelled bool) model.CheckResult {
 	evidence := make([]model.Evidence, 0, len(attempts))
 	successes := 0
+	completed := 0
 	codes := make(map[string]int)
 	for index, attempt := range attempts {
+		if attempt.RemoteIP == nil ||
+			attempt.State == model.AttemptStateQueued ||
+			attempt.State == model.AttemptStateSkipped {
+			continue
+		}
 		details := map[string]string{
 			"remoteIp": attempt.RemoteIP.String(),
 			"family":   family(attempt.RemoteIP),
 			"duration": attempt.Duration.String(),
 			"success":  strconv.FormatBool(attempt.Success),
+			"state":    string(attempt.State),
 		}
 		message := "TCP connection succeeded."
 		if attempt.Success {
 			successes++
-			details["localAddress"] = attempt.LocalAddr
-		} else if attempt.RemoteIP != nil {
+			if attempt.LocalAddr != "" {
+				details["localAddress"] = attempt.LocalAddr
+			}
+		} else {
 			message = "TCP connection failed."
-			details["errorCode"] = attempt.ErrorCode
-			details["error"] = attempt.Error
-			codes[attempt.ErrorCode]++
+			if attempt.State == model.AttemptStateCancelled {
+				message = "TCP connection attempt was cancelled."
+			}
+			if attempt.ErrorCode != "" {
+				details["errorCode"] = attempt.ErrorCode
+				codes[attempt.ErrorCode]++
+			}
+			if attempt.Error != "" {
+				details["error"] = attempt.Error
+			}
+		}
+		if attempt.State == model.AttemptStateCompleted {
+			completed++
 		}
 		evidence = append(evidence, model.Evidence{
 			ID:      fmt.Sprintf("tcp.%d", index),
@@ -141,11 +197,15 @@ func (c *Check) result(attempts []model.TCPAttempt, cancelled bool) model.CheckR
 	}
 
 	if cancelled {
+		neverStarted := total - len(attempts)
+		if neverStarted < 0 {
+			neverStarted = 0
+		}
 		return model.CheckResult{
 			ID:        c.ID(),
 			Name:      c.Name(),
 			Status:    model.StatusCancelled,
-			Summary:   "TCP connection attempts were cancelled.",
+			Summary:   fmt.Sprintf("TCP connection attempts were cancelled after %d of %d started attempt(s) completed; %d of %d address(es) were never started.", completed, len(attempts), neverStarted, total),
 			Evidence:  evidence,
 			ErrorCode: ErrorCancelled,
 		}
@@ -205,6 +265,19 @@ func (c *Check) result(attempts []model.TCPAttempt, cancelled bool) model.CheckR
 			Message:  "Verify routing, packet filtering, and that the service is listening on the target port.",
 		}},
 	}
+}
+
+func usableAddresses(groups ...[]net.IP) []net.IP {
+	var addresses []net.IP
+	for _, group := range groups {
+		for _, address := range group {
+			if address == nil || address.To16() == nil {
+				continue
+			}
+			addresses = append(addresses, append(net.IP(nil), address...))
+		}
+	}
+	return addresses
 }
 
 // ClassifyError maps wrapped cross-platform network errors to stable codes.

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
+	"github.com/Naenier/opsdoctor/internal/privacy"
 	"github.com/Naenier/opsdoctor/internal/redaction"
 )
 
@@ -17,24 +18,31 @@ type fakeRunner struct {
 	diagnosis model.Diagnosis
 	err       error
 	options   model.DiagnoseOptions
+	events    []model.CheckEvent
 }
 
 func (f *fakeRunner) Diagnose(
 	_ context.Context,
 	options model.DiagnoseOptions,
-	_ model.EventSink,
+	sink model.EventSink,
 ) (model.Diagnosis, error) {
 	f.options = options
+	for _, event := range f.events {
+		if sink != nil {
+			sink(event)
+		}
+	}
 	return f.diagnosis, f.err
 }
 
 type fakePersistence struct {
-	saved     model.Diagnosis
-	saveLimit int
-	saveErr   error
-	history   []model.HistoryEntry
-	profiles  []model.Profile
-	closed    bool
+	saved         model.Diagnosis
+	saveLimit     int
+	saveErr       error
+	history       []model.HistoryEntry
+	profiles      []model.Profile
+	profileResult *model.Profile
+	closed        bool
 }
 
 func (f *fakePersistence) SaveDiagnosis(_ context.Context, diagnosis model.Diagnosis, limit int) error {
@@ -54,11 +62,17 @@ func (f *fakePersistence) ListProfiles(context.Context) ([]model.Profile, error)
 	return append([]model.Profile(nil), f.profiles...), nil
 }
 func (f *fakePersistence) CreateProfile(_ context.Context, profile model.Profile) (model.Profile, error) {
+	if f.profileResult != nil {
+		return *f.profileResult, nil
+	}
 	profile.ID = 1
 	f.profiles = append(f.profiles, profile)
 	return profile, nil
 }
 func (f *fakePersistence) UpdateProfile(_ context.Context, profile model.Profile) (model.Profile, error) {
+	if f.profileResult != nil {
+		return *f.profileResult, nil
+	}
 	return profile, nil
 }
 func (f *fakePersistence) DeleteProfile(context.Context, int64) error { return nil }
@@ -86,6 +100,7 @@ func TestServiceDiagnoseAddsBuildAndPersists(t *testing.T) {
 	cfg.Diagnostics.CertificateWarningThreshold = 7 * 24 * time.Hour
 	runner := &fakeRunner{diagnosis: model.Diagnosis{
 		ID:      "diagnosis-1",
+		Options: model.DiagnoseOptions{UserAgent: "OpsDoctor token=persisted-user-agent-secret"},
 		Summary: model.Summary{Status: model.StatusPassed},
 	}}
 	persistence := &fakePersistence{}
@@ -95,7 +110,7 @@ func TestServiceDiagnoseAddsBuildAndPersists(t *testing.T) {
 		ConfigStore: &fakeConfigStore{},
 		Config:      cfg,
 		Build:       model.BuildInfo{Version: "1.2.3", Commit: "abc"},
-		RenderReport: func(string, model.Diagnosis) ([]byte, error) {
+		RenderReport: func(string, model.Diagnosis, privacy.Mode) ([]byte, error) {
 			return []byte("report"), nil
 		},
 	})
@@ -119,6 +134,86 @@ func TestServiceDiagnoseAddsBuildAndPersists(t *testing.T) {
 	if runner.options.UserAgent != "OpsDoctor-Test/1" ||
 		runner.options.CertificateWarningThreshold != 7*24*time.Hour {
 		t.Errorf("config-backed diagnostic options = %+v", runner.options)
+	}
+	if strings.Contains(got.Options.UserAgent, "persisted-user-agent-secret") ||
+		strings.Contains(persistence.saved.Options.UserAgent, "persisted-user-agent-secret") {
+		t.Fatalf("user agent crossed the privacy boundary: got=%q saved=%q", got.Options.UserAgent, persistence.saved.Options.UserAgent)
+	}
+}
+
+func TestServiceProjectsEventsBeforeDeliveringThem(t *testing.T) {
+	t.Parallel()
+
+	offset := time.FixedZone("non-utc", 3*60*60)
+	at := time.Date(2026, 8, 3, 12, 0, 0, 0, offset)
+	result := model.CheckResult{
+		StartedAt: at,
+		Summary:   "request https://alice:password@example.test/?token=event-secret",
+		Evidence: []model.Evidence{{Details: map[string]string{
+			"responseHeader.Authorization": "Bearer namespaced-event-secret",
+		}}},
+	}
+	runner := &fakeRunner{
+		diagnosis: model.Diagnosis{Summary: model.Summary{Status: model.StatusPassed}},
+		events:    []model.CheckEvent{{At: at, Result: &result}},
+	}
+	cfg := DefaultConfig()
+	cfg.History.Enabled = false
+	service, err := New(Dependencies{Runner: runner, Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var delivered model.CheckEvent
+	if _, err := service.Diagnose(
+		context.Background(),
+		model.DefaultDiagnoseOptions("example.test"),
+		func(event model.CheckEvent) { delivered = event },
+	); err != nil {
+		t.Fatal(err)
+	}
+	if delivered.Result == nil || strings.Contains(delivered.Result.Summary, "event-secret") ||
+		strings.Contains(delivered.Result.Evidence[0].Details["responseHeader.Authorization"], "namespaced-event-secret") {
+		t.Fatalf("event was not projected: %#v", delivered)
+	}
+	if delivered.At.Location() != time.UTC || delivered.Result.StartedAt.Location() != time.UTC {
+		t.Fatalf("event timestamps are not UTC: %#v", delivered)
+	}
+	if !strings.Contains(result.Summary, "event-secret") {
+		t.Fatal("event projection mutated the runner's result")
+	}
+}
+
+func TestServiceProjectsProfileAdapterResult(t *testing.T) {
+	t.Parallel()
+
+	returned := model.Profile{
+		ID:           1,
+		Name:         "unsafe adapter result",
+		Target:       "https://alice:password@example.test/?token=adapter-secret",
+		Mode:         model.DiagnosticModeAuto,
+		IPVersion:    model.IPVersionAuto,
+		Timeout:      15 * time.Second,
+		CheckTimeout: 5 * time.Second,
+		MaxRedirects: 10,
+		Method:       "GET",
+	}
+	persistence := &fakePersistence{profileResult: &returned}
+	service, err := New(Dependencies{
+		Runner:      &fakeRunner{},
+		Persistence: persistence,
+		Config:      DefaultConfig(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err := service.SaveProfile(context.Background(), returned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"alice", "password", "adapter-secret"} {
+		if strings.Contains(saved.Target, secret) {
+			t.Fatalf("profile adapter result leaked %q: %#v", secret, saved)
+		}
 	}
 }
 

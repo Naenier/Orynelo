@@ -12,7 +12,10 @@ import (
 	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
 )
 
-const ErrorDiscoveryFailed = "ROUTE_DISCOVERY_FAILED"
+const (
+	ErrorDiscoveryFailed = "ROUTE_DISCOVERY_FAILED"
+	ErrorCancelled       = "ROUTE_CANCELLED"
+)
 
 // SourceDiscoverer determines the local source IP for a remote endpoint.
 type SourceDiscoverer interface {
@@ -44,6 +47,11 @@ type Check struct {
 	Interfaces func() ([]net.Interface, error)
 }
 
+type routeSlot struct {
+	result  model.RouteInfo
+	started bool
+}
+
 // New constructs a route check using UDP route selection and net.Interfaces.
 func New(discoverer SourceDiscoverer) *Check {
 	if discoverer == nil {
@@ -57,7 +65,7 @@ func (*Check) Name() string { return "Route and source address" }
 
 func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 	dnsResult := state.DNS()
-	addresses := append(append([]net.IP(nil), dnsResult.IPv4...), dnsResult.IPv6...)
+	addresses := usableAddresses(dnsResult.IPv4, dnsResult.IPv6)
 	if len(addresses) == 0 {
 		return model.CheckResult{
 			ID:      c.ID(),
@@ -67,7 +75,14 @@ func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 		}
 	}
 
-	results := make([]model.RouteInfo, len(addresses))
+	slots := make([]routeSlot, len(addresses))
+	for index, remote := range addresses {
+		slots[index].result = model.RouteInfo{
+			RemoteIP: append(net.IP(nil), remote...),
+			Family:   family(remote),
+			State:    model.AttemptStateQueued,
+		}
+	}
 	jobs := make(chan int)
 	workers := state.Options.MaxConcurrency
 	if workers < 1 {
@@ -83,11 +98,17 @@ func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 			defer wait.Done()
 			for index := range jobs {
 				remote := addresses[index]
-				result := model.RouteInfo{RemoteIP: remote, Family: family(remote)}
+				result := slots[index].result
+				result.State = model.AttemptStateRunning
+				slots[index] = routeSlot{result: result, started: true}
 				local, err := c.Discoverer.SourceIP(ctx, remote, state.Target.Port)
 				if err != nil {
 					result.Error = err.Error()
-					results[index] = result
+					result.State = model.AttemptStateCompleted
+					if ctx.Err() != nil {
+						result.State = model.AttemptStateCancelled
+					}
+					slots[index] = routeSlot{result: result, started: true}
 					continue
 				}
 				result.LocalIP = local
@@ -99,35 +120,51 @@ func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 					result.InterfaceUp = iface.Flags&net.FlagUp != 0
 					result.MTU = iface.MTU
 				}
-				results[index] = result
+				result.State = model.AttemptStateCompleted
+				slots[index] = routeSlot{result: result, started: true}
 			}
 		}()
 	}
+	cancelled := false
 	for index := range addresses {
+		if ctx.Err() != nil {
+			cancelled = true
+			break
+		}
 		select {
 		case jobs <- index:
 		case <-ctx.Done():
-			close(jobs)
-			wait.Wait()
-			state.SetRoutes(results)
-			return cancelled(c, results)
+			cancelled = true
+		}
+		if cancelled {
+			break
 		}
 	}
 	close(jobs)
 	wait.Wait()
-	state.SetRoutes(results)
-
 	if ctx.Err() != nil {
-		return cancelled(c, results)
+		cancelled = true
 	}
+	results := startedRoutes(slots)
+	state.SetRoutes(results)
+	return c.result(results, len(addresses), cancelled)
+}
 
+func (c *Check) result(results []model.RouteInfo, total int, cancelled bool) model.CheckResult {
 	sources := 0
 	complete := 0
+	completedAttempts := 0
 	evidence := make([]model.Evidence, 0, len(results))
 	for index, result := range results {
+		if result.RemoteIP == nil ||
+			result.State == model.AttemptStateQueued ||
+			result.State == model.AttemptStateSkipped {
+			continue
+		}
 		details := map[string]string{
 			"remoteIp": result.RemoteIP.String(),
 			"family":   result.Family,
+			"state":    string(result.State),
 		}
 		message := "Route source discovery failed."
 		if result.LocalIP != nil {
@@ -146,12 +183,31 @@ func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 		} else if result.Error != "" {
 			details["error"] = result.Error
 		}
+		if result.State == model.AttemptStateCancelled {
+			message = "Route source discovery was cancelled after it started."
+		} else if result.State == model.AttemptStateCompleted {
+			completedAttempts++
+		}
 		evidence = append(evidence, model.Evidence{
 			ID:      fmt.Sprintf("route.%d", index),
 			Code:    "ROUTE_SOURCE",
 			Message: message,
 			Details: details,
 		})
+	}
+	if cancelled {
+		neverStarted := total - len(results)
+		if neverStarted < 0 {
+			neverStarted = 0
+		}
+		return model.CheckResult{
+			ID:        c.ID(),
+			Name:      c.Name(),
+			Status:    model.StatusCancelled,
+			Summary:   fmt.Sprintf("Route discovery was cancelled after %d of %d started attempt(s) completed; %d of %d address(es) were never started.", completedAttempts, len(results), neverStarted, total),
+			Evidence:  evidence,
+			ErrorCode: ErrorCancelled,
+		}
 	}
 
 	status := model.StatusPassed
@@ -172,6 +228,29 @@ func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 		Evidence:  evidence,
 		ErrorCode: errorCode,
 	}
+}
+
+func startedRoutes(slots []routeSlot) []model.RouteInfo {
+	results := make([]model.RouteInfo, 0, len(slots))
+	for _, slot := range slots {
+		if slot.started {
+			results = append(results, slot.result)
+		}
+	}
+	return results
+}
+
+func usableAddresses(groups ...[]net.IP) []net.IP {
+	var addresses []net.IP
+	for _, group := range groups {
+		for _, address := range group {
+			if address == nil || address.To16() == nil {
+				continue
+			}
+			addresses = append(addresses, append(net.IP(nil), address...))
+		}
+	}
+	return addresses
 }
 
 func (c *Check) interfaceFor(local net.IP) (*net.Interface, error) {
@@ -215,14 +294,4 @@ func family(ip net.IP) string {
 		return "ipv4"
 	}
 	return "ipv6"
-}
-
-func cancelled(c *Check, routes []model.RouteInfo) model.CheckResult {
-	return model.CheckResult{
-		ID:        c.ID(),
-		Name:      c.Name(),
-		Status:    model.StatusCancelled,
-		Summary:   "Route discovery was cancelled.",
-		ErrorCode: "ROUTE_CANCELLED",
-	}
 }

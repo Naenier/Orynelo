@@ -159,7 +159,10 @@ func TestDiagnosisHistoryCRUDRedactionAndNormalizedRows(t *testing.T) {
 
 	store := openMemoryStore(t)
 	ctx := context.Background()
-	input := testDiagnosis("run-1", time.Date(2026, 7, 28, 10, 0, 0, 0, time.UTC))
+	input := testDiagnosis(
+		"run-1",
+		time.Date(2026, 7, 28, 10, 0, 0, 0, time.FixedZone("non-utc", 3*60*60)),
+	)
 	if err := store.SaveDiagnosis(ctx, input, 200); err != nil {
 		t.Fatalf("SaveDiagnosis() error = %v", err)
 	}
@@ -194,8 +197,10 @@ func TestDiagnosisHistoryCRUDRedactionAndNormalizedRows(t *testing.T) {
 		"password",
 		"target-secret",
 		"option-secret",
+		"user-agent-secret",
 		"message-secret",
 		"details-secret",
+		"namespaced-storage-secret",
 		"recommendation-secret",
 	} {
 		if strings.Contains(raw, secret) {
@@ -204,6 +209,9 @@ func TestDiagnosisHistoryCRUDRedactionAndNormalizedRows(t *testing.T) {
 	}
 	if !strings.Contains(raw, SnapshotSchemaVersion) || !strings.Contains(raw, "[REDACTED]") {
 		t.Errorf("snapshot is not explicitly versioned/redacted: %s", raw)
+	}
+	if strings.Contains(raw, "+03:00") {
+		t.Errorf("snapshot timestamp is not UTC: %s", raw)
 	}
 	if input.Target.RequestURL == "" || !strings.Contains(input.Target.Original, "alice") {
 		t.Fatal("SaveDiagnosis() mutated caller input")
@@ -359,7 +367,7 @@ func TestProfileCRUDAndDuplicate(t *testing.T) {
 	store := openMemoryStore(t)
 	ctx := context.Background()
 	profile := testProfile("Production")
-	profile.Target = "https://alice:password@example.test/?api_key=profile-secret&view=full"
+	profile.Target = "alice:password@example.test/%zz?api_key=profile-secret&view=full#access_token=fragment-secret"
 	profile.Mode = model.DiagnosticModeTLS
 
 	created, err := store.CreateProfile(ctx, profile)
@@ -369,7 +377,7 @@ func TestProfileCRUDAndDuplicate(t *testing.T) {
 	if created.ID <= 0 || created.CreatedAt.IsZero() || created.UpdatedAt.IsZero() {
 		t.Fatalf("CreateProfile() = %#v", created)
 	}
-	for _, secret := range []string{"alice", "password", "profile-secret"} {
+	for _, secret := range []string{"alice", "password", "profile-secret", "fragment-secret"} {
 		if strings.Contains(created.Target, secret) {
 			t.Errorf("created target contains %q: %q", secret, created.Target)
 		}
@@ -519,6 +527,7 @@ func testDiagnosis(id string, started time.Time) model.Diagnosis {
 		},
 		Options: model.DiagnoseOptions{
 			Target:       "https://example.test/?access_token=option-secret",
+			UserAgent:    "OpsDoctor token=user-agent-secret",
 			Timeout:      15 * time.Second,
 			CheckTimeout: 5 * time.Second,
 			IPVersion:    model.IPVersionAuto,
@@ -544,8 +553,9 @@ func testDiagnosis(id string, started time.Time) model.Diagnosis {
 						Code:    "HTTP_STATUS",
 						Message: "Authorization: Bearer message-secret",
 						Details: map[string]string{
-							"Authorization": "Bearer details-secret",
-							"location":      "https://u:p@example.test/?sig=details-secret",
+							"Authorization":                "Bearer details-secret",
+							"responseHeader.Authorization": "Bearer namespaced-storage-secret",
+							"location":                     "https://u:p@example.test/?sig=details-secret",
 						},
 					},
 				},

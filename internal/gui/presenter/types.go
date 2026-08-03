@@ -6,16 +6,18 @@ import "time"
 
 // DiagnoseInput is the set of controls exposed by the Diagnose screen.
 type DiagnoseInput struct {
-	Target       string
-	Mode         string
-	IPVersion    string
-	Timeout      time.Duration
-	CheckTimeout time.Duration
-	Method       string
-	NoProxy      bool
-	Insecure     bool
-	MaxRedirects int
-	Verbosity    string
+	Target                 string
+	Mode                   string
+	IPVersion              string
+	Timeout                time.Duration
+	CheckTimeout           time.Duration
+	Method                 string
+	NoProxy                bool
+	Insecure               bool
+	AllowInsecureRedirects bool
+	AllowPrivateRedirects  bool
+	MaxRedirects           int
+	Verbosity              string
 }
 
 // CheckView is a display-ready diagnostic step.
@@ -76,8 +78,10 @@ type ProfileView struct {
 	NoProxy      bool
 	MaxRedirects int
 	Method       string
-	// Insecure and Verbosity are transient Diagnose-screen controls. Stored
-	// profiles receive safe defaults; history reruns can restore their values.
-	Insecure  bool
-	Verbosity string
+	// Unsafe opt-ins and Verbosity are transient Diagnose-screen controls.
+	// Stored profiles receive safe defaults; history reruns can restore them.
+	Insecure               bool
+	AllowInsecureRedirects bool
+	AllowPrivateRedirects  bool
+	Verbosity              string
 }

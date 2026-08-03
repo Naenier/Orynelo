@@ -90,6 +90,51 @@ func TestRunPerCheckTimeout(t *testing.T) {
 	if results[0].Status != model.StatusFailed || results[0].ErrorCode != ErrorCheckTimeout {
 		t.Fatalf("result = %#v", results[0])
 	}
+	if len(results[0].Evidence) != 1 {
+		t.Fatalf("timeout evidence = %#v", results[0].Evidence)
+	}
+	evidence := results[0].Evidence[0]
+	if evidence.ID != "slow.timeout" || evidence.CheckID != "slow" ||
+		evidence.Code != ErrorCheckTimeout ||
+		evidence.Details["stage"] != "slow" ||
+		evidence.Details["configuredBudget"] != "5ms" ||
+		evidence.Details["elapsed"] == "" {
+		t.Fatalf("timeout evidence = %#v", evidence)
+	}
+}
+
+type failedOnDeadlineCheck struct{}
+
+func (failedOnDeadlineCheck) ID() string   { return "deadline_failure" }
+func (failedOnDeadlineCheck) Name() string { return "Deadline failure" }
+func (failedOnDeadlineCheck) Run(ctx context.Context, _ *model.State) model.CheckResult {
+	<-ctx.Done()
+	return model.CheckResult{
+		Status:    model.StatusFailed,
+		Summary:   "transport deadline elapsed",
+		ErrorCode: "TRANSPORT_TIMEOUT",
+		Evidence: []model.Evidence{{
+			ID:      "deadline_failure.partial",
+			Message: "A partial transport observation completed before timeout.",
+		}},
+	}
+}
+
+func TestRunNormalizesFailedTransportDeadlineAsCheckTimeout(t *testing.T) {
+	t.Parallel()
+	results := New(Config{
+		CheckTimeout:   5 * time.Millisecond,
+		MaxConcurrency: 1,
+	}).Run(context.Background(), &model.State{}, Plan{{failedOnDeadlineCheck{}}}, nil)
+
+	if results[0].Status != model.StatusFailed || results[0].ErrorCode != ErrorCheckTimeout {
+		t.Fatalf("result = %#v", results[0])
+	}
+	if len(results[0].Evidence) != 2 ||
+		results[0].Evidence[0].ID != "deadline_failure.partial" ||
+		results[0].Evidence[1].Code != ErrorCheckTimeout {
+		t.Fatalf("timeout evidence = %#v", results[0].Evidence)
+	}
 }
 
 func TestRunCancellationAndDeadlineAreDistinct(t *testing.T) {

@@ -66,7 +66,7 @@ func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 		return model.CheckResult{
 			ID:      c.ID(),
 			Name:    c.Name(),
-			Status:  model.StatusSkipped,
+			Status:  model.StatusNotApplicable,
 			Summary: "TLS is not enabled for this target.",
 		}
 	}
