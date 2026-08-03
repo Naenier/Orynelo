@@ -22,7 +22,9 @@ type diagnoseOptionProblem struct {
 	err   error
 }
 
+// Error returns the validation message associated with the invalid field.
 func (problem *diagnoseOptionProblem) Error() string { return problem.err.Error() }
+// Unwrap returns the underlying validation error.
 func (problem *diagnoseOptionProblem) Unwrap() error { return problem.err }
 
 func invalidDiagnoseOption(field, message string) error {

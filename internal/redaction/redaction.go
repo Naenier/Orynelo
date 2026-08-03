@@ -292,6 +292,7 @@ func removeAuthorityUserinfo(raw string) string {
 // RedactHeaders returns a deep copy of HTTP headers. Credential-bearing
 // headers are replaced completely; URLs embedded in other headers are scrubbed
 // as well.
+// RedactHeaders returns a copy with credential-bearing header values removed.
 func RedactHeaders(input http.Header) http.Header {
 	if input == nil {
 		return nil

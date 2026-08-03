@@ -81,9 +81,12 @@ type Check struct {
 // New constructs an HTTP check.
 func New() *Check { return &Check{Now: time.Now} }
 
+// ID returns the stable diagnostic identifier.
 func (*Check) ID() string   { return "http" }
+// Name returns the human-readable check name.
 func (*Check) Name() string { return "HTTP request" }
 
+// Run performs the bounded HTTP request and records redirects, policy, and timing.
 func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 	if state.Target.Kind != model.TargetHTTP {
 		return model.CheckResult{

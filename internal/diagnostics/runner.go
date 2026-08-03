@@ -33,6 +33,7 @@ func (e *InputError) Error() string {
 	return e.Message + ": " + e.Err.Error()
 }
 
+// Unwrap returns the parser or validator error that caused the input failure.
 func (e *InputError) Unwrap() error { return e.Err }
 
 // IsInputError distinguishes invalid input from runtime diagnostic failures.

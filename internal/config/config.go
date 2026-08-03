@@ -34,6 +34,7 @@ func (e *InvalidError) Error() string {
 	return e.Err.Error()
 }
 
+// Unwrap returns the underlying configuration parsing error.
 func (e *InvalidError) Unwrap() error {
 	if e == nil {
 		return nil

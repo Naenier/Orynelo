@@ -38,6 +38,7 @@ func (e *ParseError) Error() string {
 	return e.Message + ": " + e.Err.Error()
 }
 
+// Unwrap returns the underlying target parsing error.
 func (e *ParseError) Unwrap() error { return e.Err }
 
 // Parse accepts URLs, host:port endpoints, IPv4, bracketed IPv6 endpoints,
