@@ -197,11 +197,22 @@ a diagnostic limitation, not a sandbox escape mechanism.
 ## Supply chain
 
 CI verifies module checksums, formatting, static analysis, tests, and the
-Linux CLI/desktop builds. Dependabot tracks Go modules, GitHub Actions, and
-Docker base images. Native packaging, race tests, vulnerability scanning, and
-container validation remain available as explicit local checks. Container
-labels retain the source, license, commit, and build date; the binary also
-records whether its source tree was modified.
+Linux CLI/desktop builds. Release tags trigger checksummed Linux x86_64
+packaging. The release workflow uses commit-pinned official setup actions,
+does not persist checkout credentials, and builds tagged source in a job with
+read-only repository access. A separate publish job receives scoped
+`contents: write` access only after the checksummed artifacts are built. It
+never creates a tag or release and never edits release metadata. Existing
+assets are reused only when GitHub reports the expected SHA-256 digest, and a
+different artifact with the same name is not overwritten. Archive ownership,
+ordering, timestamps, and gzip headers are normalized from the tagged commit.
+The tag's peeled commit is checked on the default branch before building and
+again while assets are uploaded. Linux desktop packages remain unsigned.
+
+Dependabot tracks Go modules, GitHub Actions, and Docker base images. Race
+tests, vulnerability scanning, and container validation remain available as
+explicit local checks. Container labels retain the source, license, commit,
+and build date; the binary also records whether its source tree was modified.
 
 ## Explicit non-goals
 
