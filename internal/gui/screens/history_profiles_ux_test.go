@@ -17,10 +17,11 @@ func TestHistoryUsesReadableToolbarAndSelectionActions(t *testing.T) {
 	test.NewTempApp(t)
 	openedID := ""
 	lastSearch := ""
-	screen := NewHistory(localization.English{}, HistoryActions{
-		Load: func(search, _ string) ([]presenter.HistoryView, error) {
+	var screen *HistoryScreen
+	screen = NewHistory(localization.English{}, HistoryActions{
+		Load: func(search, _ string) {
 			lastSearch = search
-			return nil, nil
+			screen.SetRows(nil)
 		},
 		Open: func(row presenter.HistoryView) {
 			openedID = row.ID
@@ -193,15 +194,11 @@ func TestProfilesToolbarEmptyStateAndSelectionActions(t *testing.T) {
 	test.NewTempApp(t)
 	ranID := int64(0)
 	screen := NewProfiles(localization.English{}, ProfileActions{
-		Load: func() ([]presenter.ProfileView, error) {
-			return nil, nil
-		},
-		Create: func() {},
-		Edit:   func(presenter.ProfileView) {},
-		Duplicate: func(presenter.ProfileView) error {
-			return nil
-		},
-		Delete: func(presenter.ProfileView) {},
+		Load:      func() {},
+		Create:    func() {},
+		Edit:      func(presenter.ProfileView) {},
+		Duplicate: func(presenter.ProfileView) {},
+		Delete:    func(presenter.ProfileView) {},
 		Run: func(profile presenter.ProfileView) {
 			ranID = profile.ID
 		},
@@ -326,5 +323,43 @@ func TestProfilesToolbarEmptyStateAndSelectionActions(t *testing.T) {
 	test.Tap(screen.emptyClear)
 	if screen.search.Text != "" || screen.empty.Visible() || !screen.list.Visible() {
 		t.Fatal("clear profile search did not restore the profile list")
+	}
+}
+
+func TestHistoryReloadUsesAsynchronousLoadingState(t *testing.T) {
+	test.NewTempApp(t)
+	calls := 0
+	screen := NewHistory(localization.English{}, HistoryActions{
+		Load: func(string, string) { calls++ },
+	})
+	screen.Reload()
+	if calls != 1 || !screen.loading {
+		t.Fatalf("reload calls/loading = %d/%v, want 1/true", calls, screen.loading)
+	}
+	if screen.message.Text != "Loading…" {
+		t.Fatalf("loading message = %q", screen.message.Text)
+	}
+	screen.SetRows([]presenter.HistoryView{{ID: "completed"}})
+	if screen.loading || screen.message.Visible() {
+		t.Fatal("completed asynchronous history load retained loading state")
+	}
+}
+
+func TestProfilesReloadUsesAsynchronousLoadingState(t *testing.T) {
+	test.NewTempApp(t)
+	calls := 0
+	screen := NewProfiles(localization.English{}, ProfileActions{
+		Load: func() { calls++ },
+	})
+	screen.Reload()
+	if calls != 1 || !screen.loading {
+		t.Fatalf("reload calls/loading = %d/%v, want 1/true", calls, screen.loading)
+	}
+	if screen.message.Text != "Loading…" {
+		t.Fatalf("loading message = %q", screen.message.Text)
+	}
+	screen.SetProfiles([]presenter.ProfileView{{ID: 1, Name: "Loaded"}})
+	if screen.loading || screen.message.Visible() {
+		t.Fatal("completed asynchronous profile load retained loading state")
 	}
 }

@@ -534,29 +534,24 @@ func (s *DiagnoseScreen) triggerRun() {
 // Input validates and returns the current Diagnose controls.
 func (s *DiagnoseScreen) Input() (presenter.DiagnoseInput, error) {
 	timeout, err := time.ParseDuration(strings.TrimSpace(s.timeout.Text))
-	if err != nil || timeout <= 0 || timeout > 24*time.Hour {
+	if err != nil {
 		return presenter.DiagnoseInput{}, errors.New(
 			s.texts.Text(localization.DiagnoseInvalidTimeout),
 		)
 	}
 	checkTimeout, err := time.ParseDuration(strings.TrimSpace(s.checkTimeout.Text))
-	if err != nil || checkTimeout <= 0 || checkTimeout > timeout {
+	if err != nil {
 		return presenter.DiagnoseInput{}, errors.New(
 			s.texts.Text(localization.DiagnoseInvalidCheckTimeout),
 		)
 	}
 	redirects, err := strconv.Atoi(strings.TrimSpace(s.maxRedirects.Text))
-	if err != nil || redirects < 0 || redirects > 50 {
+	if err != nil {
 		return presenter.DiagnoseInput{}, errors.New(
 			s.texts.Text(localization.DiagnoseInvalidRedirects),
 		)
 	}
 	target := strings.TrimSpace(s.target.Text)
-	if target == "" {
-		return presenter.DiagnoseInput{}, errors.New(
-			s.texts.Text(localization.DiagnoseTargetRequired),
-		)
-	}
 	return presenter.DiagnoseInput{
 		Target:                 target,
 		Mode:                   s.modeValue(),
@@ -700,6 +695,16 @@ func (s *DiagnoseScreen) SetRunning(running bool) {
 	s.updateOverviewFooter()
 	s.cancel.Hide()
 	s.run.Show()
+}
+
+// SetRunEnabled keeps execution unavailable until application configuration
+// has been loaded and applied.
+func (s *DiagnoseScreen) SetRunEnabled(enabled bool) {
+	if enabled {
+		s.run.Enable()
+		return
+	}
+	s.run.Disable()
 }
 
 // ResetResults clears a previous timeline before a new run.

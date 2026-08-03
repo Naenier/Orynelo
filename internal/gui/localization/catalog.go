@@ -38,6 +38,8 @@ const (
 	CommonNo               Key = "common.no"
 	CommonUnavailable      Key = "common.unavailable"
 	CommonListItemFormat   Key = "common.list_item_format"
+	CommonLoading          Key = "common.loading"
+	CommonSaving           Key = "common.saving"
 
 	OptionAuto     Key = "option.auto"
 	OptionTCP      Key = "option.tcp"
@@ -283,6 +285,16 @@ const (
 	DialogProfileRedactedTitle    Key = "dialog.profile_redacted_title"
 	DialogProfileRedactedFormat   Key = "dialog.profile_redacted_format"
 
+	ErrorValidationGuidance    Key = "error.validation_guidance"
+	ErrorConfigurationGuidance Key = "error.configuration_guidance"
+	ErrorStorageGuidance       Key = "error.storage_guidance"
+	ErrorPermissionGuidance    Key = "error.permission_guidance"
+	ErrorCancelledGuidance     Key = "error.cancelled_guidance"
+	ErrorNetworkPolicyGuidance Key = "error.network_policy_guidance"
+	ErrorInternalGuidance      Key = "error.internal_guidance"
+	ErrorReferenceFormat       Key = "error.reference_format"
+	ErrorFieldFormat           Key = "error.field_format"
+
 	TechnicalJSONEncodingError         Key = "technical.json_encoding_error"
 	TechnicalCheckIDFormat             Key = "technical.check_id_format"
 	TechnicalStatusFormat              Key = "technical.status_format"
@@ -370,6 +382,8 @@ var english = map[Key]string{
 	CommonNo:               "no",
 	CommonUnavailable:      "—",
 	CommonListItemFormat:   "• %s",
+	CommonLoading:          "Loading…",
+	CommonSaving:           "Saving…",
 
 	OptionAuto:     "Auto",
 	OptionTCP:      "TCP",
@@ -614,6 +628,16 @@ var english = map[Key]string{
 	DialogExportOverwriteFormat:   "An item already exists at %s. Replace it?",
 	DialogProfileRedactedTitle:    "Sensitive target parts will be removed",
 	DialogProfileRedactedFormat:   "For privacy, the saved profile target will be:\n\n%s\n\nThe profile may no longer work without the removed value. Save it anyway?",
+
+	ErrorValidationGuidance:    "Check the entered values and try again.",
+	ErrorConfigurationGuidance: "Review the application settings and try again.",
+	ErrorStorageGuidance:       "Local data is unavailable. Retry the operation; diagnostics can continue without saved history.",
+	ErrorPermissionGuidance:    "Permission was denied. Choose a writable destination and try again.",
+	ErrorCancelledGuidance:     "The operation was cancelled.",
+	ErrorNetworkPolicyGuidance: "Network policy blocked this operation. Review proxy and redirect settings before retrying.",
+	ErrorInternalGuidance:      "The operation could not be completed. Retry it; if the problem continues, open the log directory from Settings.",
+	ErrorReferenceFormat:       "Error reference: %s",
+	ErrorFieldFormat:           "Check field: %s",
 
 	TechnicalJSONEncodingError:         "technical details could not be encoded",
 	TechnicalCheckIDFormat:             "Check ID: %s",

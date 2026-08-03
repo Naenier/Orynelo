@@ -21,9 +21,9 @@ func TestSettingsUsesFriendlyValuesAndPreservesDomainValues(t *testing.T) {
 	initial := application.DefaultConfig()
 	var saved application.Config
 	root := NewSettings(localization.English{}, initial, SettingsActions{
-		Save: func(config application.Config) error {
+		Save: func(config application.Config, complete func(string)) {
 			saved = config
-			return nil
+			complete("")
 		},
 	})
 
@@ -71,6 +71,36 @@ func TestSettingsUsesFriendlyValuesAndPreservesDomainValues(t *testing.T) {
 	if !save.Disabled() {
 		t.Fatal("save action remained enabled after a successful save")
 	}
+}
+
+func TestSettingsWaitsForAsynchronousSaveCompletion(t *testing.T) {
+	test.NewTempApp(t)
+	var complete func(string)
+	root := NewSettings(
+		localization.English{},
+		application.DefaultConfig(),
+		SettingsActions{
+			Save: func(_ application.Config, done func(string)) {
+				complete = done
+			},
+		},
+	)
+	settingsAboutFindEntry(t, root, "15s").SetText("20s")
+	save := settingsAboutFindButton(t, root, "Save settings")
+	test.Tap(save)
+	if complete == nil {
+		t.Fatal("save completion callback was not captured")
+	}
+	if !save.Disabled() {
+		t.Fatal("save remained enabled while persistence was pending")
+	}
+	settingsAboutFindLabel(t, root, "Saving…")
+
+	complete("safe failure")
+	if save.Disabled() {
+		t.Fatal("save remained disabled after asynchronous failure")
+	}
+	settingsAboutFindLabel(t, root, "Settings were not saved: safe failure")
 }
 
 func TestSettingsKeepsActionsVisibleAndSeparatesDestructiveHistoryAction(
@@ -135,7 +165,7 @@ func TestSettingsFitsMinimumContentSizeWithStickySaveBar(t *testing.T) {
 	root := NewSettings(
 		localization.English{},
 		application.DefaultConfig(),
-		SettingsActions{Save: func(application.Config) error { return nil }},
+		SettingsActions{Save: func(application.Config, func(string)) {}},
 	)
 	root.Resize(fyne.NewSize(830, 620))
 	test.LaidOutObjects(root)
@@ -176,7 +206,7 @@ func TestSettingsRejectsThemeThatCannotBeApplied(t *testing.T) {
 		localization.English{},
 		application.DefaultConfig(),
 		SettingsActions{
-			Save: func(application.Config) error { return nil },
+			Save: func(application.Config, func(string)) {},
 			ApplyTheme: func(theme string) error {
 				if theme == "dark" {
 					return errors.New("theme unavailable")
