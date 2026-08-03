@@ -40,7 +40,9 @@ func New(resolver Resolver) *Check {
 	return &Check{Resolver: resolver, Now: time.Now}
 }
 
+// ID returns the stable diagnostic identifier.
 func (*Check) ID() string   { return "dns" }
+// Name returns the human-readable check name.
 func (*Check) Name() string { return "DNS resolution" }
 
 type lookupResult struct {
@@ -50,6 +52,7 @@ type lookupResult struct {
 	duration  time.Duration
 }
 
+// Run resolves the target's A and AAAA records.
 func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 	host := state.Target.Host
 	if ip := net.ParseIP(host); ip != nil {

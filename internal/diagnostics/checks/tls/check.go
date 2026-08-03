@@ -58,9 +58,12 @@ func New(dialer Dialer) *Check {
 	}
 }
 
+// ID returns the stable diagnostic identifier.
 func (*Check) ID() string   { return "tls" }
+// Name returns the human-readable check name.
 func (*Check) Name() string { return "TLS handshake and certificate" }
 
+// Run performs the TLS handshake and records certificate verification metadata.
 func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 	if !state.Target.UseTLS && !state.Options.EnableTLS {
 		return model.CheckResult{

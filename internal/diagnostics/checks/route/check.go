@@ -24,6 +24,7 @@ type SourceDiscoverer interface {
 
 type udpDiscoverer struct{}
 
+// SourceIP discovers the local source address selected for a remote endpoint.
 func (udpDiscoverer) SourceIP(ctx context.Context, remote net.IP, port uint16) (net.IP, error) {
 	connection, err := (&net.Dialer{}).DialContext(
 		ctx,
@@ -60,9 +61,12 @@ func New(discoverer SourceDiscoverer) *Check {
 	return &Check{Discoverer: discoverer, Interfaces: net.Interfaces}
 }
 
+// ID returns the stable diagnostic identifier.
 func (*Check) ID() string   { return "route" }
+// Name returns the human-readable check name.
 func (*Check) Name() string { return "Route and source address" }
 
+// Run discovers source addresses and interface metadata for each remote address.
 func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 	dnsResult := state.DNS()
 	addresses := usableAddresses(dnsResult.IPv4, dnsResult.IPv6)

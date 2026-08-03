@@ -60,6 +60,7 @@ func (e *ExitError) Error() string {
 	return e.Err.Error()
 }
 
+// Unwrap returns the underlying application error.
 func (e *ExitError) Unwrap() error { return e.Err }
 
 // NewRoot builds the complete opsdoctor command tree.

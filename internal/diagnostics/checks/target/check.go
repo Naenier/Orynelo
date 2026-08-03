@@ -10,9 +10,12 @@ import (
 // Check confirms the canonical target passed into the pipeline.
 type Check struct{}
 
+// ID returns the stable diagnostic identifier.
 func (Check) ID() string   { return "target" }
+// Name returns the human-readable check name.
 func (Check) Name() string { return "Target validation" }
 
+// Run reports the canonical target validation result.
 func (Check) Run(_ context.Context, state *model.State) model.CheckResult {
 	t := state.Target
 	if t.Host == "" || t.Port == 0 {

@@ -53,6 +53,7 @@ type diagnosticFacts struct {
 // Build gathers facts first, creates independently ranked conclusion
 // candidates, and only then chooses the primary conclusion. This prevents plan
 // order from allowing a degraded-path warning to hide a blocker.
+// Build derives the highest-severity evidence-based conclusion from results.
 func Build(results []model.CheckResult) model.Summary {
 	facts := collectFacts(results)
 	candidates := buildCandidates(facts)
@@ -804,6 +805,7 @@ func transportPassed(results []model.CheckResult) bool {
 }
 
 // ExplainReference returns a readable fallback for an evidence reference.
+// ExplainReference returns a stable human-readable explanation for an evidence reference.
 func ExplainReference(reference string) string {
 	return fmt.Sprintf("See evidence %q.", reference)
 }
