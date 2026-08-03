@@ -188,9 +188,10 @@ func (c *Check) result(results []model.RouteInfo, total int, cancelled bool) mod
 		} else if result.Error != "" {
 			details["error"] = result.Error
 		}
-		if result.State == model.AttemptStateCancelled {
+		switch result.State {
+		case model.AttemptStateCancelled:
 			message = "Route source discovery was cancelled after it started."
-		} else if result.State == model.AttemptStateCompleted {
+		case model.AttemptStateCompleted:
 			completedAttempts++
 		}
 		evidence = append(evidence, model.Evidence{

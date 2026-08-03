@@ -772,11 +772,6 @@ func sameOrigin(left, right *url.URL) bool {
 		effectivePort(left) == effectivePort(right)
 }
 
-func sameHostname(left, right *url.URL) bool {
-	return left != nil && right != nil &&
-		strings.EqualFold(strings.TrimSuffix(left.Hostname(), "."), strings.TrimSuffix(right.Hostname(), "."))
-}
-
 func effectivePort(value *url.URL) string {
 	if value == nil {
 		return ""

@@ -195,8 +195,8 @@ func TestRuntimeCloseErrorWrapsAggregateInPrivacySafeApplicationError(t *testing
 	}
 
 	err = (&Runtime{Service: service, Logging: &Logging{file: logFile}}).Close()
-	topLevel, ok := err.(*application.Error)
-	if !ok {
+	var topLevel *application.Error
+	if !errors.As(err, &topLevel) {
 		t.Fatalf("Runtime.Close() returned non-typed top-level error: %T", err)
 	}
 	if topLevel.Code() != "APP_RUNTIME_CLOSE_FAILED" ||
