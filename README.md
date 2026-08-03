@@ -211,6 +211,25 @@ source tree was modified without rewriting tracked source files. Go module and
 VCS metadata provide local-build fallbacks; otherwise the application reports
 the current stage version (`0.2.0`).
 
+## Releases
+
+Release tags use `v<SemVer>`. A maintainer manually creates the annotated tag
+and the GitHub Release title, notes, and prerelease/latest state. The tag
+workflow only builds and attaches these Linux x86_64 assets to that existing
+release:
+
+- `opsdoctor_<version>_Linux_x86_64.tar.gz`;
+- `opsdoctor-desktop_<version>_Linux_x86_64.tar.gz`;
+- `SHA256SUMS.txt`.
+
+The workflow never creates a release or changes its title or description.
+Assets can appear a few minutes after the release is published. Download all
+three files into the same directory and verify the archives with:
+
+```bash
+sha256sum -c SHA256SUMS.txt
+```
+
 ## Docker
 
 The container contains only the CLI, CA certificates, and the minimal

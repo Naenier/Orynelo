@@ -83,6 +83,45 @@ build tag:
 go test -tags=integration ./...
 ```
 
+## Maintainer release flow
+
+Release assets are automated, while the tag and all release metadata remain
+under manual maintainer control. Select a commit that is already present on
+the repository's default branch, prepare the release notes, and then create and
+push an annotated `v<SemVer>` tag:
+
+```bash
+git fetch origin
+git tag -a vX.Y.Z <release-commit-sha> -m "OpsDoctor vX.Y.Z"
+git push origin vX.Y.Z
+```
+
+Immediately create the GitHub Release for that existing tag, either in the
+GitHub interface or with `gh`. The title, notes, and prerelease/latest state
+are chosen manually:
+
+```bash
+gh release create vX.Y.Z \
+  --repo Naenier/opsdoctor \
+  --verify-tag \
+  --title "OpsDoctor vX.Y.Z" \
+  --notes-file /path/to/release-notes.md \
+  --prerelease
+```
+
+The tag workflow waits briefly for the release, then attaches the two Linux
+x86_64 archives and `SHA256SUMS.txt`. It does not create or edit the release.
+If the release was created too late, rerun the failed workflow after it exists.
+An existing asset is accepted only when its GitHub SHA-256 digest matches the
+newly built file; a name collision with different bytes fails closed.
+Build timestamps and archive metadata come from the tagged commit so the time
+of a rerun alone does not change the assets. Force-updating a release tag
+cancels an older run and the tag target is checked again during upload;
+repository rules should still protect release tags from modification.
+
+Repositories with immutable releases should create the release as a draft,
+let the workflow attach its assets, and publish it afterward.
+
 If a change alters SQLite data, add a forward migration and migration tests.
 If it alters exported JSON, preserve the schema version or document and test a
 schema transition.
