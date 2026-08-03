@@ -17,9 +17,9 @@ const (
 	// System follows the desktop environment's current appearance.
 	System = "system"
 	// Light forces the light Fyne color variant.
-	Light  = "light"
+	Light = "light"
 	// Dark forces the dark Fyne color variant.
-	Dark   = "dark"
+	Dark = "dark"
 )
 
 // Apply changes the Fyne application theme.

@@ -27,7 +27,7 @@ import (
 func TestDiagnoseRequestCarriesExplicitOverridesToApplicationResolver(t *testing.T) {
 	t.Parallel()
 
-	controller := &controller{texts: localization.English{}}
+	coordinator := &DiagnoseCoordinator{config: application.DefaultConfig()}
 	input := presenter.DiagnoseInput{
 		Target:       "  https://example.test/path  ",
 		Mode:         "tls",
@@ -40,7 +40,7 @@ func TestDiagnoseRequestCarriesExplicitOverridesToApplicationResolver(t *testing
 		Verbosity:    "verbose",
 		Insecure:     true,
 	}
-	request := controller.diagnoseRequest(input)
+	request := coordinator.request(input)
 	if request.Profile != nil || request.Overrides.Target == nil ||
 		*request.Overrides.Target != input.Target || request.Overrides.Mode == nil ||
 		*request.Overrides.Mode != model.DiagnosticModeTLS {
@@ -71,11 +71,11 @@ func TestDiagnoseRequestUsesProfileWithoutReencodingItsDefaults(t *testing.T) {
 		MaxRedirects: 3,
 		Method:       "HEAD",
 	}
-	controller := &controller{
-		texts:          localization.English{},
+	coordinator := &DiagnoseCoordinator{
+		config:         application.DefaultConfig(),
 		pendingProfile: &profile,
 	}
-	request := controller.diagnoseRequest(presenter.DiagnoseInput{
+	request := coordinator.request(presenter.DiagnoseInput{
 		Target:                 "must-not-override.example",
 		Mode:                   "tls",
 		Timeout:                time.Minute,
@@ -96,7 +96,7 @@ func TestDiagnoseRequestUsesProfileWithoutReencodingItsDefaults(t *testing.T) {
 		*request.Overrides.ReportVerbosity != model.ReportVerbosityVerbose {
 		t.Fatalf("transient overrides = %#v", request.Overrides)
 	}
-	if controller.pendingProfile != nil {
+	if coordinator.pendingProfile != nil {
 		t.Fatal("pending profile was not consumed")
 	}
 }
@@ -110,11 +110,8 @@ func TestDiagnoseRequestDoesNotEncodeDisplayedConfigurationAsOverrides(t *testin
 	config.Diagnostics.PreferredIPVersion = "6"
 	config.Diagnostics.MaxRedirects = 4
 	config.Network.UseSystemProxy = false
-	controller := &controller{
-		texts:         localization.English{},
-		configuration: config,
-	}
-	request := controller.diagnoseRequest(presenter.DiagnoseInput{
+	coordinator := &DiagnoseCoordinator{config: config}
+	request := coordinator.request(presenter.DiagnoseInput{
 		Target:       "https://example.test",
 		Mode:         "auto",
 		IPVersion:    "6",
@@ -428,17 +425,17 @@ func TestStartProfileCancelsActiveRunBeforeReplacingInputs(t *testing.T) {
 	)
 	diagnose.SetTarget("active.example:443")
 	diagnose.SetRunning(true)
-	runner, scope, operationID, cancelled := activeDiagnosticTask(t)
+	runner, coordinator, operationID, cancelled := activeDiagnosticTask(t)
 	t.Cleanup(func() {
 		runner.Close()
 		runner.Wait()
 	})
 	controller := &controller{
-		content:       container.NewStack(),
-		diagnose:      diagnose,
-		currentScreen: "profiles",
-		diagnoseTask:  scope,
-		texts:         localization.English{},
+		content:             container.NewStack(),
+		diagnose:            diagnose,
+		currentScreen:       "profiles",
+		diagnoseCoordinator: coordinator,
+		texts:               localization.English{},
 	}
 
 	controller.startProfile(presenter.ProfileView{
@@ -483,19 +480,19 @@ func TestHistoricalDiagnosisInvalidatesRunAndRestoresRunAgainInput(t *testing.T)
 	)
 	diagnose.SetTarget("active.example:443")
 	diagnose.SetRunning(true)
-	runner, scope, operationID, cancelled := activeDiagnosticTask(t)
+	runner, coordinator, operationID, cancelled := activeDiagnosticTask(t)
 	t.Cleanup(func() {
 		runner.Close()
 		runner.Wait()
 	})
 	controller := &controller{
-		content:       container.NewStack(),
-		diagnose:      diagnose,
-		header:        widget.NewLabel(""),
-		currentScreen: "history",
-		diagnoseTask:  scope,
-		texts:         localization.English{},
-		info:          buildinfo.Info{Version: "1.2.3"},
+		content:             container.NewStack(),
+		diagnose:            diagnose,
+		header:              widget.NewLabel(""),
+		currentScreen:       "history",
+		diagnoseCoordinator: coordinator,
+		texts:               localization.English{},
+		info:                buildinfo.Info{Version: "1.2.3"},
 	}
 	diagnosis := model.Diagnosis{
 		Target: model.Target{
@@ -554,11 +551,17 @@ func TestHistoricalDiagnosisSuppressesQueuedCancellationPresentation(t *testing.
 		currentScreen: "history",
 		texts:         localization.English{},
 	}
-	scope, err := taskrunner.NewScope(runner, "diagnose", controller.observeDiagnosis)
+	coordinator := &DiagnoseCoordinator{
+		observer: controller.observeDiagnosis,
+		config:   application.DefaultConfig(),
+		state:    DiagnoseViewModel{State: taskrunner.StateIdle},
+	}
+	scope, err := taskrunner.NewScope(runner, "diagnose", coordinator.observe)
 	if err != nil {
 		t.Fatalf("taskrunner.NewScope() error = %v", err)
 	}
-	controller.diagnoseTask = scope
+	coordinator.scope = scope
+	controller.diagnoseCoordinator = coordinator
 	started := make(chan struct{})
 	if _, err := scope.StartRead(func(ctx context.Context) (model.Diagnosis, error) {
 		close(started)
@@ -632,7 +635,7 @@ func (dispatcher *queuedTestDispatcher) drain() {
 
 func activeDiagnosticTask(
 	t *testing.T,
-) (*taskrunner.Runner, *taskrunner.Scope[model.Diagnosis], taskrunner.OperationID, <-chan struct{}) {
+) (*taskrunner.Runner, *DiagnoseCoordinator, taskrunner.OperationID, <-chan struct{}) {
 	t.Helper()
 	runner, err := taskrunner.New(
 		context.Background(),
@@ -662,7 +665,14 @@ func activeDiagnosticTask(
 	case <-time.After(time.Second):
 		t.Fatal("diagnostic test task did not start")
 	}
-	return runner, scope, operationID, cancelled
+	return runner, &DiagnoseCoordinator{
+		scope:  scope,
+		config: application.DefaultConfig(),
+		state: DiagnoseViewModel{
+			OperationID: operationID,
+			State:       taskrunner.StateLoading,
+		},
+	}, operationID, cancelled
 }
 
 func TestProfileEditorMethodMappingIncludesOptions(t *testing.T) {

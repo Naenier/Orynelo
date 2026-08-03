@@ -59,7 +59,8 @@ func New(dialer Dialer) *Check {
 }
 
 // ID returns the stable diagnostic identifier.
-func (*Check) ID() string   { return "tls" }
+func (*Check) ID() string { return "tls" }
+
 // Name returns the human-readable check name.
 func (*Check) Name() string { return "TLS handshake and certificate" }
 

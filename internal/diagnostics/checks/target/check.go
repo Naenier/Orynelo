@@ -11,7 +11,8 @@ import (
 type Check struct{}
 
 // ID returns the stable diagnostic identifier.
-func (Check) ID() string   { return "target" }
+func (Check) ID() string { return "target" }
+
 // Name returns the human-readable check name.
 func (Check) Name() string { return "Target validation" }
 

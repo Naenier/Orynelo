@@ -557,44 +557,55 @@ func NewState(target Target, options DiagnoseOptions) *State {
 
 // SetProxy stores the privacy-safe proxy selection state.
 func (s *State) SetProxy(v ProxyInfo) { s.mu.Lock(); s.proxy = cloneProxy(v); s.mu.Unlock() }
+
 // Proxy returns an independent copy of the proxy selection state.
-func (s *State) Proxy() ProxyInfo     { s.mu.RLock(); defer s.mu.RUnlock(); return cloneProxy(s.proxy) }
+func (s *State) Proxy() ProxyInfo { s.mu.RLock(); defer s.mu.RUnlock(); return cloneProxy(s.proxy) }
+
 // SetDNS stores resolver output for later checks.
-func (s *State) SetDNS(v DNSResult)   { s.mu.Lock(); s.dns = cloneDNS(v); s.mu.Unlock() }
+func (s *State) SetDNS(v DNSResult) { s.mu.Lock(); s.dns = cloneDNS(v); s.mu.Unlock() }
+
 // DNS returns an independent copy of resolver output.
-func (s *State) DNS() DNSResult       { s.mu.RLock(); defer s.mu.RUnlock(); return cloneDNS(s.dns) }
+func (s *State) DNS() DNSResult { s.mu.RLock(); defer s.mu.RUnlock(); return cloneDNS(s.dns) }
+
 // SetRoutes stores discovered routes for later checks.
 func (s *State) SetRoutes(v []RouteInfo) {
 	s.mu.Lock()
 	s.routes = cloneRoutes(v)
 	s.mu.Unlock()
 }
+
 // Routes returns an independent copy of discovered routes.
 func (s *State) Routes() []RouteInfo {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return cloneRoutes(s.routes)
 }
+
 // SetTCP stores address-specific TCP attempts.
 func (s *State) SetTCP(v []TCPAttempt) {
 	s.mu.Lock()
 	s.tcp = cloneTCP(v)
 	s.mu.Unlock()
 }
+
 // TCP returns an independent copy of TCP attempts.
 func (s *State) TCP() []TCPAttempt {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return cloneTCP(s.tcp)
 }
+
 // SetTLS stores the TLS result for later checks and reports.
-func (s *State) SetTLS(v TLSResult)   { s.mu.Lock(); s.tls = cloneTLS(v); s.mu.Unlock() }
+func (s *State) SetTLS(v TLSResult) { s.mu.Lock(); s.tls = cloneTLS(v); s.mu.Unlock() }
+
 // TLS returns an independent copy of the TLS result.
-func (s *State) TLS() TLSResult       { s.mu.RLock(); defer s.mu.RUnlock(); return cloneTLS(s.tls) }
+func (s *State) TLS() TLSResult { s.mu.RLock(); defer s.mu.RUnlock(); return cloneTLS(s.tls) }
+
 // SetHTTP stores the HTTP result for later checks and reports.
 func (s *State) SetHTTP(v HTTPResult) { s.mu.Lock(); s.http = cloneHTTP(v); s.mu.Unlock() }
+
 // HTTP returns an independent copy of the HTTP result.
-func (s *State) HTTP() HTTPResult     { s.mu.RLock(); defer s.mu.RUnlock(); return cloneHTTP(s.http) }
+func (s *State) HTTP() HTTPResult { s.mu.RLock(); defer s.mu.RUnlock(); return cloneHTTP(s.http) }
 
 func cloneProxy(v ProxyInfo) ProxyInfo {
 	v.Environment = cloneStringMap(v.Environment)

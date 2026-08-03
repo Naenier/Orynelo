@@ -33,7 +33,8 @@ type Check struct {
 func New() *Check { return &Check{LookupEnv: os.LookupEnv} }
 
 // ID returns the stable diagnostic identifier.
-func (*Check) ID() string   { return "environment" }
+func (*Check) ID() string { return "environment" }
+
 // Name returns the human-readable check name.
 func (*Check) Name() string { return "Environment and proxy" }
 
