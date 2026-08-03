@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"sync"
 
+	"github.com/Naenier/opsdoctor/internal/application"
 	"github.com/Naenier/opsdoctor/internal/bootstrap"
 	"github.com/Naenier/opsdoctor/internal/buildinfo"
 	"github.com/Naenier/opsdoctor/internal/cli"
@@ -31,49 +32,76 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), terminationSignals()...)
 	defer stop()
 	root := cli.NewRoot(cli.Options{
-		Application:     lazy,
-		Build:           info,
-		Stdout:          os.Stdout,
-		Stderr:          os.Stderr,
-		SetLogLevel:     lazy.SetLogLevel,
-		LoadConfig:      lazy.Configuration,
-		IsConfigInvalid: config.IsInvalid,
+		Application: lazy,
+		Build:       info,
+		Stdout:      os.Stdout,
+		Stderr:      os.Stderr,
+		SetLogLevel: lazy.SetLogLevel,
 	})
 	return cli.Execute(ctx, root, os.Stderr)
 }
 
-func (l *lazyApplication) Configuration() (config.Config, error) {
-	runtime, err := l.runtime()
-	if err != nil {
-		return config.Config{}, err
-	}
-	return runtime.Service.Configuration(), nil
+type lazyApplication struct {
+	info        buildinfo.Info
+	openRuntime func(buildinfo.Info) (*bootstrap.Runtime, error)
+	once        sync.Once
+	run         *bootstrap.Runtime
+	err         error
 }
 
-type lazyApplication struct {
-	info buildinfo.Info
-	once sync.Once
-	run  *bootstrap.Runtime
-	err  error
-}
+var _ cli.Application = (*lazyApplication)(nil)
 
 func (l *lazyApplication) runtime() (*bootstrap.Runtime, error) {
 	l.once.Do(func() {
-		l.run, l.err = bootstrap.OpenRuntime(l.info)
+		openRuntime := l.openRuntime
+		if openRuntime == nil {
+			openRuntime = bootstrap.OpenRuntime
+		}
+		l.run, l.err = openRuntime(l.info)
+		l.err = runtimeApplicationError(l.err)
 	})
 	return l.run, l.err
 }
 
-func (l *lazyApplication) Diagnose(
+func runtimeApplicationError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if _, ok := application.AsError(err); ok {
+		return err
+	}
+	if config.IsInvalid(err) {
+		return application.WrapError(
+			err,
+			application.ErrorCategoryConfiguration,
+			"APP_CONFIGURATION_INVALID",
+			"error.configuration_invalid",
+			nil,
+		)
+	}
+	classified := application.ClassifyError(err)
+	if classified.Category() != application.ErrorCategoryInternal {
+		return classified
+	}
+	return application.WrapError(
+		err,
+		application.ErrorCategoryInternal,
+		"APP_RUNTIME_INITIALIZATION_FAILED",
+		"error.runtime_initialization_failed",
+		nil,
+	)
+}
+
+func (l *lazyApplication) DiagnoseRequest(
 	ctx context.Context,
-	options model.DiagnoseOptions,
+	request application.DiagnoseRequest,
 	sink model.EventSink,
 ) (model.Diagnosis, error) {
 	runtime, err := l.runtime()
 	if err != nil {
 		return model.Diagnosis{}, err
 	}
-	return runtime.Service.Diagnose(ctx, options, sink)
+	return runtime.Service.DiagnoseRequest(ctx, request, sink)
 }
 
 func (l *lazyApplication) RenderReport(
@@ -100,5 +128,22 @@ func (l *lazyApplication) Close() error {
 	if l.run == nil {
 		return nil
 	}
-	return l.run.Close()
+	err := l.run.Close()
+	if err == nil {
+		return nil
+	}
+	if _, ok := application.AsError(err); ok {
+		return err
+	}
+	classified := application.ClassifyError(err)
+	if classified.Category() != application.ErrorCategoryInternal {
+		return classified
+	}
+	return application.WrapError(
+		err,
+		application.ErrorCategoryStorage,
+		"APP_RUNTIME_CLOSE_FAILED",
+		"error.runtime_close_failed",
+		nil,
+	)
 }

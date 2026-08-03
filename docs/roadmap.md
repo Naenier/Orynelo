@@ -24,6 +24,11 @@ The current scope focuses on:
 - text, JSON, and Markdown reports;
 - local YAML configuration, SQLite history, and saved profiles;
 - a shared CLI and Fyne desktop application;
+- centralized request-capable option resolution plus privacy-projected previews
+  shared by CLI, profiles, and GUI;
+- typed, privacy-safe application errors for UI and JSON consumers;
+- cancellable GUI operation scopes with stale-response suppression, bounded
+  reads, and serialized mutations;
 - build metadata, cross-platform builds, and a non-root CLI container.
 
 Hardening continues through fuzzing of target and certificate inputs, more

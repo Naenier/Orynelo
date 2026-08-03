@@ -16,10 +16,10 @@ import (
 
 // ProfileActions connects profile operations to the application layer.
 type ProfileActions struct {
-	Load      func() ([]presenter.ProfileView, error)
+	Load      func()
 	Create    func()
 	Edit      func(presenter.ProfileView)
-	Duplicate func(presenter.ProfileView) error
+	Duplicate func(presenter.ProfileView)
 	Delete    func(presenter.ProfileView)
 	Run       func(presenter.ProfileView)
 }
@@ -46,6 +46,7 @@ type ProfilesScreen struct {
 	actionBar   fyne.CanvasObject
 	actions     ProfileActions
 	texts       localization.Catalog
+	loading     bool
 }
 
 // NewProfiles creates the Profiles screen.
@@ -140,13 +141,7 @@ func NewProfiles(texts localization.Catalog, actions ProfileActions) *ProfilesSc
 			if !ok || actions.Duplicate == nil {
 				return
 			}
-			if err := actions.Duplicate(profile); err != nil {
-				s.SetMessage(
-					s.texts.Text(localization.ProfilesDuplicateErrorPrefix) + err.Error(),
-				)
-				return
-			}
-			s.Reload()
+			actions.Duplicate(profile)
 		},
 	)
 	s.delete = widget.NewButtonWithIcon(
@@ -243,17 +238,25 @@ func (s *ProfilesScreen) Reload() {
 		s.SetProfiles(nil)
 		return
 	}
-	profiles, err := s.actions.Load()
-	if err != nil {
-		s.SetMessage(s.texts.Text(localization.ProfilesLoadErrorPrefix) + err.Error())
-		return
+	s.SetLoading(true)
+	s.actions.Load()
+}
+
+// SetLoading reflects asynchronous profile work without blocking the UI.
+func (s *ProfilesScreen) SetLoading(loading bool) {
+	s.loading = loading
+	if loading {
+		s.SetMessage(s.texts.Text(localization.CommonLoading))
+	} else if s.message.Text == s.texts.Text(localization.CommonLoading) {
+		s.SetMessage("")
 	}
-	s.SetMessage("")
-	s.SetProfiles(profiles)
+	s.updateActionState()
 }
 
 // SetProfiles replaces the displayed profiles.
 func (s *ProfilesScreen) SetProfiles(profiles []presenter.ProfileView) {
+	s.loading = false
+	s.SetMessage("")
 	s.list.UnselectAll()
 	s.profiles = append(s.profiles[:0], profiles...)
 	s.applySearch()
@@ -311,7 +314,7 @@ func (s *ProfilesScreen) updateContentState() {
 }
 
 func (s *ProfilesScreen) updateActionState() {
-	hasSelection := s.selected >= 0 && s.selected < len(s.filtered)
+	hasSelection := !s.loading && s.selected >= 0 && s.selected < len(s.filtered)
 	setButtonEnabled(s.edit, hasSelection && s.actions.Edit != nil)
 	setButtonEnabled(s.duplicate, hasSelection && s.actions.Duplicate != nil)
 	setButtonEnabled(s.delete, hasSelection && s.actions.Delete != nil)

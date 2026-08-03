@@ -18,7 +18,7 @@ import (
 
 // HistoryActions connects history operations to the application layer.
 type HistoryActions struct {
-	Load   func(search, status string) ([]presenter.HistoryView, error)
+	Load   func(search, status string)
 	Open   func(presenter.HistoryView)
 	Rerun  func(presenter.HistoryView)
 	Export func(presenter.HistoryView)
@@ -65,6 +65,7 @@ type HistoryScreen struct {
 	actionBar    fyne.CanvasObject
 	actions      HistoryActions
 	texts        localization.Catalog
+	loading      bool
 }
 
 // NewHistory creates the History screen.
@@ -337,17 +338,25 @@ func (s *HistoryScreen) Reload() {
 		s.SetRows(nil)
 		return
 	}
-	rows, err := s.actions.Load(strings.TrimSpace(s.search.Text), s.statusValue())
-	if err != nil {
-		s.SetMessage(s.texts.Text(localization.HistoryLoadErrorPrefix) + err.Error())
-		return
+	s.SetLoading(true)
+	s.actions.Load(strings.TrimSpace(s.search.Text), s.statusValue())
+}
+
+// SetLoading reflects asynchronous history work without blocking the UI.
+func (s *HistoryScreen) SetLoading(loading bool) {
+	s.loading = loading
+	if loading {
+		s.SetMessage(s.texts.Text(localization.CommonLoading))
+	} else if s.message.Text == s.texts.Text(localization.CommonLoading) {
+		s.SetMessage("")
 	}
-	s.SetMessage("")
-	s.SetRows(rows)
+	s.updateActionState()
 }
 
 // SetRows replaces the loaded history entries.
 func (s *HistoryScreen) SetRows(rows []presenter.HistoryView) {
+	s.loading = false
+	s.SetMessage("")
 	s.list.UnselectAll()
 	s.rows = append(s.rows[:0], rows...)
 	s.selected = -1
@@ -405,12 +414,12 @@ func (s *HistoryScreen) updateContentState() {
 }
 
 func (s *HistoryScreen) updateActionState() {
-	hasSelection := s.selected >= 0 && s.selected < len(s.filtered)
+	hasSelection := !s.loading && s.selected >= 0 && s.selected < len(s.filtered)
 	setButtonEnabled(s.open, hasSelection && s.actions.Open != nil)
 	setButtonEnabled(s.rerun, hasSelection && s.actions.Rerun != nil)
 	setButtonEnabled(s.export, hasSelection && s.actions.Export != nil)
 	setButtonEnabled(s.delete, hasSelection && s.actions.Delete != nil)
-	setButtonEnabled(s.clear, len(s.filtered) > 0 && s.actions.Clear != nil)
+	setButtonEnabled(s.clear, !s.loading && len(s.filtered) > 0 && s.actions.Clear != nil)
 }
 
 func (s *HistoryScreen) hasActiveFilter() bool {

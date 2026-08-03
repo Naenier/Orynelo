@@ -10,6 +10,7 @@ application layer and one diagnostic core.
 flowchart TD
     CLI["cmd/opsdoctor + internal/cli"]
     GUI["cmd/opsdoctor-desktop + internal/gui"]
+    TASKS["internal/gui/taskrunner"]
     BOOT["internal/bootstrap"]
     APP["internal/application"]
     RUNNER["internal/diagnostics"]
@@ -28,6 +29,7 @@ flowchart TD
 
     CLI --> APP
     GUI --> APP
+    GUI --> TASKS
     CLI --> BOOT
     GUI --> BOOT
     BOOT --> APP
@@ -80,8 +82,9 @@ sequenceDiagram
     participant S as Summary engine
     participant P as Persistence
 
-    U->>A: Diagnose(ctx, options, event sink)
-    A->>E: Run(ctx, plan, state)
+    U->>A: DiagnoseRequest(ctx, profile?, explicit overrides, event sink)
+    A->>A: Resolve effective options
+    A->>E: Run(ctx, effective options, plan, state)
     E-->>U: ordered progress events
     loop bounded diagnostic plan
         E->>C: Run(check context, state)
@@ -99,12 +102,39 @@ derives a per-check timeout without extending the parent deadline. Cancelling
 the caller context propagates through DNS, dial, TLS, HTTP, event production,
 and persistence boundaries.
 
+CLI and desktop inputs use `DiagnoseOverrides`, whose pointer fields distinguish
+an omitted value from an explicit `false` or zero. `ResolveDiagnoseOptions`
+merges model defaults, one configuration snapshot, an optional saved profile,
+and explicit run overrides in that order. It then normalizes mode, target, HTTP
+method, and limits and validates the complete result. The returned
+`DiagnoseOptions` is request-capable and belongs only to the execution path; it
+must not be displayed or serialized. `PreviewDiagnoseOptions` resolves the same
+precedence chain and applies the selected privacy projection. Its result is the
+only effective option value safe for UI display or serialization. Completed
+diagnoses are projected by the application service before reports, history, or
+reruns consume them; adapters do not maintain separate merge rules.
+
 Before the direct-origin comparison can consume the global deadline, the
 runner reserves part of it for the actual HTTP route. When a proxy is selected,
 direct DNS, route, TCP, and TLS results are explicitly marked as auxiliary
 comparisons; the proxy-backed HTTP request remains the authoritative client
 path. Invalid proxy configuration skips those direct network probes and fails
 closed.
+
+## Application error boundary
+
+Application failures expose a typed contract independent of Cobra and Fyne.
+Each error has one of the stable categories `validation`, `configuration`,
+`storage`, `permission`, `cancelled`, `network-policy`, or `internal`, plus a
+machine-readable code, a localizable message ID, and privacy-projected
+arguments. Cancellation, deadline, and permission causes retain their standard
+`errors.Is` behavior.
+
+The wrapped infrastructure cause remains available through `errors.Unwrap` for
+safe logging, but is private and is never included in `Error()`, `ErrorView`, or
+JSON. CLI automation and desktop presentation therefore consume the same safe
+classification without exposing database paths, credentials, or raw operating
+system errors.
 
 ## Diagnostic pipeline
 
@@ -148,6 +178,19 @@ The desktop adapter marshals widget mutations onto the Fyne UI thread.
 Network goroutines do not update widgets directly. Desktop build commands use
 the `migrated_fynedo` tag after this migration so Fyne enforces the current
 threading model without its legacy compatibility queue.
+
+Non-diagnostic desktop work uses an application-lifetime GUI task runner.
+Each independently replaceable operation scope has a monotonically increasing
+operation ID and the lifecycle `idle`, `loading`, `success`, `error`, or
+`cancelled`. Starting replacement work cancels the prior scope context; both
+the operation ID and an internal revision prevent a late response from an
+uncooperative dependency from reaching the observer. Closing a scope or the
+root runner cancels its work and suppresses later delivery.
+
+Observers are invoked only through the injected dispatcher (`fyne.Do` in the
+desktop adapter). Read-only work has bounded concurrency (four by default),
+while mutations accepted by one runner execute serially in acceptance order.
+Task panics are contained as operation errors rather than terminating the GUI.
 
 ## Network and platform boundaries
 

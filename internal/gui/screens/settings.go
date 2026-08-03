@@ -17,7 +17,10 @@ import (
 
 // SettingsActions connects the settings screen to the application layer.
 type SettingsActions struct {
-	Save             func(application.Config) error
+	// Save starts asynchronous persistence. The completion callback must be
+	// delivered on the GUI thread with an empty message on success or a
+	// cause-free, user-facing message on failure.
+	Save             func(application.Config, func(message string))
 	ClearHistory     func()
 	OpenLogDirectory func() error
 	ApplyTheme       func(string) error
@@ -157,20 +160,30 @@ func NewSettings(
 				return
 			}
 			cfg, err := readConfig()
-			if err == nil {
-				err = actions.Save(cfg)
-			}
 			if err != nil {
 				status.SetText(texts.Text(localization.SettingsSaveErrorPrefix) + err.Error())
 				status.Importance = widget.DangerImportance
 				status.Refresh()
 				return
 			}
-			initial = cfg
-			status.SetText(texts.Text(localization.SettingsSaved))
-			status.Importance = widget.SuccessImportance
-			status.Refresh()
 			save.Disable()
+			status.SetText(texts.Text(localization.CommonSaving))
+			status.Importance = widget.LowImportance
+			status.Refresh()
+			actions.Save(cfg, func(message string) {
+				if message != "" {
+					status.SetText(texts.Text(localization.SettingsSaveErrorPrefix) + message)
+					status.Importance = widget.DangerImportance
+					status.Refresh()
+					save.Enable()
+					return
+				}
+				initial = cfg
+				status.SetText(texts.Text(localization.SettingsSaved))
+				status.Importance = widget.SuccessImportance
+				status.Refresh()
+				save.Disable()
+			})
 		})
 	save.Importance = widget.HighImportance
 	save.Disable()

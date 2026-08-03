@@ -48,6 +48,14 @@ application never shells out to the CLI. Checks accept `context.Context`,
 have bounded timeouts and concurrency, and stream progress events while the
 engine preserves deterministic result order.
 
+Both interfaces submit only explicit run overrides. The application layer
+combines defaults, configuration, an optional profile, and those overrides into
+one validated, request-capable option set for execution. UI previews use a
+separate privacy-projected copy, and completed diagnoses are projected before
+reports or history can consume them. Application failures likewise share stable
+categories and codes; their JSON-safe view never contains the wrapped technical
+cause.
+
 See [architecture](docs/architecture.md) and the
 [diagnostic model](docs/diagnostic-model.md) for details.
 
@@ -91,6 +99,25 @@ The CLI exit codes are:
 | `2` | Invalid input or configuration |
 | `3` | Internal application error |
 | `130` | Operation cancelled |
+
+When `diagnose` is invoked with `--format json`, failures that occur before a
+report is produced are written to standard error in this stable envelope:
+
+```json
+{
+  "error": {
+    "category": "validation",
+    "code": "APP_DIAGNOSE_OPTIONS_INVALID",
+    "messageId": "error.diagnose_options_invalid",
+    "arguments": {
+      "field": "target"
+    }
+  }
+}
+```
+
+`arguments` is omitted when empty. It contains only privacy-projected values;
+the wrapped technical cause is never included in the JSON envelope.
 
 ## Desktop application
 
@@ -169,9 +196,12 @@ Keyboard shortcuts include `Ctrl+L` for the target field, `Ctrl+Enter` to run,
 `Esc` to cancel, `Ctrl+E` to export, and `Ctrl+,` to open Settings. System,
 light, and dark themes are supported.
 
-Network operations run outside the UI thread and can be cancelled. The GUI
-uses the same diagnosis, redaction, reporting, configuration, and persistence
-services as the CLI. Desktop builds opt into Fyne's `fyne.Do` threading model.
+Network and local application operations run outside the UI thread and can be
+cancelled. GUI operation scopes reject stale responses, limit concurrent
+reads, serialize mutations, and deliver lifecycle changes through `fyne.Do`.
+The GUI uses the same diagnosis, redaction, reporting, configuration, and
+persistence services as the CLI. Desktop builds opt into Fyne's `fyne.Do`
+threading model.
 For a Wayland-only local build, use:
 
 ```bash

@@ -96,6 +96,19 @@ paths. Unknown `slog.Any` structures, `Stringer` values, and `LogValuer`
 implementations are not recursively serialized unless an explicit sanitizer
 allows their type.
 
+`ResolveDiagnoseOptions` returns request-capable execution options and is kept
+inside the execution path. `PreviewDiagnoseOptions` applies the selected
+privacy projection and is the only resolved option value permitted in UI output
+or serialization. Completed diagnoses receive the same projection before they
+cross report, history, or rerun boundaries.
+
+Application errors cross the CLI and GUI boundary as a stable category, code,
+message ID, and redacted arguments. Their wrapped technical cause is retained
+only for `errors.Is`/`errors.As` and safe logging; it is excluded from the error
+string and JSON representation. A filesystem, database, network-policy, or
+operating-system error therefore cannot accidentally become user-visible JSON
+through ordinary application error handling.
+
 ## Network safety
 
 - Global and per-check contexts bound elapsed work.

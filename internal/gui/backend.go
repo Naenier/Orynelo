@@ -11,7 +11,11 @@ import (
 // Backend is the application-layer contract used by the desktop interface.
 // It intentionally contains no Fyne types.
 type Backend interface {
-	Diagnose(context.Context, model.DiagnoseOptions, model.EventSink) (model.Diagnosis, error)
+	DiagnoseRequest(
+		context.Context,
+		application.DiagnoseRequest,
+		model.EventSink,
+	) (model.Diagnosis, error)
 
 	Configuration() application.Config
 	SaveConfiguration(application.Config) error

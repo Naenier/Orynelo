@@ -116,28 +116,34 @@ func TestDiagnoseRedirectPolicyControlsAreExplicit(t *testing.T) {
 	}
 }
 
-func TestDiagnoseRejectsCheckTimeoutLongerThanGlobalTimeout(t *testing.T) {
+func TestDiagnoseLeavesTimeoutRelationshipToApplicationResolver(t *testing.T) {
 	test.NewTempApp(t)
 	screen := NewDiagnose(localization.English{}, DiagnoseActions{})
 	screen.target.SetText("https://example.test")
 	screen.timeout.SetText("2s")
 	screen.checkTimeout.SetText("3s")
 
-	_, err := screen.Input()
-	if err == nil || !strings.Contains(err.Error(), "no longer than") {
+	input, err := screen.Input()
+	if err != nil {
 		t.Fatalf("Input() error = %v", err)
+	}
+	if input.Timeout != 2*time.Second || input.CheckTimeout != 3*time.Second {
+		t.Fatalf("Input() = %#v", input)
 	}
 }
 
-func TestDiagnoseRejectsGlobalTimeoutLongerThanApplicationLimit(t *testing.T) {
+func TestDiagnoseLeavesTimeoutLimitToApplicationResolver(t *testing.T) {
 	test.NewTempApp(t)
 	screen := NewDiagnose(localization.English{}, DiagnoseActions{})
 	screen.target.SetText("https://example.test")
 	screen.timeout.SetText("25h")
 
-	_, err := screen.Input()
-	if err == nil || !strings.Contains(err.Error(), "24h") {
+	input, err := screen.Input()
+	if err != nil {
 		t.Fatalf("Input() error = %v", err)
+	}
+	if input.Timeout != 25*time.Hour {
+		t.Fatalf("Input().Timeout = %v, want 25h", input.Timeout)
 	}
 }
 
