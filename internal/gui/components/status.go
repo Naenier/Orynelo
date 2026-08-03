@@ -132,7 +132,7 @@ func statusIcon(status string) fyne.Resource {
 		return theme.ViewRefreshIcon()
 	case "cancelled":
 		return theme.CancelIcon()
-	case "skipped":
+	case "skipped", "not_applicable":
 		return theme.MediaSkipNextIcon()
 	default:
 		return theme.QuestionIcon()

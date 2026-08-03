@@ -7,19 +7,27 @@ import (
 	"time"
 
 	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
+	"github.com/Naenier/opsdoctor/internal/privacy"
 )
 
 func TestRenderJSONSchemaAndPrivacy(t *testing.T) {
 	t.Parallel()
 	diagnosis := sampleDiagnosis()
+	diagnosis.Target.Original = "report-user:report-password@example.com/%zz#access_token=fragment-report-secret"
+	diagnosis.Target.Normalized = diagnosis.Target.Original
 	diagnosis.Target.RequestURL = "https://example.com/?token=top-secret"
 	diagnosis.Options.Target = "https://alice:password@example.com/?token=top-secret"
+	diagnosis.Options.UserAgent = "OpsDoctor token=user-agent-secret"
 	diagnosis.Checks[0].Evidence[0].Details["unsafe"] = "https://alice:password@example.com/?api_key=top-secret"
+	diagnosis.Checks[0].Evidence[0].Details["responseHeader.Authorization"] = "Bearer namespaced-report-secret"
 	output, err := Render(diagnosis, FormatJSON)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, secret := range []string{"top-secret", "password", "alice"} {
+	for _, secret := range []string{
+		"top-secret", "password", "alice", "user-agent-secret", "namespaced-report-secret",
+		"report-user", "report-password", "fragment-report-secret",
+	} {
 		if strings.Contains(string(output), secret) {
 			t.Fatalf("JSON leaked %q: %s", secret, output)
 		}
@@ -30,6 +38,58 @@ func TestRenderJSONSchemaAndPrivacy(t *testing.T) {
 	}
 	if document.SchemaVersion != "1" || document.Diagnosis.ID != diagnosis.ID {
 		t.Fatalf("document = %#v", document)
+	}
+}
+
+func TestRenderStrictAnonymizationIsOptIn(t *testing.T) {
+	t.Parallel()
+
+	diagnosis := sampleDiagnosis()
+	diagnosis.Target.Original = "https://service.internal/private/customer/42?view=full"
+	diagnosis.Target.Normalized = diagnosis.Target.Original
+	diagnosis.Target.Host = "service.internal"
+	diagnosis.Target.Path = "/private/customer/42"
+	diagnosis.Checks[0].Evidence[0].Details["remoteIp"] = "10.2.3.4"
+	diagnosis.Checks[0].Evidence[0].Details["logPath"] = "/home/alice/.local/share/opsdoctor/app.log"
+	diagnosis.Checks[0].Evidence[0].Details["error"] = "lookup backend01: no such host"
+
+	standard, err := Render(diagnosis, FormatJSON, privacy.ModeStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(standard), "service.internal") ||
+		!strings.Contains(string(standard), "private/customer/42") {
+		t.Fatalf("standard report unexpectedly removed non-secret context: %s", standard)
+	}
+
+	strict, err := Render(diagnosis, FormatJSON, privacy.ModeStrict)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, identifying := range []string{
+		"service.internal", "private/customer/42", "view=full", "10.2.3.4", "/home/alice", "backend01",
+	} {
+		if strings.Contains(string(strict), identifying) {
+			t.Fatalf("strict report retained %q: %s", identifying, strict)
+		}
+	}
+}
+
+func TestRenderJSONNormalizesNonUTCTimestamps(t *testing.T) {
+	t.Parallel()
+
+	diagnosis := sampleDiagnosis()
+	zone := time.FixedZone("non-utc", -7*60*60)
+	diagnosis.StartedAt = time.Date(2026, 8, 3, 12, 0, 0, 0, zone)
+	diagnosis.FinishedAt = diagnosis.StartedAt.Add(time.Second)
+	diagnosis.Checks[0].StartedAt = diagnosis.StartedAt
+	diagnosis.Checks[0].FinishedAt = diagnosis.FinishedAt
+	output, err := Render(diagnosis, FormatJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(output), "-07:00") || !strings.Contains(string(output), "Z") {
+		t.Fatalf("JSON report timestamps are not UTC: %s", output)
 	}
 }
 
@@ -67,6 +127,75 @@ func TestVerboseHumanReportsIncludeStableTechnicalIdentifiers(t *testing.T) {
 			if !strings.Contains(string(output), expected) {
 				t.Fatalf("verbose %s report missing %q:\n%s", format, expected, output)
 			}
+		}
+	}
+}
+
+func TestHumanReportsSurfaceRedirectAndAuxiliaryRoutePolicy(t *testing.T) {
+	t.Parallel()
+	diagnosis := sampleDiagnosis()
+	diagnosis.Options.MaxRedirects = 7
+	diagnosis.Options.MaxRedirectLocationBytes = 4096
+	diagnosis.Options.ActualHTTPReserve = 3 * time.Second
+	diagnosis.Options.AllowInsecureRedirects = true
+	diagnosis.Checks[0].Role = model.CheckRoleAuxiliaryDirectComparison
+
+	for _, format := range []Format{FormatText, FormatMarkdown} {
+		output, err := Render(diagnosis, format)
+		if err != nil {
+			t.Fatalf("Render(%s) error = %v", format, err)
+		}
+		text := string(output)
+		for _, expected := range []string{
+			"allow HTTPS-to-HTTP downgrade (explicit opt-in)",
+			"block public-to-private network transitions",
+			"strip sensitive headers cross-origin",
+			"4096",
+			"auxiliary_direct_comparison",
+		} {
+			if !strings.Contains(text, expected) {
+				t.Fatalf("%s report missing %q:\n%s", format, expected, text)
+			}
+		}
+	}
+}
+
+func TestHumanReportsKeepMixedHTTPRouteTruthful(t *testing.T) {
+	t.Parallel()
+	diagnosis := sampleDiagnosis()
+	diagnosis.Summary.Title = "Target reachable across mixed direct/proxy routes"
+	diagnosis.Summary.Description = "The redirect chain used both direct and proxy routes."
+	diagnosis.Checks[0].Evidence[0].Details = map[string]string{
+		"route":             "mixed",
+		"proxySource":       "HTTPS_PROXY",
+		"proxyBypassReason": "no_proxy_match",
+	}
+
+	for _, format := range []Format{FormatText, FormatMarkdown} {
+		output, err := Render(diagnosis, format)
+		if err != nil {
+			t.Fatalf("Render(%s) error = %v", format, err)
+		}
+		text := string(output)
+		expectedDetails := []string{
+			"route: mixed",
+			"proxySource: HTTPS_PROXY",
+			"proxyBypassReason: no_proxy_match",
+		}
+		if format == FormatMarkdown {
+			expectedDetails = []string{
+				"`route`: `mixed`",
+				"`proxySource`: `HTTPS_PROXY`",
+				"`proxyBypassReason`: `no_proxy_match`",
+			}
+		}
+		for _, expected := range append([]string{"mixed direct/proxy routes"}, expectedDetails...) {
+			if !strings.Contains(text, expected) {
+				t.Fatalf("%s report missing %q:\n%s", format, expected, text)
+			}
+		}
+		if strings.Contains(text, "Target reachable through selected proxy") {
+			t.Fatalf("%s report made a proxy-only claim:\n%s", format, text)
 		}
 	}
 }

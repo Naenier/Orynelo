@@ -147,6 +147,9 @@ func TestParseRemovesSecretsFromSerializableTarget(t *testing.T) {
 	if strings.Contains(got.RequestURL, "alice") {
 		t.Fatalf("request URL must not replay userinfo: %s", got.RequestURL)
 	}
+	if !got.PrivacyRedacted {
+		t.Fatal("target did not retain privacy-redaction provenance for profile preview")
+	}
 }
 
 func TestParsePreservesSchemeLessOriginalSyntax(t *testing.T) {

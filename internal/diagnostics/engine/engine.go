@@ -13,6 +13,12 @@ import (
 
 const ErrorCheckTimeout = "CHECK_TIMEOUT"
 const ErrorInternalPanic = "CHECK_INTERNAL_PANIC"
+const ErrorAuxiliaryBudget = "AUXILIARY_BUDGET_RESERVED"
+
+// ErrAuxiliaryBudgetExhausted is used by the Runner's short-term budget split.
+// It stops comparison probes while leaving the parent deadline available to
+// the actual HTTP/proxy route.
+var ErrAuxiliaryBudgetExhausted = errors.New("auxiliary diagnostic budget exhausted")
 
 // Plan is an ordered list of stages. Checks within a stage may execute in
 // parallel; stages execute sequentially.
@@ -20,9 +26,11 @@ type Plan [][]model.Check
 
 // Config controls plan execution.
 type Config struct {
-	CheckTimeout   time.Duration
-	MaxConcurrency int
-	Now            func() time.Time
+	CheckTimeout     time.Duration
+	MaxConcurrency   int
+	Now              func() time.Time
+	EventIndexOffset int
+	SkipCheck        func(*model.State, model.Check) (model.CheckResult, bool)
 }
 
 // Engine executes a reusable diagnostic plan without global mutable state.
@@ -57,14 +65,14 @@ func (e *Engine) Run(ctx context.Context, state *model.State, plan Plan, sink mo
 		}
 		if ctx.Err() != nil {
 			for _, check := range stage {
-				results[offset] = stoppedResult(check, e.now(), ctx.Err())
+				results[offset] = stoppedResult(check, e.now(), context.Cause(ctx))
 				emit(sink, model.CheckEvent{
 					Type:      model.EventCheckCompleted,
 					CheckID:   check.ID(),
 					CheckName: check.Name(),
 					Status:    results[offset].Status,
 					At:        e.now(),
-					Index:     offset,
+					Index:     e.config.EventIndexOffset + offset,
 					Result:    resultPointer(results[offset]),
 				})
 				offset++
@@ -79,7 +87,7 @@ func (e *Engine) Run(ctx context.Context, state *model.State, plan Plan, sink mo
 				CheckName: check.Name(),
 				Status:    model.StatusRunning,
 				At:        e.now(),
-				Index:     offset + index,
+				Index:     e.config.EventIndexOffset + offset + index,
 			})
 		}
 		stageResults := e.runStage(ctx, state, stage)
@@ -91,7 +99,7 @@ func (e *Engine) Run(ctx context.Context, state *model.State, plan Plan, sink mo
 				CheckName: result.Name,
 				Status:    result.Status,
 				At:        result.FinishedAt,
-				Index:     offset + index,
+				Index:     e.config.EventIndexOffset + offset + index,
 				Result:    resultPointer(result),
 			})
 		}
@@ -128,7 +136,18 @@ func (e *Engine) runStage(ctx context.Context, state *model.State, checks []mode
 func (e *Engine) runCheck(ctx context.Context, state *model.State, check model.Check) (result model.CheckResult) {
 	started := e.now()
 	if ctx.Err() != nil {
-		return stoppedResult(check, started, ctx.Err())
+		return stoppedResult(check, started, context.Cause(ctx))
+	}
+	if e.config.SkipCheck != nil {
+		if skipped, ok := e.config.SkipCheck(state, check); ok {
+			if skipped.ID == "" {
+				skipped.ID = check.ID()
+			}
+			if skipped.Name == "" {
+				skipped.Name = check.Name()
+			}
+			return skipped.Complete(started, e.now())
+		}
 	}
 	checkCtx := ctx
 	cancel := func() {}
@@ -164,7 +183,17 @@ func (e *Engine) runCheck(ctx context.Context, state *model.State, check model.C
 		result.Name = check.Name()
 	}
 	if ctx.Err() != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		cause := context.Cause(ctx)
+		if errors.Is(cause, ErrAuxiliaryBudgetExhausted) {
+			result.Status = model.StatusSkipped
+			result.ErrorCode = ErrorAuxiliaryBudget
+			result.Summary = "The auxiliary comparison stopped to preserve time for the actual HTTP route."
+			result.Evidence = append(result.Evidence, model.Evidence{
+				ID:      check.ID() + ".auxiliary_budget",
+				Code:    ErrorAuxiliaryBudget,
+				Message: "The reserved actual-route budget was preserved.",
+			})
+		} else if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			result.Status = model.StatusFailed
 			result.ErrorCode = "OPERATION_TIMEOUT"
 			result.Summary = "The diagnosis timeout elapsed."
@@ -173,11 +202,17 @@ func (e *Engine) runCheck(ctx context.Context, state *model.State, check model.C
 			result.ErrorCode = "OPERATION_CANCELLED"
 			result.Summary = "The check was cancelled."
 		}
-	} else if checkCtx.Err() == context.DeadlineExceeded &&
-		(result.Status == model.StatusCancelled || result.Status == model.StatusRunning || result.Status == model.StatusPending) {
+	} else if checkCtx.Err() == context.DeadlineExceeded {
 		result.Status = model.StatusFailed
 		result.ErrorCode = ErrorCheckTimeout
 		result.Summary = "The check exceeded its configured timeout."
+		result.Evidence = ensureCheckTimeoutEvidence(
+			result.Evidence,
+			result.ID,
+			result.Name,
+			e.config.CheckTimeout,
+			finished.Sub(started),
+		)
 	}
 	if !result.Status.Valid() || result.Status == model.StatusPending || result.Status == model.StatusRunning {
 		result.Status = model.StatusFailed
@@ -186,6 +221,52 @@ func (e *Engine) runCheck(ctx context.Context, state *model.State, check model.C
 		}
 	}
 	return result.Complete(started, finished)
+}
+
+func ensureCheckTimeoutEvidence(
+	evidence []model.Evidence,
+	checkID string,
+	checkName string,
+	budget time.Duration,
+	elapsed time.Duration,
+) []model.Evidence {
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	details := map[string]string{
+		"stage":            checkID,
+		"checkName":        checkName,
+		"configuredBudget": budget.String(),
+		"elapsed":          elapsed.String(),
+	}
+	for index := range evidence {
+		if evidence[index].Code != ErrorCheckTimeout {
+			continue
+		}
+		if evidence[index].ID == "" {
+			evidence[index].ID = checkID + ".timeout"
+		}
+		if evidence[index].CheckID == "" {
+			evidence[index].CheckID = checkID
+		}
+		if evidence[index].Message == "" {
+			evidence[index].Message = "The diagnostic check exceeded its configured timeout."
+		}
+		if evidence[index].Details == nil {
+			evidence[index].Details = make(map[string]string, len(details))
+		}
+		for key, value := range details {
+			evidence[index].Details[key] = value
+		}
+		return evidence
+	}
+	return append(evidence, model.Evidence{
+		ID:      checkID + ".timeout",
+		CheckID: checkID,
+		Code:    ErrorCheckTimeout,
+		Message: "The diagnostic check exceeded its configured timeout.",
+		Details: details,
+	})
 }
 
 func stoppedResult(check model.Check, now time.Time, err error) model.CheckResult {
@@ -197,6 +278,18 @@ func stoppedResult(check model.Check, now time.Time, err error) model.CheckResul
 		FinishedAt: now,
 		Summary:    "The check was cancelled before it started.",
 		ErrorCode:  "OPERATION_CANCELLED",
+	}
+	if errors.Is(err, ErrAuxiliaryBudgetExhausted) {
+		result.Status = model.StatusSkipped
+		result.Summary = "The auxiliary comparison was not started so the actual HTTP route retained its reserved budget."
+		result.ErrorCode = ErrorAuxiliaryBudget
+		result.Evidence = []model.Evidence{{
+			ID:      check.ID() + ".auxiliary_budget",
+			CheckID: check.ID(),
+			Code:    ErrorAuxiliaryBudget,
+			Message: "The reserved actual-route budget was preserved.",
+		}}
+		return result
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		result.Status = model.StatusFailed

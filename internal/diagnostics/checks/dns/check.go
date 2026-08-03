@@ -15,9 +15,10 @@ import (
 )
 
 const (
-	ErrorLookupFailed = "DNS_LOOKUP_FAILED"
-	ErrorNoRecords    = "DNS_NO_RECORDS"
-	ErrorCancelled    = "DNS_CANCELLED"
+	ErrorLookupFailed     = "DNS_LOOKUP_FAILED"
+	ErrorNoRecords        = "DNS_NO_RECORDS"
+	ErrorIPFamilyMismatch = "DNS_IP_LITERAL_FAMILY_MISMATCH"
+	ErrorCancelled        = "DNS_CANCELLED"
 )
 
 // Resolver is implemented by net.Resolver and test doubles.
@@ -55,12 +56,22 @@ func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 		result := model.DNSResult{}
 		if ip.To4() != nil {
 			if state.Options.IPVersion == model.IPVersion6 {
-				return noRecordsResult(c, "The target is IPv4 but IPv6-only mode was requested.")
+				return ipFamilyMismatchResult(
+					c,
+					ip,
+					state.Options.IPVersion,
+					"The target is IPv4 but IPv6-only mode was requested.",
+				)
 			}
 			result.IPv4 = []net.IP{canonicalIP(ip)}
 		} else {
 			if state.Options.IPVersion == model.IPVersion4 {
-				return noRecordsResult(c, "The target is IPv6 but IPv4-only mode was requested.")
+				return ipFamilyMismatchResult(
+					c,
+					ip,
+					state.Options.IPVersion,
+					"The target is IPv6 but IPv4-only mode was requested.",
+				)
 			}
 			result.IPv6 = []net.IP{canonicalIP(ip)}
 		}
@@ -195,6 +206,43 @@ func noRecordsResult(c *Check, summary string) model.CheckResult {
 		Summary:   summary,
 		ErrorCode: ErrorNoRecords,
 	}
+}
+
+func ipFamilyMismatchResult(
+	c *Check,
+	literal net.IP,
+	requested model.IPVersion,
+	summary string,
+) model.CheckResult {
+	return model.CheckResult{
+		ID:        c.ID(),
+		Name:      c.Name(),
+		Status:    model.StatusFailed,
+		Summary:   summary,
+		ErrorCode: ErrorIPFamilyMismatch,
+		Evidence: []model.Evidence{{
+			ID:      "dns.literal_family_mismatch",
+			Code:    ErrorIPFamilyMismatch,
+			Message: "The literal address family does not match the requested IP mode.",
+			Details: map[string]string{
+				"address":       literal.String(),
+				"addressFamily": literalFamily(literal),
+				"requestedMode": string(requested),
+			},
+		}},
+		Recommendations: []model.Recommendation{{
+			ID:       "dns.select_literal_family",
+			Priority: "high",
+			Message:  "Select an IP family that matches the literal target address.",
+		}},
+	}
+}
+
+func literalFamily(ip net.IP) string {
+	if ip.To4() != nil {
+		return "ipv4"
+	}
+	return "ipv6"
 }
 
 func requestedFamilies(version model.IPVersion) []string {

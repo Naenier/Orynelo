@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -51,6 +52,11 @@ func TestRedactURL(t *testing.T) {
 			name: "malformed URL is scrubbed",
 			in:   "https://user:pass@example.test/%zz?token=secret&safe=yes",
 			want: "https://example.test/%zz?token=[REDACTED]&safe=yes",
+		},
+		{
+			name: "malformed URL fragment is scrubbed",
+			in:   "https://user:pass@example.test/%zz#access_token=fragment-secret",
+			want: "https://example.test/%zz#access_token=[REDACTED]",
 		},
 	}
 
@@ -151,6 +157,13 @@ func TestSensitiveNames(t *testing.T) {
 			t.Errorf("IsSensitiveHeader(%q) = false", name)
 		}
 	}
+	for _, name := range []string{
+		"responseHeader.Authorization", "request.headers[Cookie]", "query/access_token",
+	} {
+		if !IsSensitiveStructuredKey(name) {
+			t.Errorf("IsSensitiveStructuredKey(%q) = false", name)
+		}
+	}
 }
 
 func TestSlogHandler(t *testing.T) {
@@ -204,5 +217,82 @@ func TestSlogHandlerHandlesNilAndRecursiveValues(t *testing.T) {
 	logger.Info("recursive", "value", recursive)
 	if output.Len() == 0 {
 		t.Fatal("recursive value was not logged")
+	}
+}
+
+func TestSlogHandlerDoesNotRecursivelySerializeUnknownAnyValues(t *testing.T) {
+	t.Parallel()
+
+	type unapprovedPayload struct {
+		Visible string
+		Secret  string
+	}
+	var output bytes.Buffer
+	logger := slog.New(NewHandler(slog.NewJSONHandler(&output, nil)))
+	logger.Info(
+		"unknown payload",
+		slog.Any("payload", unapprovedPayload{Visible: "struct-visible", Secret: "struct-secret"}),
+		slog.Any("nested", map[string]any{
+			"safe":                         "map-visible",
+			"unknown":                      unapprovedPayload{Visible: "nested-visible", Secret: "nested-secret"},
+			"responseHeader.Authorization": "Bearer namespaced-log-secret",
+		}),
+	)
+
+	logged := output.String()
+	for _, leaked := range []string{
+		"struct-visible", "struct-secret", "nested-visible", "nested-secret", "namespaced-log-secret",
+	} {
+		if strings.Contains(logged, leaked) {
+			t.Fatalf("slog recursively serialized unknown value %q: %s", leaked, logged)
+		}
+	}
+	if !strings.Contains(logged, "map-visible") || !strings.Contains(logged, Replacement) {
+		t.Fatalf("slog did not preserve safe map data and mark unknown values: %s", logged)
+	}
+}
+
+type unsafeStringer struct{}
+
+func (unsafeStringer) String() string { return "custom-stringer-secret" }
+
+func TestSlogHandlerDoesNotTrustArbitraryStringers(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	logger := slog.New(NewHandler(slog.NewJSONHandler(&output, nil)))
+	logger.Info("stringer", slog.Any("payload", unsafeStringer{}))
+	if strings.Contains(output.String(), "custom-stringer-secret") {
+		t.Fatalf("slog trusted an arbitrary Stringer: %s", output.String())
+	}
+	if !strings.Contains(output.String(), Replacement) {
+		t.Fatalf("slog did not mark an unknown Stringer: %s", output.String())
+	}
+}
+
+type unsafeLogValuer struct {
+	calls *atomic.Int32
+}
+
+func (value unsafeLogValuer) LogValue() slog.Value {
+	value.calls.Add(1)
+	return slog.StringValue("bare-custom-logvaluer-secret")
+}
+
+func TestSlogHandlerDoesNotResolveArbitraryLogValuers(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	var calls atomic.Int32
+	logger := slog.New(NewHandler(slog.NewJSONHandler(&output, nil)))
+	logger.Info("logvaluer", slog.Any("payload", unsafeLogValuer{calls: &calls}))
+	if strings.Contains(output.String(), "custom-logvaluer-secret") {
+		t.Fatalf("slog resolved an arbitrary LogValuer: %s", output.String())
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("slog invoked an arbitrary LogValuer %d time(s)", calls.Load())
+	}
+	if !strings.Contains(output.String(), Replacement) {
+		t.Fatalf("slog did not mark an unknown LogValuer: %s", output.String())
 	}
 }

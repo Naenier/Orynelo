@@ -95,8 +95,16 @@ func TestCheckIPLiteralHonorsMode(t *testing.T) {
 	options.IPVersion = model.IPVersion6
 	state := model.NewState(model.Target{Host: "192.0.2.1", Port: 443}, options)
 	result := New(fakeResolver{}).Run(context.Background(), state)
-	if result.Status != model.StatusFailed || result.ErrorCode != ErrorNoRecords {
+	if result.Status != model.StatusFailed || result.ErrorCode != ErrorIPFamilyMismatch {
 		t.Fatalf("result = %#v", result)
+	}
+	if len(result.Recommendations) != 1 {
+		t.Fatalf("family mismatch lacks an actionable recommendation: %#v", result)
+	}
+	if len(result.Evidence) != 1 || result.Evidence[0].ID != "dns.literal_family_mismatch" ||
+		result.Evidence[0].Details["addressFamily"] != "ipv4" ||
+		result.Evidence[0].Details["requestedMode"] != "6" {
+		t.Fatalf("family mismatch lacks concrete evidence: %#v", result.Evidence)
 	}
 }
 

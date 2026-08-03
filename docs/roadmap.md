@@ -13,7 +13,7 @@ security review, and verified platform-build results.
 The current scope focuses on:
 
 - robust URL, hostname, port, IPv4, IPv6, and IDN parsing;
-- system proxy and `NO_PROXY` interpretation;
+- proxy environment-variable and `NO_PROXY` interpretation;
 - separate A and AAAA results;
 - source-address and interface discovery;
 - bounded TCP attempts with typed error classification;

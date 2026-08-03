@@ -29,6 +29,7 @@ func Diagnosis(texts localization.Catalog, value model.Diagnosis) DiagnosisView 
 		checks = append(checks, Check(texts, check))
 		lowerID := strings.ToLower(check.ID)
 		checkMeasured := check.Status != model.StatusSkipped &&
+			check.Status != model.StatusNotApplicable &&
 			check.Status != model.StatusCancelled
 		switch {
 		case strings.Contains(lowerID, "dns"):

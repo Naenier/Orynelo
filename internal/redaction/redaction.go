@@ -4,12 +4,12 @@ package redaction
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // Replacement is the stable marker used for every removed value.
@@ -105,6 +105,30 @@ func IsSensitiveHeader(name string) bool {
 	return IsSensitiveQueryKey(extension) ||
 		strings.HasPrefix(extension, "secret") ||
 		strings.HasPrefix(extension, "credential")
+}
+
+// IsSensitiveStructuredKey recognizes both plain field names and common
+// namespaced map/detail conventions such as responseHeader.Authorization and
+// query[access_token]. Values under these keys must be removed as a whole.
+func IsSensitiveStructuredKey(key string) bool {
+	if IsSensitiveHeader(key) || IsSensitiveQueryKey(key) {
+		return true
+	}
+	parts := strings.FieldsFunc(key, func(char rune) bool {
+		switch char {
+		case '.', ':', '/', '[', ']':
+			return true
+		default:
+			return false
+		}
+	})
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if IsSensitiveHeader(part) || IsSensitiveQueryKey(part) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeName(name string) string {
@@ -216,18 +240,23 @@ func redactQueryPart(part string) string {
 
 func redactMalformedURL(raw string) string {
 	result := removeLooseUserinfo(raw)
+	fragment := ""
+	hasFragment := false
+	if fragmentStart := strings.IndexByte(result, '#'); fragmentStart >= 0 {
+		fragment = result[fragmentStart+1:]
+		result = result[:fragmentStart]
+		hasFragment = true
+	}
 	queryStart := strings.IndexByte(result, '?')
 	if queryStart < 0 {
-		return redactQueryLikeText(result)
+		result = redactQueryLikeText(result)
+	} else {
+		result = result[:queryStart+1] + redactRawQuery(result[queryStart+1:])
 	}
-	fragmentStart := strings.IndexByte(result[queryStart+1:], '#')
-	if fragmentStart < 0 {
-		return result[:queryStart+1] + redactRawQuery(result[queryStart+1:])
+	if hasFragment {
+		result += "#" + redactQueryLikeText(fragment)
 	}
-	fragmentStart += queryStart + 1
-	return result[:queryStart+1] +
-		redactRawQuery(result[queryStart+1:fragmentStart]) +
-		result[fragmentStart:]
+	return result
 }
 
 func removeLooseUserinfo(raw string) string {
@@ -289,7 +318,7 @@ func RedactMap(input map[string]string) map[string]string {
 	}
 	result := make(map[string]string, len(input))
 	for name, value := range input {
-		if IsSensitiveHeader(name) || IsSensitiveQueryKey(name) {
+		if IsSensitiveStructuredKey(name) {
 			result[name] = Replacement
 		} else {
 			result[name] = RedactText(value)
@@ -376,10 +405,19 @@ func (h *Handler) WithGroup(name string) slog.Handler {
 }
 
 func redactAttr(attr slog.Attr) slog.Attr {
-	attr.Value = attr.Value.Resolve()
-	if IsSensitiveHeader(attr.Key) || IsSensitiveQueryKey(attr.Key) {
+	if IsSensitiveStructuredKey(attr.Key) {
 		return slog.String(attr.Key, Replacement)
 	}
+	// slog.Any may hold an arbitrary struct or LogValuer. Inspect only the
+	// explicit allowlist below; Resolve would execute unknown user code and
+	// could turn an opaque structure into recursively serialized secrets.
+	if attr.Value.Kind() == slog.KindAny {
+		return redactAnyAttr(attr)
+	}
+	if attr.Value.Kind() == slog.KindLogValuer {
+		return slog.String(attr.Key, Replacement)
+	}
+	attr.Value = attr.Value.Resolve()
 
 	switch attr.Value.Kind() {
 	case slog.KindString:
@@ -391,8 +429,6 @@ func redactAttr(attr slog.Attr) slog.Attr {
 			scrubbed[index] = redactAttr(child)
 		}
 		return slog.Group(attr.Key, attrsToAny(scrubbed)...)
-	case slog.KindAny:
-		return redactAnyAttr(attr)
 	default:
 		return attr
 	}
@@ -434,10 +470,8 @@ func redactAnyAttr(attr slog.Attr) slog.Attr {
 		return slog.Any(attr.Key, scrubbed)
 	case error:
 		return slog.String(attr.Key, RedactText(value.Error()))
-	case fmt.Stringer:
-		return slog.String(attr.Key, RedactText(value.String()))
 	default:
-		return attr
+		return slog.String(attr.Key, Replacement)
 	}
 }
 
@@ -453,7 +487,7 @@ func redactAnyMap(input map[string]any, depth int) map[string]any {
 }
 
 func redactAnyValue(key string, input any, depth int) any {
-	if IsSensitiveHeader(key) || IsSensitiveQueryKey(key) {
+	if IsSensitiveStructuredKey(key) {
 		return Replacement
 	}
 	if depth >= 8 {
@@ -488,7 +522,16 @@ func redactAnyValue(key string, input any, depth int) any {
 			result[index] = redactAnyValue("", value[index], depth+1)
 		}
 		return result
+	case nil, bool,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64:
+		return value
+	case time.Time:
+		return value.UTC()
+	case time.Duration:
+		return value
 	default:
-		return input
+		return Replacement
 	}
 }

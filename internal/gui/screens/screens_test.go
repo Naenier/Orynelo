@@ -63,6 +63,8 @@ func TestSetProfileResetsUnsafeRunOnlyControls(t *testing.T) {
 	test.NewTempApp(t)
 	screen := NewDiagnose(localization.English{}, DiagnoseActions{})
 	screen.insecure.SetChecked(true)
+	screen.allowInsecureRedirects.SetChecked(true)
+	screen.allowPrivateRedirects.SetChecked(true)
 	screen.verbosity.SetSelected("Verbose")
 
 	screen.SetProfile(presenter.ProfileView{
@@ -82,8 +84,60 @@ func TestSetProfileResetsUnsafeRunOnlyControls(t *testing.T) {
 	if input.Insecure {
 		t.Fatal("stored profile inherited insecure TLS")
 	}
+	if input.AllowInsecureRedirects || input.AllowPrivateRedirects {
+		t.Fatal("stored profile inherited unsafe redirect opt-ins")
+	}
 	if input.Verbosity != "normal" {
 		t.Fatalf("stored profile verbosity = %q, want normal", input.Verbosity)
+	}
+}
+
+func TestDiagnoseRedirectPolicyControlsAreExplicit(t *testing.T) {
+	test.NewTempApp(t)
+	screen := NewDiagnose(localization.English{}, DiagnoseActions{})
+	screen.target.SetText("https://example.test")
+	screen.allowInsecureRedirects.SetChecked(true)
+	screen.allowPrivateRedirects.SetChecked(true)
+
+	input, err := screen.Input()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !input.AllowInsecureRedirects || !input.AllowPrivateRedirects {
+		t.Fatalf("input = %#v", input)
+	}
+	if !strings.Contains(screen.allowInsecureRedirects.Text, "HTTPS to HTTP") ||
+		!strings.Contains(screen.allowPrivateRedirects.Text, "private-network") {
+		t.Fatalf(
+			"unsafe control labels are not explicit: %q / %q",
+			screen.allowInsecureRedirects.Text,
+			screen.allowPrivateRedirects.Text,
+		)
+	}
+}
+
+func TestDiagnoseRejectsCheckTimeoutLongerThanGlobalTimeout(t *testing.T) {
+	test.NewTempApp(t)
+	screen := NewDiagnose(localization.English{}, DiagnoseActions{})
+	screen.target.SetText("https://example.test")
+	screen.timeout.SetText("2s")
+	screen.checkTimeout.SetText("3s")
+
+	_, err := screen.Input()
+	if err == nil || !strings.Contains(err.Error(), "no longer than") {
+		t.Fatalf("Input() error = %v", err)
+	}
+}
+
+func TestDiagnoseRejectsGlobalTimeoutLongerThanApplicationLimit(t *testing.T) {
+	test.NewTempApp(t)
+	screen := NewDiagnose(localization.English{}, DiagnoseActions{})
+	screen.target.SetText("https://example.test")
+	screen.timeout.SetText("25h")
+
+	_, err := screen.Input()
+	if err == nil || !strings.Contains(err.Error(), "24h") {
+		t.Fatalf("Input() error = %v", err)
 	}
 }
 

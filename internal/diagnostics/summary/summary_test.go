@@ -1,7 +1,9 @@
 package summary
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	httpcheck "github.com/Naenier/opsdoctor/internal/diagnostics/checks/http"
 	"github.com/Naenier/opsdoctor/internal/diagnostics/checks/tcp"
@@ -160,6 +162,327 @@ func TestEvidenceBasedRules(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBlockerOutranksEarlierDegradedPathWarning(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		upper  model.CheckResult
+		title  string
+		status model.Status
+	}{
+		{
+			name:   "TLS failure outranks partial TCP",
+			upper:  result("tls", model.StatusFailed, tlscheck.ErrorExpired),
+			title:  "TLS certificate expired",
+			status: model.StatusFailed,
+		},
+		{
+			name:   "untrusted TLS outranks partial TCP",
+			upper:  result("tls", model.StatusFailed, tlscheck.ErrorUnknownAuthority),
+			title:  "TLS chain is not trusted",
+			status: model.StatusFailed,
+		},
+		{
+			name:   "HTTP failure outranks partial TCP",
+			upper:  result("http", model.StatusFailed, httpcheck.ErrorTransport),
+			title:  "HTTP transport failed",
+			status: model.StatusFailed,
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			results := []model.CheckResult{
+				tcpResult(
+					model.StatusWarning,
+					tcp.ErrorPartialFailure,
+					attempt("ipv4", true),
+					attempt("ipv6", false),
+				),
+				test.upper,
+			}
+			got := Build(results)
+			if got.Title != test.title || got.Status != test.status {
+				t.Fatalf("Build() = %#v", got)
+			}
+			if !containsReference(got.EvidenceRefs, test.upper.Evidence[0].ID) {
+				t.Fatalf("evidence refs = %#v, want %q", got.EvidenceRefs, test.upper.Evidence[0].ID)
+			}
+		})
+	}
+}
+
+func TestHTTPFailureOutranksRouteWarning(t *testing.T) {
+	t.Parallel()
+	routeWarning := result("route", model.StatusWarning, "ROUTE_DISCOVERY_FAILED")
+	httpFailure := result("http", model.StatusFailed, httpcheck.ErrorTransport)
+
+	got := Build([]model.CheckResult{routeWarning, httpFailure})
+	if got.Title != "HTTP transport failed" || got.Status != model.StatusFailed {
+		t.Fatalf("Build() = %#v", got)
+	}
+	if !containsReference(got.EvidenceRefs, httpFailure.Evidence[0].ID) {
+		t.Fatalf("evidence refs = %#v", got.EvidenceRefs)
+	}
+}
+
+func TestObservedFailureOutranksLaterCancellation(t *testing.T) {
+	t.Parallel()
+	dns := result("dns", model.StatusFailed, "DNS_LOOKUP_FAILED")
+	cancelled := result("tcp", model.StatusCancelled, tcp.ErrorCancelled)
+
+	got := Build([]model.CheckResult{dns, cancelled})
+	if got.Title != "DNS resolution failed" || got.Status != model.StatusFailed {
+		t.Fatalf("Build() = %#v", got)
+	}
+}
+
+func TestCheckTimeoutIdentifiesStageAndConfiguredBudget(t *testing.T) {
+	t.Parallel()
+	timedOut := result("tls", model.StatusFailed, "CHECK_TIMEOUT")
+	timedOut.Name = "TLS handshake and certificate"
+	timedOut.Duration = 5 * time.Second
+	timedOut.Evidence = []model.Evidence{{
+		ID:      "tls.timeout",
+		CheckID: "tls",
+		Code:    "CHECK_TIMEOUT",
+		Message: "The diagnostic check exceeded its configured timeout.",
+		Details: map[string]string{
+			"stage":            "tls",
+			"configuredBudget": "5s",
+			"elapsed":          "5s",
+		},
+	}}
+
+	got := Build([]model.CheckResult{timedOut})
+	if got.Title != "Diagnostic check timed out" || got.Status != model.StatusFailed {
+		t.Fatalf("Build() = %#v", got)
+	}
+	if !strings.Contains(got.Description, "TLS handshake and certificate") ||
+		!strings.Contains(got.Description, "5s") {
+		t.Fatalf("description = %q", got.Description)
+	}
+	if !containsReference(got.EvidenceRefs, "tls.timeout") {
+		t.Fatalf("evidence refs = %#v", got.EvidenceRefs)
+	}
+}
+
+func TestHigherLayerFailureOutranksLowerCheckTimeout(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		lower model.CheckResult
+		upper model.CheckResult
+		title string
+	}{
+		{
+			name:  "HTTP transport failure outranks TCP check budget",
+			lower: result("tcp", model.StatusFailed, "CHECK_TIMEOUT"),
+			upper: result("http", model.StatusFailed, httpcheck.ErrorTransport),
+			title: "HTTP transport failed",
+		},
+		{
+			name:  "HTTP redirect failure outranks route check budget",
+			lower: result("route", model.StatusFailed, "CHECK_TIMEOUT"),
+			upper: result("http", model.StatusFailed, httpcheck.ErrorRedirectLoop),
+			title: "HTTP redirect chain failed",
+		},
+		{
+			name:  "TLS certificate failure outranks TCP check budget",
+			lower: result("tcp", model.StatusFailed, "CHECK_TIMEOUT"),
+			upper: result("tls", model.StatusFailed, tlscheck.ErrorExpired),
+			title: "TLS certificate expired",
+		},
+		{
+			name:  "actual HTTP check budget outranks TCP check budget",
+			lower: result("tcp", model.StatusFailed, "CHECK_TIMEOUT"),
+			upper: result("http", model.StatusFailed, "CHECK_TIMEOUT"),
+			title: "Diagnostic check timed out",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			got := Build([]model.CheckResult{test.lower, test.upper})
+			if got.Title != test.title || got.Status != model.StatusFailed {
+				t.Fatalf("Build() = %#v", got)
+			}
+			if !containsReference(got.EvidenceRefs, test.upper.Evidence[0].ID) {
+				t.Fatalf("evidence refs = %#v, want %q", got.EvidenceRefs, test.upper.Evidence[0].ID)
+			}
+		})
+	}
+}
+
+func TestActualHTTPSuccessTurnsPreflightFailureIntoDiscrepancy(t *testing.T) {
+	t.Parallel()
+	tcpFailure := result("tcp", model.StatusFailed, tcp.ErrorTimeout)
+	httpSuccess := result("http", model.StatusPassed, "")
+
+	got := Build([]model.CheckResult{tcpFailure, httpSuccess})
+	if got.Title != "HTTP request succeeded despite preflight failure" ||
+		got.Status != model.StatusWarning {
+		t.Fatalf("Build() = %#v", got)
+	}
+	for _, reference := range []string{tcpFailure.Evidence[0].ID, httpSuccess.Evidence[0].ID} {
+		if !containsReference(got.EvidenceRefs, reference) {
+			t.Fatalf("evidence refs = %#v, want %q", got.EvidenceRefs, reference)
+		}
+	}
+	if !strings.Contains(strings.ToLower(got.Description), "preflight") {
+		t.Fatalf("description = %q", got.Description)
+	}
+}
+
+func TestActualMixedRouteSupersedesInitialProxySelection(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		environment   model.CheckResult
+		redirectRoute string
+		bypass        string
+	}{
+		{
+			name:          "initial proxy redirects to NO_PROXY direct",
+			environment:   withEvidence(result("environment", model.StatusWarning, ""), "PROXY_SELECTED"),
+			redirectRoute: "direct",
+			bypass:        "no_proxy_match",
+		},
+		{
+			name:          "initial NO_PROXY direct redirects to proxy",
+			environment:   withEvidence(result("environment", model.StatusPassed, ""), "NO_PROXY_MATCH"),
+			redirectRoute: "proxy",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			httpResult := result("http", model.StatusPassed, "")
+			httpResult.Evidence = []model.Evidence{
+				{
+					ID:      "http.response",
+					Code:    "HTTP_RESPONSE",
+					Message: "response",
+					Details: map[string]string{"route": "mixed"},
+				},
+				{
+					ID:      "http.redirect.1",
+					Code:    "HTTP_REDIRECT_FOLLOWED",
+					Message: "redirect",
+					Details: map[string]string{
+						"route":             test.redirectRoute,
+						"proxySource":       "HTTPS_PROXY",
+						"proxyBypassReason": test.bypass,
+					},
+				},
+			}
+
+			got := Build([]model.CheckResult{test.environment, httpResult})
+
+			if got.Title != "Target reachable across mixed direct/proxy routes" ||
+				got.Status != model.StatusWarning ||
+				!strings.Contains(got.Description, "both direct and proxy") ||
+				strings.Contains(got.Title, "through selected proxy") {
+				t.Fatalf("Build() = %#v", got)
+			}
+			if !containsReference(got.EvidenceRefs, "http.redirect.1") {
+				t.Fatalf("evidence refs = %#v", got.EvidenceRefs)
+			}
+		})
+	}
+}
+
+func TestActualHTTPResponseSupersedesAuxiliaryPreflightTimeout(t *testing.T) {
+	t.Parallel()
+	proxy := withEvidence(result("environment", model.StatusWarning, ""), "PROXY_SELECTED")
+	preflight := result("tcp", model.StatusFailed, "CHECK_TIMEOUT")
+	preflight.Role = model.CheckRoleAuxiliaryDirectComparison
+	response := result("http", model.StatusWarning, httpcheck.ErrorServerResponse)
+
+	got := Build([]model.CheckResult{proxy, preflight, response})
+	if got.Title != "Target reachable through selected proxy with application-level error" ||
+		got.Status != model.StatusWarning {
+		t.Fatalf("Build() = %#v", got)
+	}
+	for _, reference := range []string{proxy.Evidence[0].ID, preflight.Evidence[0].ID, response.Evidence[0].ID} {
+		if !containsReference(got.EvidenceRefs, reference) {
+			t.Fatalf("evidence refs = %#v, want %q", got.EvidenceRefs, reference)
+		}
+	}
+}
+
+func TestActualHTTPCheckTimeoutIsNotHiddenByAuxiliaryTimeout(t *testing.T) {
+	t.Parallel()
+	proxy := withEvidence(result("environment", model.StatusWarning, ""), "PROXY_SELECTED")
+	preflight := result("tcp", model.StatusFailed, "CHECK_TIMEOUT")
+	preflight.Role = model.CheckRoleAuxiliaryDirectComparison
+	httpTimeout := result("http", model.StatusFailed, "CHECK_TIMEOUT")
+	httpTimeout.Name = "HTTP request"
+	httpTimeout.Evidence = []model.Evidence{{
+		ID:      "http.timeout",
+		CheckID: "http",
+		Code:    "CHECK_TIMEOUT",
+		Message: "timed out",
+		Details: map[string]string{"configuredBudget": "3s"},
+	}}
+
+	got := Build([]model.CheckResult{proxy, preflight, httpTimeout})
+	if got.Title != "Diagnostic check timed out" || got.Status != model.StatusFailed ||
+		!strings.Contains(got.Description, "HTTP request") ||
+		!strings.Contains(got.Description, "3s") {
+		t.Fatalf("Build() = %#v", got)
+	}
+	if !containsReference(got.EvidenceRefs, "http.timeout") {
+		t.Fatalf("evidence refs = %#v", got.EvidenceRefs)
+	}
+}
+
+func TestInvalidProxyIsBlockingAndDoesNotFallBackToHTTPFailure(t *testing.T) {
+	t.Parallel()
+	environment := withEvidence(
+		result("environment", model.StatusFailed, "PROXY_CONFIG_INVALID"),
+		"PROXY_CONFIG_INVALID",
+	)
+	httpFailure := result("http", model.StatusFailed, "PROXY_CONFIG_INVALID")
+
+	got := Build([]model.CheckResult{environment, httpFailure})
+	if got.Title != "Proxy configuration is invalid" || got.Status != model.StatusFailed {
+		t.Fatalf("Build() = %#v", got)
+	}
+	if !containsReference(got.EvidenceRefs, environment.Evidence[0].ID) {
+		t.Fatalf("evidence refs = %#v", got.EvidenceRefs)
+	}
+}
+
+func TestSkippedAndNotApplicableRemainMachineReadableAndDistinct(t *testing.T) {
+	t.Parallel()
+	tls := result("tls", model.StatusNotApplicable, "")
+	http := result("http", model.StatusNotApplicable, "")
+
+	got := Build([]model.CheckResult{tls, http})
+	if got.Title != "No applicable diagnostic checks" || got.Status != model.StatusNotApplicable {
+		t.Fatalf("Build(not-applicable) = %#v", got)
+	}
+
+	tls.Status = model.StatusSkipped
+	got = Build([]model.CheckResult{tls, http})
+	if got.Title != "Applicable diagnostic checks were skipped" || got.Status != model.StatusSkipped {
+		t.Fatalf("Build(skipped) = %#v", got)
+	}
+}
+
+func containsReference(references []string, want string) bool {
+	for _, reference := range references {
+		if reference == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestGenericConclusionReferencesEvidence(t *testing.T) {

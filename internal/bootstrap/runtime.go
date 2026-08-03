@@ -12,6 +12,7 @@ import (
 	"github.com/Naenier/opsdoctor/internal/diagnostics"
 	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
 	"github.com/Naenier/opsdoctor/internal/platform"
+	"github.com/Naenier/opsdoctor/internal/privacy"
 	"github.com/Naenier/opsdoctor/internal/report"
 	"github.com/Naenier/opsdoctor/internal/storage"
 )
@@ -66,12 +67,16 @@ func OpenRuntime(info buildinfo.Info) (*Runtime, error) {
 		LogFile:     paths.LogFile,
 		Logger:      logging.Logger,
 		SetLogLevel: logging.SetLevel,
-		RenderReport: func(format string, diagnosis model.Diagnosis) ([]byte, error) {
+		RenderReport: func(
+			format string,
+			diagnosis model.Diagnosis,
+			mode privacy.Mode,
+		) ([]byte, error) {
 			parsed, err := report.ParseFormat(format)
 			if err != nil {
 				return nil, err
 			}
-			return report.Render(diagnosis, parsed)
+			return report.Render(diagnosis, parsed, mode)
 		},
 	})
 	if err != nil {
