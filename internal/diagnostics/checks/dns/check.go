@@ -202,16 +202,6 @@ func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 	}
 }
 
-func noRecordsResult(c *Check, summary string) model.CheckResult {
-	return model.CheckResult{
-		ID:        c.ID(),
-		Name:      c.Name(),
-		Status:    model.StatusFailed,
-		Summary:   summary,
-		ErrorCode: ErrorNoRecords,
-	}
-}
-
 func ipFamilyMismatchResult(
 	c *Check,
 	literal net.IP,
