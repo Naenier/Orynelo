@@ -37,6 +37,7 @@ import (
 	"github.com/Naenier/opsdoctor/internal/secureio"
 )
 
+// Desktop window defaults and minimum responsive dimensions.
 const (
 	defaultWidth  = 1280
 	defaultHeight = 820
@@ -44,6 +45,8 @@ const (
 	minimumHeight = 680
 )
 
+// controller owns desktop navigation, screen state, asynchronous task scopes,
+// and the boundary between Fyne widgets and the backend contract.
 type controller struct {
 	app     fyne.App
 	window  fyne.Window
@@ -149,6 +152,8 @@ func Run(ctx context.Context, backend Backend, info buildinfo.Info) {
 	c.tasks.Wait()
 }
 
+// buildScreens constructs every top-level screen and wires user actions back
+// to controller operations.
 func (c *controller) buildScreens(cfg application.Config) {
 	c.diagnose = screens.NewDiagnose(c.texts, screens.DiagnoseActions{
 		Run: c.runDiagnostic,
@@ -194,6 +199,8 @@ func (c *controller) buildScreens(cfg application.Config) {
 	c.about = screens.NewAbout(c.texts, c.info)
 }
 
+// buildWindow assembles the responsive application shell, navigation, and
+// shared status header.
 func (c *controller) buildWindow() {
 	version := compactHeaderVersion(c.info.Version)
 	if version == "" {
@@ -289,6 +296,8 @@ func (c *controller) buildWindow() {
 	c.window.SetContent(container.NewStack(floor, layout))
 }
 
+// compactHeaderVersion removes build metadata that is too verbose for the
+// persistent window header.
 func compactHeaderVersion(value string) string {
 	value = strings.TrimSpace(value)
 	if separator := strings.IndexByte(value, '+'); separator > 0 {
@@ -297,6 +306,7 @@ func compactHeaderVersion(value string) string {
 	return value
 }
 
+// registerShortcuts installs the desktop keyboard navigation and action map.
 func (c *controller) registerShortcuts() {
 	add := func(key fyne.KeyName, modifier fyne.KeyModifier, handler func()) {
 		c.window.Canvas().AddShortcut(
@@ -315,6 +325,8 @@ func (c *controller) registerShortcuts() {
 	add(fyne.KeyComma, fyne.KeyModifierControl, func() { c.showScreen("settings") })
 }
 
+// showScreen activates one top-level page and cancels work owned by the page
+// being left.
 func (c *controller) showScreen(name string) {
 	if c.currentScreen != "" && c.currentScreen != name {
 		c.cancelScreenTasks(c.currentScreen)
@@ -360,6 +372,7 @@ func (c *controller) showScreen(name string) {
 	c.content.Add(object)
 }
 
+// runDiagnostic resolves form input into an asynchronous backend diagnosis.
 func (c *controller) runDiagnostic(input presenter.DiagnoseInput) {
 	c.mu.Lock()
 	ready := c.configLoaded
@@ -386,6 +399,8 @@ func (c *controller) runDiagnostic(input presenter.DiagnoseInput) {
 	}
 }
 
+// handleEvent projects a streaming diagnostic event into the current GUI
+// operation while suppressing stale deliveries.
 func (c *controller) handleEvent(
 	operationID taskrunner.OperationID,
 	event model.CheckEvent,
@@ -419,6 +434,7 @@ func (c *controller) handleEvent(
 	})
 }
 
+// closeWindow marks shutdown, cancels background work, and closes the window.
 func (c *controller) closeWindow() {
 	c.mu.Lock()
 	c.closing = true
@@ -429,6 +445,8 @@ func (c *controller) closeWindow() {
 	c.window.Close()
 }
 
+// shouldPresentDiagnostic reports whether an event belongs to the active
+// diagnostic generation.
 func (c *controller) shouldPresentDiagnostic(operationID taskrunner.OperationID) bool {
 	if c.diagnoseTask == nil {
 		return false
@@ -440,12 +458,14 @@ func (c *controller) shouldPresentDiagnostic(operationID taskrunner.OperationID)
 	return snapshot.State == taskrunner.StateLoading || snapshot.State == taskrunner.StateSuccess
 }
 
+// isClosing returns the synchronized application shutdown state.
 func (c *controller) isClosing() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.closing
 }
 
+// cancelActive invalidates diagnostic output and clears any pending profile.
 func (c *controller) cancelActive() {
 	if c.diagnoseTask != nil {
 		c.diagnoseTask.Invalidate()
@@ -455,6 +475,7 @@ func (c *controller) cancelActive() {
 	c.mu.Unlock()
 }
 
+// cancelDiagnostic requests cancellation for a currently running diagnosis.
 func (c *controller) cancelDiagnostic() {
 	if c.diagnoseTask != nil && c.diagnoseTask.Snapshot().State == taskrunner.StateLoading {
 		c.setHeaderStatus(localization.HeaderCancelling)
@@ -462,11 +483,13 @@ func (c *controller) cancelDiagnostic() {
 	}
 }
 
+// triggerDiagnosticShortcut navigates to Diagnose and invokes its primary action.
 func (c *controller) triggerDiagnosticShortcut() {
 	c.showScreen("diagnose")
 	c.diagnose.TriggerRun()
 }
 
+// setHeaderStatus updates both Diagnose and secondary-page status summaries.
 func (c *controller) setHeaderStatus(status localization.Key) {
 	c.setDiagnoseHeaderStatus(status)
 	label := c.texts.Text(status)
@@ -492,6 +515,7 @@ func (c *controller) setHeaderStatus(status localization.Key) {
 	c.refreshHeader()
 }
 
+// setDiagnoseHeaderStatus updates the status shown on the Diagnose page.
 func (c *controller) setDiagnoseHeaderStatus(status localization.Key) {
 	label := c.texts.Text(status)
 	c.diagnoseHeader = fmt.Sprintf(
@@ -504,6 +528,7 @@ func (c *controller) setDiagnoseHeaderStatus(status localization.Key) {
 	c.refreshHeader()
 }
 
+// setHeaderForDiagnosis derives persistent header state from a completed result.
 func (c *controller) setHeaderForDiagnosis(diagnosis model.Diagnosis) {
 	if diagnosis.Summary.Status == model.StatusCancelled {
 		c.setHeaderStatus(localization.HeaderCancelled)
@@ -541,6 +566,7 @@ func (c *controller) setHeaderForDiagnosis(diagnosis model.Diagnosis) {
 	c.refreshHeader()
 }
 
+// headerStatusValue maps localized header states to status badge vocabulary.
 func headerStatusValue(status localization.Key) string {
 	switch status {
 	case localization.HeaderRunning:
@@ -554,6 +580,7 @@ func headerStatusValue(status localization.Key) string {
 	}
 }
 
+// version returns the compact display version or the development label.
 func (c *controller) version() string {
 	version := compactHeaderVersion(c.info.Version)
 	if version == "" {
@@ -562,6 +589,7 @@ func (c *controller) version() string {
 	return version
 }
 
+// refreshHeader renders the header variant associated with the active page.
 func (c *controller) refreshHeader() {
 	if c.header == nil {
 		return
@@ -578,6 +606,7 @@ func (c *controller) refreshHeader() {
 	c.refreshHeaderStatus(c.secondaryStatus, c.secondaryStatusTip)
 }
 
+// refreshHeaderStatus updates or hides the accessible status badge.
 func (c *controller) refreshHeaderStatus(status, description string) {
 	if c.headerStatus == nil {
 		return
@@ -590,6 +619,7 @@ func (c *controller) refreshHeaderStatus(status, description string) {
 	c.headerStatus.Show()
 }
 
+// versionOnlyHeader returns the neutral header used outside Diagnose.
 func (c *controller) versionOnlyHeader() string {
 	return fmt.Sprintf(
 		"%s %s",
@@ -598,6 +628,7 @@ func (c *controller) versionOnlyHeader() string {
 	)
 }
 
+// copySummary writes a privacy-projected diagnosis summary to the clipboard.
 func (c *controller) copySummary() {
 	if !c.haveDiagnosis {
 		return
@@ -607,6 +638,7 @@ func (c *controller) copySummary() {
 	c.app.Clipboard().SetContent(privacy.Standard().Text(text))
 }
 
+// exportLast starts export for the most recent completed diagnosis.
 func (c *controller) exportLast(format string) {
 	if !c.haveDiagnosis {
 		dialog.ShowInformation(
@@ -619,6 +651,7 @@ func (c *controller) exportLast(format string) {
 	c.exportDiagnosis(c.lastDiagnosis, format)
 }
 
+// exportDiagnosis asks the user for privacy mode and a safe destination name.
 func (c *controller) exportDiagnosis(diagnosis model.Diagnosis, format string) {
 	extension := exportExtension(format)
 	standardLabel := c.texts.Text(localization.DialogExportStandard)
@@ -656,6 +689,8 @@ func (c *controller) exportDiagnosis(diagnosis model.Diagnosis, format string) {
 	).Show()
 }
 
+// exportDiagnosisWithPrivacy begins asynchronous rendering for the selected
+// privacy policy.
 func (c *controller) exportDiagnosisWithPrivacy(
 	diagnosis model.Diagnosis,
 	format string,
@@ -665,6 +700,7 @@ func (c *controller) exportDiagnosisWithPrivacy(
 	c.prepareReport(diagnosis, format, mode, filename)
 }
 
+// exportExtension returns the canonical file extension for a report format.
 func exportExtension(format string) string {
 	if format == "markdown" || format == "md" {
 		return ".md"
@@ -672,6 +708,8 @@ func exportExtension(format string) string {
 	return ".json"
 }
 
+// normalizeExportFilename validates a single path component and appends the
+// expected extension when absent.
 func normalizeExportFilename(input, extension string) (string, error) {
 	name := strings.TrimSpace(input)
 	if !validExportComponent(name) {
@@ -683,6 +721,7 @@ func normalizeExportFilename(input, extension string) (string, error) {
 	return name, nil
 }
 
+// exportDestination resolves a validated filename under a selected folder URI.
 func exportDestination(folder fyne.URI, filename string) (fyne.URI, error) {
 	if folder == nil {
 		return nil, errors.New("export folder is unavailable")
@@ -693,6 +732,7 @@ func exportDestination(folder fyne.URI, filename string) (fyne.URI, error) {
 	return storage.Child(folder, filename)
 }
 
+// validExportComponent reports whether value is a portable single filename.
 func validExportComponent(value string) bool {
 	if value == "" || value == "." || value == ".." || len(value) > 255 ||
 		strings.ContainsAny(value, `/\\`) {
@@ -706,6 +746,8 @@ func validExportComponent(value string) bool {
 	return true
 }
 
+// writeExportURI writes a complete report through secure local-file handling
+// or the Fyne storage abstraction. The boolean reports use of a local file.
 func writeExportURI(destination fyne.URI, content []byte, replaceExisting bool) (bool, error) {
 	if destination == nil {
 		return false, errors.New("export destination is unavailable")
@@ -731,6 +773,7 @@ func writeExportURI(destination fyne.URI, content []byte, replaceExisting bool) 
 	return false, nil
 }
 
+// saveLastAsProfile opens the profile editor with the last diagnosis defaults.
 func (c *controller) saveLastAsProfile() {
 	if !c.haveDiagnosis {
 		dialog.ShowInformation(
@@ -744,6 +787,7 @@ func (c *controller) saveLastAsProfile() {
 	c.showProfileEditor(&view, c.lastDiagnosis.Target.PrivacyRedacted)
 }
 
+// loadHistory normalizes screen filters and starts a history query.
 func (c *controller) loadHistory(search, status string) {
 	filter := model.Status("")
 	if status != "" && status != "all" {
@@ -752,10 +796,13 @@ func (c *controller) loadHistory(search, status string) {
 	c.startHistoryLoad(search, filter)
 }
 
+// openHistory loads a stored diagnosis for presentation.
 func (c *controller) openHistory(row presenter.HistoryView) {
 	c.startHistoryRead(historyReadOpen, row.ID)
 }
 
+// presentHistoricalDiagnosis projects and displays a stored diagnosis without
+// rerunning network checks.
 func (c *controller) presentHistoricalDiagnosis(diagnosis model.Diagnosis) {
 	c.cancelActive()
 	diagnosis = privacy.Standard().Diagnosis(diagnosis)
@@ -767,14 +814,17 @@ func (c *controller) presentHistoricalDiagnosis(diagnosis model.Diagnosis) {
 	c.showScreen("diagnose")
 }
 
+// rerunHistory loads a stored diagnosis and starts it as a new request.
 func (c *controller) rerunHistory(row presenter.HistoryView) {
 	c.startHistoryRead(historyReadRerun, row.ID)
 }
 
+// exportHistory loads a stored diagnosis and opens the export workflow.
 func (c *controller) exportHistory(row presenter.HistoryView) {
 	c.startHistoryRead(historyReadExport, row.ID)
 }
 
+// confirmDeleteHistory requires explicit confirmation before deleting one run.
 func (c *controller) confirmDeleteHistory(row presenter.HistoryView) {
 	dialog.ShowConfirm(
 		c.texts.Text(localization.HistoryDeleteTitle),
@@ -789,6 +839,7 @@ func (c *controller) confirmDeleteHistory(row presenter.HistoryView) {
 	)
 }
 
+// confirmClearHistory requires explicit confirmation before clearing all runs.
 func (c *controller) confirmClearHistory() {
 	dialog.ShowConfirm(
 		c.texts.Text(localization.HistoryClearTitle),
@@ -803,10 +854,12 @@ func (c *controller) confirmClearHistory() {
 	)
 }
 
+// loadProfiles starts an asynchronous saved-profile query.
 func (c *controller) loadProfiles() {
 	c.startProfilesLoad()
 }
 
+// duplicateProfile validates a view model and saves an independent copy.
 func (c *controller) duplicateProfile(profile presenter.ProfileView) {
 	value, err := profileModel(c.texts, profile)
 	if err != nil {
@@ -820,6 +873,7 @@ func (c *controller) duplicateProfile(profile presenter.ProfileView) {
 	c.startProfileMutation(profileMutationDuplicate, value)
 }
 
+// confirmDeleteProfile requires explicit confirmation before profile deletion.
 func (c *controller) confirmDeleteProfile(profile presenter.ProfileView) {
 	dialog.ShowConfirm(
 		c.texts.Text(localization.ProfilesDeleteTitle),
@@ -837,10 +891,12 @@ func (c *controller) confirmDeleteProfile(profile presenter.ProfileView) {
 	)
 }
 
+// runProfile forwards a selected saved profile into the Diagnose workflow.
 func (c *controller) runProfile(profile presenter.ProfileView) {
 	c.startProfile(profile)
 }
 
+// startProfile converts a display profile into a pending backend request.
 func (c *controller) startProfile(profile presenter.ProfileView) {
 	c.cancelActive()
 	value, err := profileModel(c.texts, profile)
@@ -857,6 +913,8 @@ func (c *controller) startProfile(profile presenter.ProfileView) {
 	c.diagnose.TriggerRun()
 }
 
+// showProfileEditor presents validation, privacy projection, and persistence
+// controls for creating or editing a profile.
 func (c *controller) showProfileEditor(
 	existing *presenter.ProfileView,
 	targetWasRedacted bool,
@@ -1024,6 +1082,8 @@ func (c *controller) showProfileEditor(
 	).Show()
 }
 
+// projectProfileForSave applies the standard privacy policy and reports
+// whether confirmation is required because target data was removed.
 func projectProfileForSave(
 	input model.Profile,
 	privacyRedacted ...bool,
@@ -1035,6 +1095,7 @@ func projectProfileForSave(
 	return projected, changed || alreadyRedacted || redactionProvenance
 }
 
+// profileMethodLabel maps a stored HTTP method to its localized selector label.
 func profileMethodLabel(texts localization.Catalog, method string) string {
 	switch strings.ToUpper(method) {
 	case "HEAD":
@@ -1046,6 +1107,7 @@ func profileMethodLabel(texts localization.Catalog, method string) string {
 	}
 }
 
+// profileMethodValue maps a localized selector label to a canonical HTTP method.
 func profileMethodValue(texts localization.Catalog, label string) string {
 	switch label {
 	case texts.Text(localization.OptionHEAD):
@@ -1057,6 +1119,7 @@ func profileMethodValue(texts localization.Catalog, label string) string {
 	}
 }
 
+// newSettings constructs the settings screen with controller callbacks.
 func (c *controller) newSettings(cfg application.Config) fyne.CanvasObject {
 	return screens.NewSettings(c.texts, cfg, screens.SettingsActions{
 		Save:             c.saveSettings,
@@ -1068,6 +1131,7 @@ func (c *controller) newSettings(cfg application.Config) fyne.CanvasObject {
 	})
 }
 
+// saveSettings delegates validated settings to the serialized mutation scope.
 func (c *controller) saveSettings(
 	cfg application.Config,
 	complete func(message string),
@@ -1075,6 +1139,7 @@ func (c *controller) saveSettings(
 	c.startSettingsSave(cfg, complete)
 }
 
+// openLogDirectory asks the desktop environment to reveal the backend log path.
 func (c *controller) openLogDirectory() error {
 	path := c.backend.LogDirectory()
 	if path == "" {
@@ -1092,6 +1157,7 @@ func (c *controller) openLogDirectory() error {
 	return nil
 }
 
+// profileViewFromDiagnosis extracts reusable settings from a completed run.
 func profileViewFromDiagnosis(diagnosis model.Diagnosis) presenter.ProfileView {
 	mode := "auto"
 	if diagnosis.Target.Kind == model.TargetTCP {
@@ -1117,6 +1183,7 @@ func profileViewFromDiagnosis(diagnosis model.Diagnosis) presenter.ProfileView {
 	}
 }
 
+// profileModel validates and converts editable GUI values into a domain profile.
 func profileModel(
 	texts localization.Catalog,
 	profile presenter.ProfileView,

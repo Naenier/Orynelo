@@ -95,6 +95,7 @@ func (w *TimingWaterfall) SetSegments(segments []TimingSegment) {
 	w.Refresh()
 }
 
+// formatDuration renders compact, human-readable timing labels.
 func formatDuration(duration time.Duration) string {
 	if duration < time.Microsecond {
 		return duration.String()

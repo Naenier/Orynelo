@@ -7,6 +7,8 @@ import "strings"
 // Key identifies a user-facing string.
 type Key string
 
+// Localization keys are stable identifiers shared by screens, components, and
+// user-facing application error rendering.
 const (
 	AppName Key = "app.name"
 
@@ -351,6 +353,7 @@ func (English) Text(key Key) string {
 	return string(key)
 }
 
+// english contains the complete built-in text catalog.
 var english = map[Key]string{
 	AppName: "OpsDoctor",
 

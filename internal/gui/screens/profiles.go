@@ -262,6 +262,7 @@ func (s *ProfilesScreen) SetProfiles(profiles []presenter.ProfileView) {
 	s.applySearch()
 }
 
+// applySearch derives visible profiles from the loaded snapshot and query.
 func (s *ProfilesScreen) applySearch() {
 	s.list.UnselectAll()
 	query := strings.ToLower(strings.TrimSpace(s.search.Text))
@@ -279,6 +280,7 @@ func (s *ProfilesScreen) applySearch() {
 	s.updateActionState()
 }
 
+// selectedProfile returns the currently selected visible profile.
 func (s *ProfilesScreen) selectedProfile() (presenter.ProfileView, bool) {
 	if s.selected < 0 || s.selected >= len(s.filtered) {
 		s.SetMessage(s.texts.Text(localization.ProfilesSelectFirst))
@@ -287,6 +289,7 @@ func (s *ProfilesScreen) selectedProfile() (presenter.ProfileView, bool) {
 	return s.filtered[s.selected], true
 }
 
+// updateContentState switches between loading, empty, error, and list content.
 func (s *ProfilesScreen) updateContentState() {
 	if len(s.filtered) == 0 {
 		hasUnmatchedQuery := len(s.profiles) > 0 &&
@@ -313,6 +316,7 @@ func (s *ProfilesScreen) updateContentState() {
 	s.actionBar.Show()
 }
 
+// updateActionState enables profile actions only for a valid selection.
 func (s *ProfilesScreen) updateActionState() {
 	hasSelection := !s.loading && s.selected >= 0 && s.selected < len(s.filtered)
 	setButtonEnabled(s.edit, hasSelection && s.actions.Edit != nil)
@@ -321,6 +325,7 @@ func (s *ProfilesScreen) updateActionState() {
 	setButtonEnabled(s.run, hasSelection && s.actions.Run != nil)
 }
 
+// profileModeLabel maps a stored diagnostic mode to its localized label.
 func profileModeLabel(texts localization.Catalog, value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "auto", "":
@@ -334,6 +339,7 @@ func profileModeLabel(texts localization.Catalog, value string) string {
 	}
 }
 
+// profileIPLabel maps a stored address-family preference to its localized label.
 func profileIPLabel(texts localization.Catalog, value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "auto", "":

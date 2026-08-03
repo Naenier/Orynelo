@@ -1,3 +1,5 @@
+// Binary opsdoctor provides the command-line interface to the shared
+// diagnostic application service.
 package main
 
 import (
@@ -16,10 +18,12 @@ import (
 	"github.com/Naenier/opsdoctor/internal/privacy"
 )
 
+// main translates the process context and command result into an exit status.
 func main() {
 	os.Exit(run())
 }
 
+// run assembles the CLI command tree and owns process-level cancellation.
 func run() int {
 	info := buildinfo.Current()
 	lazy := &lazyApplication{info: info}
@@ -41,6 +45,9 @@ func run() int {
 	return cli.Execute(ctx, root, os.Stderr)
 }
 
+// lazyApplication delays runtime initialization until a command needs backend
+// services, allowing lightweight commands such as help and version to run
+// without opening configuration, logs, or storage.
 type lazyApplication struct {
 	info        buildinfo.Info
 	openRuntime func(buildinfo.Info) (*bootstrap.Runtime, error)
@@ -51,6 +58,7 @@ type lazyApplication struct {
 
 var _ cli.Application = (*lazyApplication)(nil)
 
+// runtime returns the shared initialized runtime, creating it exactly once.
 func (l *lazyApplication) runtime() (*bootstrap.Runtime, error) {
 	l.once.Do(func() {
 		openRuntime := l.openRuntime
@@ -63,6 +71,8 @@ func (l *lazyApplication) runtime() (*bootstrap.Runtime, error) {
 	return l.run, l.err
 }
 
+// runtimeApplicationError maps bootstrap failures to the stable application
+// error boundary consumed by the CLI.
 func runtimeApplicationError(err error) error {
 	if err == nil {
 		return nil
@@ -92,6 +102,7 @@ func runtimeApplicationError(err error) error {
 	)
 }
 
+// DiagnoseRequest initializes the runtime and delegates a diagnostic request.
 func (l *lazyApplication) DiagnoseRequest(
 	ctx context.Context,
 	request application.DiagnoseRequest,
@@ -104,6 +115,7 @@ func (l *lazyApplication) DiagnoseRequest(
 	return runtime.Service.DiagnoseRequest(ctx, request, sink)
 }
 
+// RenderReport initializes the runtime and renders a privacy-projected report.
 func (l *lazyApplication) RenderReport(
 	format string,
 	diagnosis model.Diagnosis,
@@ -116,6 +128,7 @@ func (l *lazyApplication) RenderReport(
 	return runtime.Service.RenderReport(format, diagnosis, mode)
 }
 
+// SetLogLevel updates the runtime logger after lazy initialization.
 func (l *lazyApplication) SetLogLevel(level string) error {
 	runtime, err := l.runtime()
 	if err != nil {
@@ -124,6 +137,7 @@ func (l *lazyApplication) SetLogLevel(level string) error {
 	return runtime.Logging.SetLevel(level)
 }
 
+// Close releases the runtime if it was initialized.
 func (l *lazyApplication) Close() error {
 	if l.run == nil {
 		return nil
