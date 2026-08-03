@@ -45,8 +45,8 @@ const (
 	minimumHeight = 680
 )
 
-// controller owns desktop navigation, screen state, asynchronous task scopes,
-// and the boundary between Fyne widgets and the backend contract.
+// controller owns the desktop window, navigation, lifecycle, and dialogs. Use-
+// case execution and testable screen state belong to dedicated coordinators.
 type controller struct {
 	app     fyne.App
 	window  fyne.Window
@@ -71,26 +71,21 @@ type controller struct {
 	pageTitle          *widget.Label
 	navigationButtons  map[string]*widget.Button
 
-	mu             sync.Mutex
-	closing        bool
-	lastDiagnosis  model.Diagnosis
-	haveDiagnosis  bool
-	currentScreen  string
-	pendingProfile *model.Profile
-	reportSession  uint64
-	settingsDone   func(message string)
-	configuration  application.Config
-	configLoaded   bool
+	mu            sync.Mutex
+	closing       bool
+	lastDiagnosis model.Diagnosis
+	haveDiagnosis bool
+	currentScreen string
+	reportSession uint64
+	settingsDone  func(message string)
+	configuration application.Config
+	configLoaded  bool
 
 	tasks               *taskrunner.Runner
-	diagnoseTask        *taskrunner.Scope[model.Diagnosis]
-	configurationTask   *taskrunner.Scope[application.Config]
-	historyLoadTask     *taskrunner.Scope[[]presenter.HistoryView]
-	historyReadTask     *taskrunner.Scope[historyReadResult]
-	historyMutationTask *taskrunner.Scope[historyMutationResult]
-	profilesLoadTask    *taskrunner.Scope[[]presenter.ProfileView]
-	profileMutationTask *taskrunner.Scope[profileMutationResult]
-	settingsTask        *taskrunner.Scope[settingsSaveResult]
+	diagnoseCoordinator *DiagnoseCoordinator
+	historyCoordinator  *HistoryCoordinator
+	profilesCoordinator *ProfilesCoordinator
+	settingsCoordinator *SettingsCoordinator
 	reportPrepareTask   *taskrunner.Scope[reportPrepareResult]
 	reportInspectTask   *taskrunner.Scope[reportInspectResult]
 	reportWriteTask     *taskrunner.Scope[reportWriteResult]
@@ -384,15 +379,7 @@ func (c *controller) runDiagnostic(input presenter.DiagnoseInput) {
 		)
 		return
 	}
-	request := c.diagnoseRequest(input)
-	_, err := c.diagnoseTask.StartReadOperation(func(
-		ctx context.Context,
-		operationID taskrunner.OperationID,
-	) (model.Diagnosis, error) {
-		return c.backend.DiagnoseRequest(ctx, request, func(event model.CheckEvent) {
-			c.handleEvent(operationID, event)
-		})
-	})
+	_, err := c.diagnoseCoordinator.Start(input, c.handleEvent)
 	if err != nil {
 		c.diagnose.ShowError(c.userFacingError(guiTaskStartError(err, "diagnose")), false)
 		c.setDiagnoseHeaderStatus(localization.HeaderError)
@@ -448,14 +435,10 @@ func (c *controller) closeWindow() {
 // shouldPresentDiagnostic reports whether an event belongs to the active
 // diagnostic generation.
 func (c *controller) shouldPresentDiagnostic(operationID taskrunner.OperationID) bool {
-	if c.diagnoseTask == nil {
+	if c.diagnoseCoordinator == nil {
 		return false
 	}
-	snapshot := c.diagnoseTask.Snapshot()
-	if snapshot.OperationID != operationID {
-		return false
-	}
-	return snapshot.State == taskrunner.StateLoading || snapshot.State == taskrunner.StateSuccess
+	return c.diagnoseCoordinator.Current(operationID)
 }
 
 // isClosing returns the synchronized application shutdown state.
@@ -467,19 +450,17 @@ func (c *controller) isClosing() bool {
 
 // cancelActive invalidates diagnostic output and clears any pending profile.
 func (c *controller) cancelActive() {
-	if c.diagnoseTask != nil {
-		c.diagnoseTask.Invalidate()
+	if c.diagnoseCoordinator != nil {
+		c.diagnoseCoordinator.Invalidate()
 	}
-	c.mu.Lock()
-	c.pendingProfile = nil
-	c.mu.Unlock()
 }
 
 // cancelDiagnostic requests cancellation for a currently running diagnosis.
 func (c *controller) cancelDiagnostic() {
-	if c.diagnoseTask != nil && c.diagnoseTask.Snapshot().State == taskrunner.StateLoading {
+	if c.diagnoseCoordinator != nil &&
+		c.diagnoseCoordinator.Snapshot().State == taskrunner.StateLoading {
 		c.setHeaderStatus(localization.HeaderCancelling)
-		c.diagnoseTask.Cancel()
+		c.diagnoseCoordinator.Cancel()
 	}
 }
 
@@ -798,7 +779,7 @@ func (c *controller) loadHistory(search, status string) {
 
 // openHistory loads a stored diagnosis for presentation.
 func (c *controller) openHistory(row presenter.HistoryView) {
-	c.startHistoryRead(historyReadOpen, row.ID)
+	c.startHistoryRead(HistoryReadOpen, row.ID)
 }
 
 // presentHistoricalDiagnosis projects and displays a stored diagnosis without
@@ -816,12 +797,12 @@ func (c *controller) presentHistoricalDiagnosis(diagnosis model.Diagnosis) {
 
 // rerunHistory loads a stored diagnosis and starts it as a new request.
 func (c *controller) rerunHistory(row presenter.HistoryView) {
-	c.startHistoryRead(historyReadRerun, row.ID)
+	c.startHistoryRead(HistoryReadRerun, row.ID)
 }
 
 // exportHistory loads a stored diagnosis and opens the export workflow.
 func (c *controller) exportHistory(row presenter.HistoryView) {
-	c.startHistoryRead(historyReadExport, row.ID)
+	c.startHistoryRead(HistoryReadExport, row.ID)
 }
 
 // confirmDeleteHistory requires explicit confirmation before deleting one run.
@@ -833,7 +814,7 @@ func (c *controller) confirmDeleteHistory(row presenter.HistoryView) {
 			if !confirmed {
 				return
 			}
-			c.startHistoryMutation(historyMutationDelete, row.ID)
+			c.startHistoryMutation(HistoryMutationDelete, row.ID)
 		},
 		c.window,
 	)
@@ -848,7 +829,7 @@ func (c *controller) confirmClearHistory() {
 			if !confirmed {
 				return
 			}
-			c.startHistoryMutation(historyMutationClear, "")
+			c.startHistoryMutation(HistoryMutationClear, "")
 		},
 		c.window,
 	)
@@ -870,7 +851,7 @@ func (c *controller) duplicateProfile(profile presenter.ProfileView) {
 	value.Name += c.texts.Text(localization.ProfilesCopySuffix)
 	value.CreatedAt = time.Time{}
 	value.UpdatedAt = time.Time{}
-	c.startProfileMutation(profileMutationDuplicate, value)
+	c.startProfileMutation(ProfileMutationDuplicate, value)
 }
 
 // confirmDeleteProfile requires explicit confirmation before profile deletion.
@@ -904,9 +885,7 @@ func (c *controller) startProfile(profile presenter.ProfileView) {
 		c.diagnose.ShowError(err.Error(), false)
 		return
 	}
-	c.mu.Lock()
-	c.pendingProfile = &value
-	c.mu.Unlock()
+	c.diagnoseCoordinator.SetPendingProfile(&value)
 	c.diagnose.SetRunning(false)
 	c.diagnose.SetProfile(profile)
 	c.showScreen("diagnose")
@@ -1058,7 +1037,7 @@ func (c *controller) showProfileEditor(
 			}
 			projected, changed := projectProfileForSave(profile, targetWasRedacted)
 			saveProjected := func() {
-				c.startProfileMutation(profileMutationSave, projected)
+				c.startProfileMutation(ProfileMutationSave, projected)
 			}
 			if changed {
 				dialog.ShowConfirm(

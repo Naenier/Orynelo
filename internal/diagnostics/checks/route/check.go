@@ -62,7 +62,8 @@ func New(discoverer SourceDiscoverer) *Check {
 }
 
 // ID returns the stable diagnostic identifier.
-func (*Check) ID() string   { return "route" }
+func (*Check) ID() string { return "route" }
+
 // Name returns the human-readable check name.
 func (*Check) Name() string { return "Route and source address" }
 

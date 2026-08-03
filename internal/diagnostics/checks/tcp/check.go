@@ -51,7 +51,8 @@ func New(dialer Dialer) *Check {
 }
 
 // ID returns the stable diagnostic identifier.
-func (*Check) ID() string   { return "tcp" }
+func (*Check) ID() string { return "tcp" }
+
 // Name returns the human-readable check name.
 func (*Check) Name() string { return "TCP connection" }
 

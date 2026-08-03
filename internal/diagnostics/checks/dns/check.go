@@ -41,7 +41,8 @@ func New(resolver Resolver) *Check {
 }
 
 // ID returns the stable diagnostic identifier.
-func (*Check) ID() string   { return "dns" }
+func (*Check) ID() string { return "dns" }
+
 // Name returns the human-readable check name.
 func (*Check) Name() string { return "DNS resolution" }
 

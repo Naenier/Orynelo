@@ -19,55 +19,6 @@ import (
 	"github.com/Naenier/opsdoctor/internal/privacy"
 )
 
-// historyReadAction identifies how a loaded diagnosis will be consumed.
-type historyReadAction uint8
-
-const (
-	historyReadOpen historyReadAction = iota + 1
-	historyReadRerun
-	historyReadExport
-)
-
-// historyReadResult pairs a stored diagnosis with its requested GUI action.
-type historyReadResult struct {
-	Action    historyReadAction
-	Diagnosis model.Diagnosis
-}
-
-// historyMutationAction distinguishes deletion of one diagnosis from clearing all.
-type historyMutationAction uint8
-
-const (
-	historyMutationDelete historyMutationAction = iota + 1
-	historyMutationClear
-)
-
-// historyMutationResult records the completed history mutation.
-type historyMutationResult struct {
-	Action historyMutationAction
-}
-
-// profileMutationAction identifies a save, duplicate, or delete request.
-type profileMutationAction uint8
-
-const (
-	profileMutationSave profileMutationAction = iota + 1
-	profileMutationDuplicate
-	profileMutationDelete
-)
-
-// profileMutationResult carries the affected profile and mutation kind.
-type profileMutationResult struct {
-	Action profileMutationAction
-	Saved  model.Profile
-}
-
-// settingsSaveResult carries persisted configuration and completion messaging.
-type settingsSaveResult struct {
-	Config   application.Config
-	Complete func(message string)
-}
-
 // reportPrepareResult contains rendered bytes and destination metadata.
 type reportPrepareResult struct {
 	Session  uint64
@@ -94,35 +45,19 @@ type reportWriteResult struct {
 // streams for every controller workflow.
 func (c *controller) buildTaskScopes() error {
 	var err error
-	c.diagnoseTask, err = taskrunner.NewScope(c.tasks, "diagnose", c.observeDiagnosis)
+	c.diagnoseCoordinator, err = NewDiagnoseCoordinator(c.tasks, c.backend, c.observeDiagnosis)
 	if err != nil {
 		return err
 	}
-	c.configurationTask, err = taskrunner.NewScope(c.tasks, "configuration", c.observeConfiguration)
+	c.historyCoordinator, err = NewHistoryCoordinator(c.tasks, c.backend, c.observeHistory)
 	if err != nil {
 		return err
 	}
-	c.historyLoadTask, err = taskrunner.NewScope(c.tasks, "history.load", c.observeHistoryLoad)
+	c.profilesCoordinator, err = NewProfilesCoordinator(c.tasks, c.backend, c.observeProfiles)
 	if err != nil {
 		return err
 	}
-	c.historyReadTask, err = taskrunner.NewScope(c.tasks, "history.read", c.observeHistoryRead)
-	if err != nil {
-		return err
-	}
-	c.historyMutationTask, err = taskrunner.NewScope(c.tasks, "history.mutation", c.observeHistoryMutation)
-	if err != nil {
-		return err
-	}
-	c.profilesLoadTask, err = taskrunner.NewScope(c.tasks, "profiles.load", c.observeProfilesLoad)
-	if err != nil {
-		return err
-	}
-	c.profileMutationTask, err = taskrunner.NewScope(c.tasks, "profiles.mutation", c.observeProfileMutation)
-	if err != nil {
-		return err
-	}
-	c.settingsTask, err = taskrunner.NewScope(c.tasks, "settings.save", c.observeSettingsSave)
+	c.settingsCoordinator, err = NewSettingsCoordinator(c.tasks, c.backend, c.observeSettings)
 	if err != nil {
 		return err
 	}
@@ -138,128 +73,34 @@ func (c *controller) buildTaskScopes() error {
 	return err
 }
 
-// diagnoseRequest converts explicit GUI controls and a pending profile into an
-// application request without inventing adapter defaults.
-func (c *controller) diagnoseRequest(input presenter.DiagnoseInput) application.DiagnoseRequest {
-	c.mu.Lock()
-	profile := c.pendingProfile
-	c.pendingProfile = nil
-	config := c.configuration
-	c.mu.Unlock()
-	if config.Diagnostics.DefaultTimeout == 0 {
-		config = application.DefaultConfig()
-	}
-
-	insecure := input.Insecure
-	allowInsecureRedirects := input.AllowInsecureRedirects
-	allowPrivateRedirects := input.AllowPrivateRedirects
-	verbosity := model.ReportVerbosity(input.Verbosity)
-	request := application.DiagnoseRequest{Profile: profile}
-	if profile != nil {
-		request.Overrides = application.DiagnoseOverrides{
-			Insecure:               &insecure,
-			AllowInsecureRedirects: &allowInsecureRedirects,
-			AllowPrivateRedirects:  &allowPrivateRedirects,
-			ReportVerbosity:        &verbosity,
-		}
-		return request
-	}
-
-	target := input.Target
-	request.Overrides.Target = &target
-	baseline, err := application.ResolveDiagnoseOptions(
-		config,
-		nil,
-		application.DiagnoseOverrides{Target: &target},
-	)
-	if err != nil {
-		// The application boundary will return the typed validation failure.
-		// Do not manufacture defaults in the GUI when a baseline cannot be
-		// resolved from the submitted target.
-		return request
-	}
-
-	mode := model.DiagnosticMode(input.Mode)
-	timeout := input.Timeout
-	checkTimeout := input.CheckTimeout
-	ipVersion := model.IPVersion(input.IPVersion)
-	noProxy := input.NoProxy
-	maxRedirects := input.MaxRedirects
-	method := input.Method
-	if mode != model.DiagnosticModeAuto {
-		request.Overrides.Mode = &mode
-	}
-	if timeout != baseline.Timeout {
-		request.Overrides.Timeout = &timeout
-	}
-	if checkTimeout != baseline.CheckTimeout {
-		request.Overrides.CheckTimeout = &checkTimeout
-	}
-	if ipVersion != baseline.IPVersion {
-		request.Overrides.IPVersion = &ipVersion
-	}
-	if noProxy != baseline.NoProxy {
-		request.Overrides.NoProxy = &noProxy
-	}
-	if insecure != baseline.Insecure {
-		request.Overrides.Insecure = &insecure
-	}
-	if allowInsecureRedirects != baseline.AllowInsecureRedirects {
-		request.Overrides.AllowInsecureRedirects = &allowInsecureRedirects
-	}
-	if allowPrivateRedirects != baseline.AllowPrivateRedirects {
-		request.Overrides.AllowPrivateRedirects = &allowPrivateRedirects
-	}
-	if maxRedirects != baseline.MaxRedirects {
-		request.Overrides.MaxRedirects = &maxRedirects
-	}
-	if method != baseline.Method {
-		request.Overrides.Method = &method
-	}
-	if verbosity != baseline.ReportVerbosity {
-		request.Overrides.ReportVerbosity = &verbosity
-	}
-	return request
-}
-
 // observeDiagnosis applies current diagnosis lifecycle transitions on the GUI thread.
-func (c *controller) observeDiagnosis(snapshot taskrunner.Snapshot[model.Diagnosis]) {
-	switch snapshot.State {
+func (c *controller) observeDiagnosis(state DiagnoseViewModel) {
+	switch state.State {
 	case taskrunner.StateLoading:
 		c.diagnose.ResetResults()
 		c.diagnose.SetRunning(true)
 		c.setHeaderStatus(localization.HeaderRunning)
 	case taskrunner.StateSuccess:
-		diagnosis := privacy.Standard().Diagnosis(snapshot.Value)
+		diagnosis := state.Diagnosis
 		c.lastDiagnosis = diagnosis
 		c.haveDiagnosis = true
 		c.diagnose.ShowDiagnosis(presenter.Diagnosis(c.texts, diagnosis))
 		c.setHeaderForDiagnosis(diagnosis)
 	case taskrunner.StateError:
-		c.diagnose.ShowError(c.userFacingError(snapshot.Err), false)
+		c.diagnose.ShowError(c.userFacingError(state.Err), false)
 		c.setHeaderStatus(localization.HeaderError)
 	case taskrunner.StateCancelled:
-		c.diagnose.ShowError(c.userFacingError(snapshot.Err), true)
+		c.diagnose.ShowError(c.userFacingError(state.Err), true)
 		c.setHeaderStatus(localization.HeaderCancelled)
 	}
 }
 
 // loadConfiguration starts the initial backend settings read.
 func (c *controller) loadConfiguration() {
-	_, err := c.configurationTask.StartRead(func(context.Context) (application.Config, error) {
-		return c.backend.Configuration(), nil
-	})
+	err := c.settingsCoordinator.Load()
 	if err != nil {
 		c.showUserError(guiTaskStartError(err, "configuration.load"))
 	}
-}
-
-// observeConfiguration enables diagnostics only after settings load succeeds.
-func (c *controller) observeConfiguration(snapshot taskrunner.Snapshot[application.Config]) {
-	if snapshot.State != taskrunner.StateSuccess {
-		return
-	}
-	c.applyConfiguration(snapshot.Value, true)
 }
 
 // applyConfiguration updates controller defaults, theme, and optionally the
@@ -269,6 +110,9 @@ func (c *controller) applyConfiguration(cfg application.Config, rebuildSettings 
 	c.configuration = cfg
 	c.configLoaded = true
 	c.mu.Unlock()
+	if c.diagnoseCoordinator != nil {
+		c.diagnoseCoordinator.SetConfiguration(cfg)
+	}
 	if err := apptheme.Apply(c.texts, c.app, cfg.Appearance.Theme); err != nil {
 		c.showUserError(guiBoundaryError(
 			err,
@@ -298,152 +142,142 @@ func (c *controller) applyConfiguration(cfg application.Config, rebuildSettings 
 
 // startHistoryLoad submits a bounded read for filtered history rows.
 func (c *controller) startHistoryLoad(search string, status model.Status) {
-	_, err := c.historyLoadTask.StartRead(func(ctx context.Context) ([]presenter.HistoryView, error) {
-		entries, loadErr := c.backend.ListHistory(ctx, search, status)
-		if loadErr != nil {
-			return nil, loadErr
-		}
-		result := make([]presenter.HistoryView, 0, len(entries))
-		for _, entry := range entries {
-			result = append(result, presenter.History(entry))
-		}
-		return result, nil
-	})
+	err := c.historyCoordinator.Load(search, status)
 	if err != nil {
 		c.history.SetLoading(false)
 		c.history.SetMessage(c.texts.Text(localization.HistoryLoadErrorPrefix) + c.userFacingError(guiTaskStartError(err, "history.load")))
 	}
 }
 
-// observeHistoryLoad updates loading, error, and row state for the History page.
-func (c *controller) observeHistoryLoad(snapshot taskrunner.Snapshot[[]presenter.HistoryView]) {
-	switch snapshot.State {
-	case taskrunner.StateLoading:
-		c.history.SetLoading(true)
-	case taskrunner.StateSuccess:
-		c.history.SetRows(snapshot.Value)
-	case taskrunner.StateError:
-		c.history.SetLoading(false)
-		c.history.SetMessage(c.texts.Text(localization.HistoryLoadErrorPrefix) + c.userFacingError(snapshot.Err))
-	case taskrunner.StateCancelled:
-		c.history.SetLoading(false)
-		c.history.SetMessage("")
+// observeHistory applies the coordinator's testable state to History widgets
+// and routes successful reads to root-level navigation or dialogs.
+func (c *controller) observeHistory(state HistoryViewModel) {
+	switch state.Changed {
+	case HistoryViewLoadChanged:
+		switch state.LoadState {
+		case taskrunner.StateLoading:
+			c.history.SetLoading(true)
+		case taskrunner.StateSuccess:
+			c.history.SetRows(state.Rows)
+		case taskrunner.StateError:
+			c.history.SetLoading(false)
+			c.history.SetMessage(c.texts.Text(localization.HistoryLoadErrorPrefix) + c.userFacingError(state.LoadErr))
+		case taskrunner.StateCancelled:
+			c.history.SetLoading(false)
+		}
+	case HistoryViewReadChanged:
+		switch state.ReadState {
+		case taskrunner.StateLoading:
+			c.history.SetMessage(c.texts.Text(localization.CommonLoading))
+		case taskrunner.StateError:
+			c.history.SetMessage(c.userFacingError(state.ReadErr))
+		case taskrunner.StateCancelled:
+			c.history.SetMessage("")
+		case taskrunner.StateSuccess:
+			c.history.SetMessage("")
+			switch state.ReadAction {
+			case HistoryReadOpen:
+				c.presentHistoricalDiagnosis(state.Diagnosis)
+			case HistoryReadRerun:
+				c.startProfile(profileViewFromDiagnosis(state.Diagnosis))
+			case HistoryReadExport:
+				c.exportDiagnosis(state.Diagnosis, "markdown")
+			}
+		}
+	case HistoryViewMutationChanged:
+		switch state.MutationState {
+		case taskrunner.StateLoading:
+			c.history.SetMessage(c.texts.Text(localization.CommonSaving))
+		case taskrunner.StateSuccess:
+			c.history.SetMessage("")
+			if c.currentScreen == "history" {
+				c.history.Reload()
+			}
+		case taskrunner.StateError:
+			prefix := ""
+			if state.Mutation == HistoryMutationDelete {
+				prefix = c.texts.Text(localization.HistoryDeleteErrorPrefix)
+			}
+			c.history.SetMessage(prefix + c.userFacingError(state.MutationErr))
+			if c.currentScreen != "history" {
+				c.showUserError(state.MutationErr)
+			}
+		case taskrunner.StateCancelled:
+			c.history.SetMessage("")
+		}
 	}
 }
 
 // startHistoryRead loads one diagnosis for opening, rerunning, or exporting.
-func (c *controller) startHistoryRead(action historyReadAction, id string) {
-	_, err := c.historyReadTask.StartRead(func(ctx context.Context) (historyReadResult, error) {
-		diagnosis, readErr := c.backend.GetDiagnosis(ctx, id)
-		return historyReadResult{Action: action, Diagnosis: diagnosis}, readErr
-	})
+func (c *controller) startHistoryRead(action HistoryReadAction, id string) {
+	err := c.historyCoordinator.Read(action, id)
 	if err != nil {
 		c.history.SetMessage(c.userFacingError(guiTaskStartError(err, "history.read")))
 	}
 }
 
-// observeHistoryRead dispatches a loaded diagnosis to the requested workflow.
-func (c *controller) observeHistoryRead(snapshot taskrunner.Snapshot[historyReadResult]) {
-	switch snapshot.State {
-	case taskrunner.StateLoading:
-		c.history.SetMessage(c.texts.Text(localization.CommonLoading))
-	case taskrunner.StateError:
-		c.history.SetMessage(c.userFacingError(snapshot.Err))
-	case taskrunner.StateCancelled:
-		c.history.SetMessage("")
-	case taskrunner.StateSuccess:
-		c.history.SetMessage("")
-		switch snapshot.Value.Action {
-		case historyReadOpen:
-			c.presentHistoricalDiagnosis(snapshot.Value.Diagnosis)
-		case historyReadRerun:
-			c.startProfile(profileViewFromDiagnosis(snapshot.Value.Diagnosis))
-		case historyReadExport:
-			c.exportDiagnosis(snapshot.Value.Diagnosis, "markdown")
-		}
-	}
-}
-
 // startHistoryMutation serializes deletion or clearing through the mutation queue.
-func (c *controller) startHistoryMutation(action historyMutationAction, id string) {
-	_, err := c.historyMutationTask.StartMutation(func(ctx context.Context) (historyMutationResult, error) {
-		result := historyMutationResult{Action: action}
-		if action == historyMutationClear {
-			return result, c.backend.ClearHistory(ctx)
-		}
-		return result, c.backend.DeleteDiagnosis(ctx, id)
-	})
+func (c *controller) startHistoryMutation(action HistoryMutationAction, id string) {
+	err := c.historyCoordinator.Mutate(action, id)
 	if err != nil {
 		c.history.SetMessage(c.userFacingError(guiTaskStartError(err, "history.mutation")))
 	}
 }
 
-// observeHistoryMutation refreshes History after a successful mutation.
-func (c *controller) observeHistoryMutation(snapshot taskrunner.Snapshot[historyMutationResult]) {
-	switch snapshot.State {
-	case taskrunner.StateLoading:
-		c.history.SetMessage(c.texts.Text(localization.CommonSaving))
-	case taskrunner.StateSuccess:
-		c.history.SetMessage("")
-		if c.currentScreen == "history" {
-			c.history.Reload()
-		}
-	case taskrunner.StateError:
-		prefix := ""
-		if snapshot.Value.Action == historyMutationDelete {
-			prefix = c.texts.Text(localization.HistoryDeleteErrorPrefix)
-		}
-		message := prefix + c.userFacingError(snapshot.Err)
-		c.history.SetMessage(message)
-		if c.currentScreen != "history" {
-			c.showUserError(snapshot.Err)
-		}
-	case taskrunner.StateCancelled:
-		c.history.SetMessage("")
-	}
-}
-
 // startProfilesLoad submits a bounded read for all saved profiles.
 func (c *controller) startProfilesLoad() {
-	_, err := c.profilesLoadTask.StartRead(func(ctx context.Context) ([]presenter.ProfileView, error) {
-		profiles, loadErr := c.backend.ListProfiles(ctx)
-		if loadErr != nil {
-			return nil, loadErr
-		}
-		result := make([]presenter.ProfileView, 0, len(profiles))
-		for _, profile := range profiles {
-			result = append(result, presenter.Profile(profile))
-		}
-		return result, nil
-	})
+	err := c.profilesCoordinator.Load()
 	if err != nil {
 		c.profiles.SetLoading(false)
 		c.profiles.SetMessage(c.texts.Text(localization.ProfilesLoadErrorPrefix) + c.userFacingError(guiTaskStartError(err, "profiles.load")))
 	}
 }
 
-// observeProfilesLoad updates loading, error, and row state for Profiles.
-func (c *controller) observeProfilesLoad(snapshot taskrunner.Snapshot[[]presenter.ProfileView]) {
-	switch snapshot.State {
-	case taskrunner.StateLoading:
-		c.profiles.SetLoading(true)
-	case taskrunner.StateSuccess:
-		c.profiles.SetProfiles(snapshot.Value)
-	case taskrunner.StateError:
-		c.profiles.SetLoading(false)
-		c.profiles.SetMessage(c.texts.Text(localization.ProfilesLoadErrorPrefix) + c.userFacingError(snapshot.Err))
-	case taskrunner.StateCancelled:
-		c.profiles.SetLoading(false)
-		c.profiles.SetMessage("")
+// observeProfiles applies the coordinator's testable state to profile widgets.
+func (c *controller) observeProfiles(state ProfilesViewModel) {
+	switch state.Changed {
+	case ProfilesViewLoadChanged:
+		switch state.LoadState {
+		case taskrunner.StateLoading:
+			c.profiles.SetLoading(true)
+		case taskrunner.StateSuccess:
+			c.profiles.SetProfiles(state.Profiles)
+		case taskrunner.StateError:
+			c.profiles.SetLoading(false)
+			c.profiles.SetMessage(c.texts.Text(localization.ProfilesLoadErrorPrefix) + c.userFacingError(state.LoadErr))
+		case taskrunner.StateCancelled:
+			c.profiles.SetLoading(false)
+		}
+	case ProfilesViewMutationChanged:
+		switch state.MutationState {
+		case taskrunner.StateLoading:
+			c.profiles.SetMessage(c.texts.Text(localization.CommonSaving))
+		case taskrunner.StateSuccess:
+			c.profiles.SetMessage("")
+			if c.currentScreen == "profiles" {
+				c.profiles.Reload()
+			}
+		case taskrunner.StateError:
+			prefix := ""
+			switch state.Mutation {
+			case ProfileMutationDuplicate:
+				prefix = c.texts.Text(localization.ProfilesDuplicateErrorPrefix)
+			case ProfileMutationDelete:
+				prefix = c.texts.Text(localization.ProfilesDeleteErrorPrefix)
+			}
+			c.profiles.SetMessage(prefix + c.userFacingError(state.MutationErr))
+			if c.currentScreen != "profiles" {
+				c.showUserError(state.MutationErr)
+			}
+		case taskrunner.StateCancelled:
+			c.profiles.SetMessage("")
+		}
 	}
 }
 
 // startProfileMutation serializes profile creation, update, or duplication.
-func (c *controller) startProfileMutation(action profileMutationAction, profile model.Profile) {
-	_, err := c.profileMutationTask.StartMutation(func(ctx context.Context) (profileMutationResult, error) {
-		saved, saveErr := c.backend.SaveProfile(ctx, profile)
-		return profileMutationResult{Action: action, Saved: saved}, saveErr
-	})
+func (c *controller) startProfileMutation(action ProfileMutationAction, profile model.Profile) {
+	err := c.profilesCoordinator.Save(action, profile)
 	if err != nil {
 		c.profiles.SetMessage(c.userFacingError(guiTaskStartError(err, "profiles.save")))
 	}
@@ -451,38 +285,9 @@ func (c *controller) startProfileMutation(action profileMutationAction, profile 
 
 // startProfileDelete serializes removal of one profile by identifier.
 func (c *controller) startProfileDelete(id int64) {
-	_, err := c.profileMutationTask.StartMutation(func(ctx context.Context) (profileMutationResult, error) {
-		return profileMutationResult{Action: profileMutationDelete}, c.backend.DeleteProfile(ctx, id)
-	})
+	err := c.profilesCoordinator.Delete(id)
 	if err != nil {
 		c.profiles.SetMessage(c.userFacingError(guiTaskStartError(err, "profiles.delete")))
-	}
-}
-
-// observeProfileMutation reports the result and refreshes the profile list.
-func (c *controller) observeProfileMutation(snapshot taskrunner.Snapshot[profileMutationResult]) {
-	switch snapshot.State {
-	case taskrunner.StateLoading:
-		c.profiles.SetMessage(c.texts.Text(localization.CommonSaving))
-	case taskrunner.StateSuccess:
-		c.profiles.SetMessage("")
-		if c.currentScreen == "profiles" {
-			c.profiles.Reload()
-		}
-	case taskrunner.StateError:
-		prefix := ""
-		switch snapshot.Value.Action {
-		case profileMutationDuplicate:
-			prefix = c.texts.Text(localization.ProfilesDuplicateErrorPrefix)
-		case profileMutationDelete:
-			prefix = c.texts.Text(localization.ProfilesDeleteErrorPrefix)
-		}
-		c.profiles.SetMessage(prefix + c.userFacingError(snapshot.Err))
-		if c.currentScreen != "profiles" {
-			c.showUserError(snapshot.Err)
-		}
-	case taskrunner.StateCancelled:
-		c.profiles.SetMessage("")
 	}
 }
 
@@ -494,10 +299,7 @@ func (c *controller) startSettingsSave(
 	c.mu.Lock()
 	c.settingsDone = complete
 	c.mu.Unlock()
-	_, err := c.settingsTask.StartMutation(func(context.Context) (settingsSaveResult, error) {
-		result := settingsSaveResult{Config: cfg, Complete: complete}
-		return result, c.backend.SaveConfiguration(cfg)
-	})
+	err := c.settingsCoordinator.Save(cfg)
 	if err != nil && complete != nil {
 		complete(c.userFacingError(guiTaskStartError(err, "settings.save")))
 		c.mu.Lock()
@@ -506,28 +308,36 @@ func (c *controller) startSettingsSave(
 	}
 }
 
-// observeSettingsSave applies persisted settings or reports a boundary-safe error.
-func (c *controller) observeSettingsSave(snapshot taskrunner.Snapshot[settingsSaveResult]) {
-	complete := snapshot.Value.Complete
-	if complete == nil {
-		c.mu.Lock()
-		complete = c.settingsDone
-		c.mu.Unlock()
+// observeSettings applies coordinator state while keeping widget completion
+// callbacks and theme changes at the root presentation boundary.
+func (c *controller) observeSettings(state SettingsViewModel) {
+	if state.Changed == SettingsViewLoadChanged {
+		if state.LoadState == taskrunner.StateSuccess {
+			c.applyConfiguration(state.Config, true)
+		}
+		return
 	}
-	switch snapshot.State {
+	if state.Changed != SettingsViewSaveChanged {
+		return
+	}
+
+	c.mu.Lock()
+	complete := c.settingsDone
+	c.mu.Unlock()
+	switch state.SaveState {
 	case taskrunner.StateSuccess:
-		c.applyConfiguration(snapshot.Value.Config, false)
+		c.applyConfiguration(state.Config, false)
 		if complete != nil {
 			complete("")
 		}
 	case taskrunner.StateError, taskrunner.StateCancelled:
 		if complete != nil {
-			complete(c.userFacingError(snapshot.Err))
+			complete(c.userFacingError(state.SaveErr))
 		}
 	}
-	if snapshot.State == taskrunner.StateSuccess ||
-		snapshot.State == taskrunner.StateError ||
-		snapshot.State == taskrunner.StateCancelled {
+	if state.SaveState == taskrunner.StateSuccess ||
+		state.SaveState == taskrunner.StateError ||
+		state.SaveState == taskrunner.StateCancelled {
 		c.mu.Lock()
 		c.settingsDone = nil
 		c.mu.Unlock()
@@ -736,35 +546,26 @@ func (c *controller) reportSessionCurrent(session uint64) bool {
 func (c *controller) cancelScreenTasks(screen string) {
 	switch screen {
 	case "diagnose":
-		if c.diagnoseTask != nil {
-			c.diagnoseTask.Cancel()
+		if c.diagnoseCoordinator != nil {
+			c.diagnoseCoordinator.Cancel()
 		}
-		if c.profileMutationTask != nil {
-			c.profileMutationTask.Cancel()
+		if c.profilesCoordinator != nil {
+			c.profilesCoordinator.Cancel()
 		}
 	case "history":
-		if c.historyLoadTask != nil {
-			c.historyLoadTask.Cancel()
-		}
-		if c.historyReadTask != nil {
-			c.historyReadTask.Cancel()
-		}
-		if c.historyMutationTask != nil {
-			c.historyMutationTask.Cancel()
+		if c.historyCoordinator != nil {
+			c.historyCoordinator.Cancel()
 		}
 	case "profiles":
-		if c.profilesLoadTask != nil {
-			c.profilesLoadTask.Cancel()
-		}
-		if c.profileMutationTask != nil {
-			c.profileMutationTask.Cancel()
+		if c.profilesCoordinator != nil {
+			c.profilesCoordinator.Cancel()
 		}
 	case "settings":
-		if c.settingsTask != nil {
-			c.settingsTask.Cancel()
+		if c.settingsCoordinator != nil {
+			c.settingsCoordinator.Cancel()
 		}
-		if c.historyMutationTask != nil {
-			c.historyMutationTask.Cancel()
+		if c.historyCoordinator != nil {
+			c.historyCoordinator.Cancel()
 		}
 	}
 	c.cancelReportTasks()

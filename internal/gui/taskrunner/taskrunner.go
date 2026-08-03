@@ -15,17 +15,17 @@ const DefaultMaxConcurrentReads = 4
 
 var (
 	// ErrNilDispatcher reports that GUI-thread delivery cannot be scheduled.
-	ErrNilDispatcher         = errors.New("taskrunner: dispatcher is nil")
+	ErrNilDispatcher = errors.New("taskrunner: dispatcher is nil")
 	// ErrInvalidReadLimit reports a negative read-concurrency limit.
-	ErrInvalidReadLimit      = errors.New("taskrunner: maximum concurrent reads must not be negative")
+	ErrInvalidReadLimit = errors.New("taskrunner: maximum concurrent reads must not be negative")
 	// ErrNilRunner reports an attempt to create a scope without a runner.
-	ErrNilRunner             = errors.New("taskrunner: runner is nil")
+	ErrNilRunner = errors.New("taskrunner: runner is nil")
 	// ErrRunnerClosed reports work submitted after runner shutdown.
-	ErrRunnerClosed          = errors.New("taskrunner: runner is closed")
+	ErrRunnerClosed = errors.New("taskrunner: runner is closed")
 	// ErrScopeClosed reports work submitted after scope shutdown.
-	ErrScopeClosed           = errors.New("taskrunner: scope is closed")
+	ErrScopeClosed = errors.New("taskrunner: scope is closed")
 	// ErrNilTask reports an attempt to schedule a nil task.
-	ErrNilTask               = errors.New("taskrunner: task is nil")
+	ErrNilTask = errors.New("taskrunner: task is nil")
 	// ErrInvalidOperationClass reports an unsupported scheduling class.
 	ErrInvalidOperationClass = errors.New("taskrunner: invalid operation class")
 )
@@ -47,13 +47,13 @@ type State string
 
 const (
 	// StateIdle indicates that a scope has no active operation.
-	StateIdle      State = "idle"
+	StateIdle State = "idle"
 	// StateLoading indicates that an operation is queued or running.
-	StateLoading   State = "loading"
+	StateLoading State = "loading"
 	// StateSuccess indicates successful completion.
-	StateSuccess   State = "success"
+	StateSuccess State = "success"
 	// StateError indicates completion with an application error.
-	StateError     State = "error"
+	StateError State = "error"
 	// StateCancelled indicates explicit cancellation or deadline expiry.
 	StateCancelled State = "cancelled"
 )

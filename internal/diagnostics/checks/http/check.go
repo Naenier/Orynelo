@@ -82,7 +82,8 @@ type Check struct {
 func New() *Check { return &Check{Now: time.Now} }
 
 // ID returns the stable diagnostic identifier.
-func (*Check) ID() string   { return "http" }
+func (*Check) ID() string { return "http" }
+
 // Name returns the human-readable check name.
 func (*Check) Name() string { return "HTTP request" }
 
