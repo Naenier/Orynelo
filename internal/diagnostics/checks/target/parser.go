@@ -88,6 +88,9 @@ func parseURLWithOriginal(input, originalInput string) (model.Target, error) {
 		return model.Target{}, err
 	}
 
+	redactedURL := redaction.RedactParsedURL(u)
+	privacyRedacted := u.User != nil || redactedURL.RawQuery != u.RawQuery
+
 	// Requests deliberately omit URL userinfo. Diagnostics should not replay
 	// embedded credentials, and reports must never contain them.
 	u.User = nil
@@ -101,16 +104,17 @@ func parseURLWithOriginal(input, originalInput string) (model.Target, error) {
 	original := sanitizedOriginal(originalInput)
 
 	return model.Target{
-		Original:    original,
-		Normalized:  normalized,
-		Scheme:      scheme,
-		Host:        host,
-		DisplayHost: display,
-		Port:        port,
-		Path:        u.EscapedPath(),
-		Kind:        model.TargetHTTP,
-		UseTLS:      scheme == "https",
-		RequestURL:  requestURL,
+		Original:        original,
+		Normalized:      normalized,
+		Scheme:          scheme,
+		Host:            host,
+		DisplayHost:     display,
+		Port:            port,
+		Path:            u.EscapedPath(),
+		Kind:            model.TargetHTTP,
+		UseTLS:          scheme == "https",
+		PrivacyRedacted: privacyRedacted,
+		RequestURL:      requestURL,
 	}, nil
 }
 

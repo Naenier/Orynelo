@@ -88,12 +88,21 @@ Redaction reduces accidental disclosure; it cannot recognize every secret
 embedded in an arbitrary path, hostname, or nonstandard parameter. Users
 should inspect reports before sharing them.
 
+One typed privacy projection covers history, reports, events, clipboard text,
+and saved profiles. Standard mode preserves non-secret diagnostic context.
+Strict mode is user-selectable and additionally removes URL paths and query
+values, internal hosts and IP addresses, and recognizable local filesystem
+paths. Unknown `slog.Any` structures, `Stringer` values, and `LogValuer`
+implementations are not recursively serialized unless an explicit sanitizer
+allows their type.
+
 ## Network safety
 
 - Global and per-check contexts bound elapsed work.
 - DNS, dial, TLS, and HTTP operations observe cancellation.
 - Concurrent address attempts use a fixed upper bound.
 - Redirect traversal is limited to 10 by default.
+- Each redirect `Location` is limited to 8 KiB by default.
 - Response reading is limited to 64 KiB by default.
 - Idle HTTP connections, response bodies, sockets, files, and databases are
   closed.
@@ -101,6 +110,20 @@ should inspect reports before sharing them.
 - `--insecure` is an explicit temporary diagnostic option and creates a
   warning in the result.
 - No port ranges, raw sockets, packet capture, or load generation are used.
+
+Proxy settings come from an immutable snapshot of `HTTP_PROXY`, `HTTPS_PROXY`,
+`ALL_PROXY`, and `NO_PROXY` variables. Native operating-system/PAC settings are
+not currently read. Selection records the source variable and bypass reason;
+malformed and CGI-unsafe proxy values fail with `PROXY_CONFIG_INVALID` and do
+not silently fall back to a direct origin request. When a proxy is selected,
+direct-origin probes are auxiliary and cannot consume the budget reserved for
+the actual HTTP route.
+
+Redirects block HTTPS-to-HTTP downgrade and public-to-loopback, link-local, or
+private-network transitions by default. Enabling either transition requires an
+explicit unsafe CLI or desktop option and remains visible in effective options
+and reports. Cross-origin hops are recorded and sensitive request headers are
+removed before the next request.
 
 Malformed network data is returned as a classified result or error; expected
 runtime failures do not panic the process.
@@ -127,9 +150,16 @@ CLI report export opens the selected parent directory as an `os.Root`, rejects
 symbolic links and non-regular destinations with `Lstat`, and repeats that
 check immediately before replacement. Report bytes are written to a random
 same-directory temporary file created exclusively with mode `0600`, synced,
-and closed before an atomic `os.Root.Rename`. Replacing an existing hard link
+and closed before a same-directory atomic replacement (`os.Root.Rename` on
+POSIX and `MoveFileEx` without copy fallback on Windows). Replacing an existing hard link
 changes only the selected directory entry; the other link and its prior
 contents remain untouched.
+
+Desktop `file://` export uses the same helper and asks for confirmation before
+replacing an existing file. If the picker observed no file, a no-replace atomic
+install prevents a file created before commit from being overwritten. For other URI providers, OpsDoctor verifies a full
+write and close, reports the exact URI, and explicitly states that the provider
+does not guarantee atomic replacement.
 
 SQLite uses ordered migrations and parameterized statements. Data is stored in
 normalized tables so migrations and selective deletion remain possible.

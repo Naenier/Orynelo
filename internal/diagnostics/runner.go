@@ -11,10 +11,12 @@ import (
 	"time"
 
 	"github.com/Naenier/opsdoctor/internal/diagnostics/checks"
+	"github.com/Naenier/opsdoctor/internal/diagnostics/checks/environment"
 	"github.com/Naenier/opsdoctor/internal/diagnostics/checks/target"
 	"github.com/Naenier/opsdoctor/internal/diagnostics/engine"
 	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
 	"github.com/Naenier/opsdoctor/internal/diagnostics/summary"
+	"github.com/Naenier/opsdoctor/internal/privacy"
 )
 
 // InputError reports invalid user-controlled options.
@@ -55,6 +57,11 @@ type Runner struct {
 	now         func() time.Time
 }
 
+const (
+	maximumDiagnosticTimeout       = 24 * time.Hour
+	errorProxySelectionUnavailable = "PROXY_SELECTION_UNAVAILABLE"
+)
+
 // NewRunner constructs the production diagnostic core.
 func NewRunner(options ...Option) *Runner {
 	runner := &Runner{
@@ -86,6 +93,7 @@ func (r *Runner) Diagnose(ctx context.Context, options model.DiagnoseOptions, si
 	if err != nil {
 		return model.Diagnosis{}, err
 	}
+	sink = privacyEventSink(sink)
 	started := r.now()
 	diagnosis := model.Diagnosis{
 		ID:        newDiagnosisID(started),
@@ -162,13 +170,62 @@ func (r *Runner) Diagnose(ctx context.Context, options model.DiagnoseOptions, si
 		runContext, cancel = context.WithTimeout(ctx, options.Timeout)
 	}
 	defer cancel()
-	executor := engine.New(engine.Config{
-		CheckTimeout:   options.CheckTimeout,
-		MaxConcurrency: options.MaxConcurrency,
-		Now:            r.now,
-	})
 	plan := r.planFactory()
-	diagnosis.Checks = executor.Run(runContext, state, plan, sink)
+	preflight, actual := splitPlanAtCheck(plan, "http")
+	if len(actual) == 0 {
+		executor := engine.New(engine.Config{
+			CheckTimeout:   options.CheckTimeout,
+			MaxConcurrency: options.MaxConcurrency,
+			Now:            r.now,
+			SkipCheck:      skipInvalidProxyDirectCheck,
+		})
+		diagnosis.Checks = executor.Run(runContext, state, plan, sink)
+	} else {
+		mandatory, auxiliary := splitMandatoryPreflight(preflight)
+		mandatoryExecutor := engine.New(engine.Config{
+			CheckTimeout:     options.CheckTimeout,
+			MaxConcurrency:   options.MaxConcurrency,
+			Now:              r.now,
+			SkipCheck:        skipInvalidProxyDirectCheck,
+			EventIndexOffset: 0,
+		})
+		mandatoryResults := mandatoryExecutor.Run(
+			runContext,
+			state,
+			mandatory,
+			sink,
+		)
+
+		preflightContext, cancelPreflight := reservedPreflightContext(
+			runContext,
+			options.ActualHTTPReserve,
+		)
+		preflightExecutor := engine.New(engine.Config{
+			CheckTimeout:     options.CheckTimeout,
+			MaxConcurrency:   options.MaxConcurrency,
+			Now:              r.now,
+			SkipCheck:        skipInvalidProxyDirectCheck,
+			EventIndexOffset: planSize(mandatory),
+		})
+		preflightResults := preflightExecutor.Run(
+			preflightContext,
+			state,
+			auxiliary,
+			sink,
+		)
+		cancelPreflight()
+		markProxyPreflightAuxiliary(preflightResults, state.Proxy())
+
+		actualExecutor := engine.New(engine.Config{
+			CheckTimeout:     options.CheckTimeout,
+			MaxConcurrency:   options.MaxConcurrency,
+			Now:              r.now,
+			EventIndexOffset: planSize(preflight),
+		})
+		actualResults := actualExecutor.Run(runContext, state, actual, sink)
+		diagnosis.Checks = append(mandatoryResults, preflightResults...)
+		diagnosis.Checks = append(diagnosis.Checks, actualResults...)
+	}
 	diagnosis.Summary = summary.Build(diagnosis.Checks)
 	diagnosis.FinishedAt = r.now()
 	diagnosis.Duration = diagnosis.FinishedAt.Sub(started)
@@ -201,14 +258,26 @@ func normalizeOptions(options model.DiagnoseOptions) (model.DiagnoseOptions, err
 	if options.Timeout < 0 {
 		return options, &InputError{Code: "INVALID_TIMEOUT", Message: "timeout cannot be negative"}
 	}
+	if options.Timeout > maximumDiagnosticTimeout {
+		return options, &InputError{Code: "INVALID_TIMEOUT", Message: "timeout must be at most 24h"}
+	}
 	if options.Timeout == 0 {
 		options.Timeout = defaults.Timeout
 	}
 	if options.CheckTimeout < 0 {
 		return options, &InputError{Code: "INVALID_CHECK_TIMEOUT", Message: "check timeout cannot be negative"}
 	}
+	if options.CheckTimeout > maximumDiagnosticTimeout {
+		return options, &InputError{Code: "INVALID_CHECK_TIMEOUT", Message: "check timeout must be at most 24h"}
+	}
 	if options.CheckTimeout == 0 {
 		options.CheckTimeout = defaults.CheckTimeout
+	}
+	if options.CheckTimeout > options.Timeout {
+		return options, &InputError{
+			Code:    "INVALID_CHECK_TIMEOUT",
+			Message: "check timeout must not exceed global timeout",
+		}
 	}
 	if options.IPVersion == "" {
 		options.IPVersion = defaults.IPVersion
@@ -219,8 +288,29 @@ func normalizeOptions(options model.DiagnoseOptions) (model.DiagnoseOptions, err
 			Message: fmt.Sprintf("invalid IP version %q", options.IPVersion),
 		}
 	}
-	if options.MaxRedirects < 0 || options.MaxRedirects > 100 {
-		return options, &InputError{Code: "INVALID_MAX_REDIRECTS", Message: "maximum redirects must be between 0 and 100"}
+	if options.MaxRedirects < 0 || options.MaxRedirects > 50 {
+		return options, &InputError{Code: "INVALID_MAX_REDIRECTS", Message: "maximum redirects must be between 0 and 50"}
+	}
+	if options.MaxRedirectLocationBytes < 0 || options.MaxRedirectLocationBytes > 64<<10 {
+		return options, &InputError{
+			Code:    "INVALID_REDIRECT_LOCATION_LIMIT",
+			Message: "redirect Location limit must be between 1 byte and 64 KiB",
+		}
+	}
+	if options.MaxRedirectLocationBytes == 0 {
+		options.MaxRedirectLocationBytes = defaults.MaxRedirectLocationBytes
+	}
+	if options.ActualHTTPReserve < 0 || options.ActualHTTPReserve >= options.Timeout {
+		return options, &InputError{
+			Code:    "INVALID_ACTUAL_HTTP_RESERVE",
+			Message: "actual HTTP reserve must be non-negative and shorter than the global timeout",
+		}
+	}
+	if options.ActualHTTPReserve == 0 {
+		options.ActualHTTPReserve = options.CheckTimeout
+		if maximum := options.Timeout / 3; options.ActualHTTPReserve > maximum {
+			options.ActualHTTPReserve = maximum
+		}
 	}
 	if strings.TrimSpace(options.Method) == "" {
 		options.Method = defaults.Method
@@ -274,6 +364,145 @@ func normalizeOptions(options model.DiagnoseOptions) (model.DiagnoseOptions, err
 	return options, nil
 }
 
+func splitPlanAtCheck(plan engine.Plan, checkID string) (engine.Plan, engine.Plan) {
+	for stageIndex, stage := range plan {
+		for _, check := range stage {
+			if check.ID() != checkID {
+				continue
+			}
+			return plan[:stageIndex], plan[stageIndex:]
+		}
+	}
+	return plan, nil
+}
+
+// splitMandatoryPreflight keeps target parsing and proxy-policy selection on
+// the global diagnosis budget. Only the remaining direct-origin comparison
+// checks may consume the shorter auxiliary budget.
+func splitMandatoryPreflight(plan engine.Plan) (engine.Plan, engine.Plan) {
+	if mandatory, auxiliary, found := splitPlanAfterCheck(plan, "environment"); found {
+		return mandatory, auxiliary
+	}
+	if mandatory, auxiliary, found := splitPlanAfterCheck(plan, "target"); found {
+		return mandatory, auxiliary
+	}
+	return nil, plan
+}
+
+func splitPlanAfterCheck(plan engine.Plan, checkID string) (engine.Plan, engine.Plan, bool) {
+	for stageIndex, stage := range plan {
+		for checkIndex, check := range stage {
+			if check.ID() != checkID {
+				continue
+			}
+
+			mandatory := append(engine.Plan(nil), plan[:stageIndex]...)
+			mandatory = append(mandatory, stage[:checkIndex+1])
+
+			auxiliary := make(engine.Plan, 0, len(plan)-stageIndex)
+			if checkIndex+1 < len(stage) {
+				auxiliary = append(auxiliary, stage[checkIndex+1:])
+			}
+			auxiliary = append(auxiliary, plan[stageIndex+1:]...)
+			return mandatory, auxiliary, true
+		}
+	}
+	return nil, plan, false
+}
+
+func reservedPreflightContext(
+	parent context.Context,
+	configuredReserve time.Duration,
+) (context.Context, context.CancelFunc) {
+	deadline, ok := parent.Deadline()
+	if !ok || configuredReserve <= 0 {
+		return context.WithCancel(parent)
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return context.WithCancel(parent)
+	}
+	preflightDeadline := deadline.Add(-configuredReserve)
+	return context.WithDeadlineCause(
+		parent,
+		preflightDeadline,
+		engine.ErrAuxiliaryBudgetExhausted,
+	)
+}
+
+func markProxyPreflightAuxiliary(results []model.CheckResult, proxy model.ProxyInfo) {
+	if !proxy.Selected {
+		return
+	}
+	for index := range results {
+		switch results[index].ID {
+		case "dns", "route", "tcp", "tls":
+			results[index].Role = model.CheckRoleAuxiliaryDirectComparison
+			results[index].Evidence = append(results[index].Evidence, model.Evidence{
+				ID:      results[index].ID + ".auxiliary_role",
+				CheckID: results[index].ID,
+				Code:    "AUXILIARY_DIRECT_COMPARISON",
+				Message: "This direct-origin probe is an auxiliary comparison, not the selected proxy route.",
+				Details: map[string]string{
+					"role":  string(model.CheckRoleAuxiliaryDirectComparison),
+					"route": "direct_origin_comparison",
+				},
+			})
+		}
+	}
+}
+
+func skipInvalidProxyDirectCheck(
+	state *model.State,
+	check model.Check,
+) (model.CheckResult, bool) {
+	validity := state.Proxy().Selection.Validity
+	if validity != model.ProxyValidityInvalid && validity != "" {
+		return model.CheckResult{}, false
+	}
+	switch check.ID() {
+	case "dns", "route", "tcp", "tls":
+		if validity == "" {
+			return model.CheckResult{
+				ID:        check.ID(),
+				Name:      check.Name(),
+				Status:    model.StatusSkipped,
+				Summary:   "The direct-origin check was skipped because proxy selection did not complete.",
+				ErrorCode: errorProxySelectionUnavailable,
+				Evidence: []model.Evidence{{
+					ID:      check.ID() + ".proxy_policy",
+					CheckID: check.ID(),
+					Code:    errorProxySelectionUnavailable,
+					Message: "No direct-origin network operation was started while proxy policy was unresolved.",
+				}},
+			}, true
+		}
+		return model.CheckResult{
+			ID:        check.ID(),
+			Name:      check.Name(),
+			Status:    model.StatusSkipped,
+			Summary:   "The direct-origin check was skipped because proxy configuration is invalid.",
+			ErrorCode: environment.ErrorProxyConfigInvalid,
+			Evidence: []model.Evidence{{
+				ID:      check.ID() + ".proxy_policy",
+				CheckID: check.ID(),
+				Code:    environment.ErrorProxyConfigInvalid,
+				Message: "No direct-origin network operation was started while the configured proxy was invalid.",
+			}},
+		}, true
+	default:
+		return model.CheckResult{}, false
+	}
+}
+
+func planSize(plan engine.Plan) int {
+	total := 0
+	for _, stage := range plan {
+		total += len(stage)
+	}
+	return total
+}
+
 func containsControl(value string) bool {
 	for _, char := range value {
 		if char < 0x20 || char == 0x7f {
@@ -299,5 +528,15 @@ func resultPointer(result model.CheckResult) *model.CheckResult {
 func emit(sink model.EventSink, event model.CheckEvent) {
 	if sink != nil {
 		sink(event)
+	}
+}
+
+func privacyEventSink(sink model.EventSink) model.EventSink {
+	if sink == nil {
+		return nil
+	}
+	projection := privacy.Standard()
+	return func(event model.CheckEvent) {
+		sink(projection.Event(event))
 	}
 }

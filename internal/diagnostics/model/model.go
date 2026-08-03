@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -15,20 +16,21 @@ import (
 type Status string
 
 const (
-	StatusPending   Status = "pending"
-	StatusRunning   Status = "running"
-	StatusPassed    Status = "passed"
-	StatusWarning   Status = "warning"
-	StatusFailed    Status = "failed"
-	StatusSkipped   Status = "skipped"
-	StatusCancelled Status = "cancelled"
+	StatusPending       Status = "pending"
+	StatusRunning       Status = "running"
+	StatusPassed        Status = "passed"
+	StatusWarning       Status = "warning"
+	StatusFailed        Status = "failed"
+	StatusSkipped       Status = "skipped"
+	StatusNotApplicable Status = "not_applicable"
+	StatusCancelled     Status = "cancelled"
 )
 
 // Valid reports whether status is part of the stable domain vocabulary.
 func (s Status) Valid() bool {
 	switch s {
 	case StatusPending, StatusRunning, StatusPassed, StatusWarning,
-		StatusFailed, StatusSkipped, StatusCancelled:
+		StatusFailed, StatusSkipped, StatusNotApplicable, StatusCancelled:
 		return true
 	default:
 		return false
@@ -58,6 +60,7 @@ type CheckResult struct {
 	ID              string           `json:"id"`
 	Name            string           `json:"name"`
 	Status          Status           `json:"status"`
+	Role            CheckRole        `json:"role,omitempty"`
 	StartedAt       time.Time        `json:"startedAt"`
 	FinishedAt      time.Time        `json:"finishedAt"`
 	Duration        time.Duration    `json:"duration"`
@@ -66,6 +69,14 @@ type CheckResult struct {
 	Recommendations []Recommendation `json:"recommendations,omitempty"`
 	ErrorCode       string           `json:"errorCode,omitempty"`
 }
+
+// CheckRole distinguishes the actual client path from temporary comparison
+// probes. It is intentionally optional for backward-compatible snapshots.
+type CheckRole string
+
+const (
+	CheckRoleAuxiliaryDirectComparison CheckRole = "auxiliary_direct_comparison"
+)
 
 // Complete normalizes timestamps and evidence ownership before returning a
 // result from a Check implementation.
@@ -162,7 +173,11 @@ type Target struct {
 	Path        string     `json:"path,omitempty"`
 	Kind        TargetKind `json:"kind"`
 	UseTLS      bool       `json:"useTLS"`
-	RequestURL  string     `json:"-"`
+	// PrivacyRedacted records that parsing removed credentials or a secret-like
+	// query value. It lets profile-save UI warn even when userinfo was removed
+	// without leaving a replacement marker in the display URL.
+	PrivacyRedacted bool   `json:"privacyRedacted,omitempty"`
+	RequestURL      string `json:"-"`
 }
 
 // Address returns a dialable host:port pair with correct IPv6 brackets.
@@ -216,6 +231,10 @@ type DiagnoseOptions struct {
 	Insecure                    bool            `json:"insecure"`
 	EnableTLS                   bool            `json:"enableTLS"`
 	MaxRedirects                int             `json:"maxRedirects"`
+	MaxRedirectLocationBytes    int             `json:"maxRedirectLocationBytes"`
+	AllowInsecureRedirects      bool            `json:"allowInsecureRedirects"`
+	AllowPrivateRedirects       bool            `json:"allowPrivateRedirects"`
+	ActualHTTPReserve           time.Duration   `json:"actualHttpReserve"`
 	Method                      string          `json:"method"`
 	ReportVerbosity             ReportVerbosity `json:"reportVerbosity"`
 	UserAgent                   string          `json:"userAgent"`
@@ -232,6 +251,7 @@ func DefaultDiagnoseOptions(target string) DiagnoseOptions {
 		CheckTimeout:                5 * time.Second,
 		IPVersion:                   IPVersionAuto,
 		MaxRedirects:                10,
+		MaxRedirectLocationBytes:    8 << 10,
 		Method:                      "GET",
 		ReportVerbosity:             ReportVerbosityNormal,
 		UserAgent:                   "OpsDoctor/diagnostic",
@@ -336,13 +356,52 @@ type HistoryQuery struct {
 	Offset    int
 }
 
-// ProxyInfo records privacy-safe environment/proxy selection.
+// ProxySelectionValidity describes whether a configured proxy can safely be
+// used for the target. Invalid selections must never degrade to direct HTTP.
+type ProxySelectionValidity string
+
+const (
+	ProxyValidityNotConfigured ProxySelectionValidity = "not_configured"
+	ProxyValidityValid         ProxySelectionValidity = "valid"
+	ProxyValidityInvalid       ProxySelectionValidity = "invalid"
+	ProxyValidityNotApplicable ProxySelectionValidity = "not_applicable"
+)
+
+// ProxyBypassReason makes every direct route chosen in the presence of proxy
+// configuration explicit and reportable.
+type ProxyBypassReason string
+
+const (
+	ProxyBypassNone          ProxyBypassReason = ""
+	ProxyBypassDisabled      ProxyBypassReason = "explicitly_disabled"
+	ProxyBypassNoProxy       ProxyBypassReason = "no_proxy_match"
+	ProxyBypassLoopback      ProxyBypassReason = "loopback_target"
+	ProxyBypassNotApplicable ProxyBypassReason = "target_not_applicable"
+)
+
+// ProxySelection is the typed result of applying one immutable environment
+// snapshot to a target. RequestURL may contain credentials and is therefore
+// runtime-only; URL is its redacted, report-safe representation.
+type ProxySelection struct {
+	SourceVariable string                 `json:"sourceVariable,omitempty"`
+	URL            string                 `json:"url,omitempty"`
+	Validity       ProxySelectionValidity `json:"validity"`
+	BypassReason   ProxyBypassReason      `json:"bypassReason,omitempty"`
+	ErrorCode      string                 `json:"errorCode,omitempty"`
+	Error          string                 `json:"error,omitempty"`
+	RequestURL     string                 `json:"-"`
+}
+
+// ProxyInfo records privacy-safe environment/proxy selection. The legacy
+// summary fields remain populated for old snapshot and presentation readers.
 type ProxyInfo struct {
-	Disabled    bool              `json:"disabled"`
-	Selected    bool              `json:"selected"`
-	Bypassed    bool              `json:"bypassed"`
-	ProxyURL    string            `json:"proxyUrl,omitempty"`
-	Environment map[string]string `json:"environment,omitempty"`
+	Disabled     bool                          `json:"disabled"`
+	Selected     bool                          `json:"selected"`
+	Bypassed     bool                          `json:"bypassed"`
+	ProxyURL     string                        `json:"proxyUrl,omitempty"`
+	Environment  map[string]string             `json:"environment,omitempty"`
+	Selection    ProxySelection                `json:"selection"`
+	SelectForURL func(*url.URL) ProxySelection `json:"-"`
 }
 
 // DNSResult stores canonical, de-duplicated resolver output.
@@ -355,15 +414,40 @@ type DNSResult struct {
 	AAAADuration time.Duration `json:"aaaaDuration"`
 }
 
+// AttemptState describes the lifecycle of one address-specific network
+// attempt. The field is optional in serialized snapshots so diagnoses written
+// before attempt states were introduced remain readable.
+type AttemptState string
+
+const (
+	AttemptStateQueued    AttemptState = "queued"
+	AttemptStateRunning   AttemptState = "running"
+	AttemptStateCompleted AttemptState = "completed"
+	AttemptStateCancelled AttemptState = "cancelled"
+	AttemptStateSkipped   AttemptState = "skipped"
+)
+
+// Valid reports whether state is part of the stable attempt vocabulary.
+func (s AttemptState) Valid() bool {
+	switch s {
+	case AttemptStateQueued, AttemptStateRunning, AttemptStateCompleted,
+		AttemptStateCancelled, AttemptStateSkipped:
+		return true
+	default:
+		return false
+	}
+}
+
 // RouteInfo describes the source-side path selected for a remote address.
 type RouteInfo struct {
-	RemoteIP      net.IP `json:"remoteIp"`
-	LocalIP       net.IP `json:"localIp,omitempty"`
-	InterfaceName string `json:"interfaceName,omitempty"`
-	InterfaceUp   bool   `json:"interfaceUp"`
-	MTU           int    `json:"mtu,omitempty"`
-	Family        string `json:"family"`
-	Error         string `json:"error,omitempty"`
+	RemoteIP      net.IP       `json:"remoteIp"`
+	LocalIP       net.IP       `json:"localIp,omitempty"`
+	InterfaceName string       `json:"interfaceName,omitempty"`
+	InterfaceUp   bool         `json:"interfaceUp"`
+	MTU           int          `json:"mtu,omitempty"`
+	Family        string       `json:"family"`
+	Error         string       `json:"error,omitempty"`
+	State         AttemptState `json:"state,omitempty"`
 }
 
 // TCPAttempt is a single bounded TCP connect attempt.
@@ -374,6 +458,7 @@ type TCPAttempt struct {
 	Success   bool          `json:"success"`
 	ErrorCode string        `json:"errorCode,omitempty"`
 	Error     string        `json:"error,omitempty"`
+	State     AttemptState  `json:"state,omitempty"`
 }
 
 // CertificateInfo contains report-safe peer certificate metadata.
@@ -407,9 +492,16 @@ type TLSResult struct {
 
 // Redirect records one privacy-safe HTTP redirect.
 type Redirect struct {
-	From       string `json:"from"`
-	To         string `json:"to"`
-	StatusCode int    `json:"statusCode"`
+	From                    string         `json:"from"`
+	To                      string         `json:"to"`
+	StatusCode              int            `json:"statusCode"`
+	CrossOrigin             bool           `json:"crossOrigin"`
+	SensitiveHeadersRemoved []string       `json:"sensitiveHeadersRemoved,omitempty"`
+	PolicyDecision          string         `json:"policyDecision"`
+	FromNetworkScope        string         `json:"fromNetworkScope,omitempty"`
+	ToNetworkScope          string         `json:"toNetworkScope,omitempty"`
+	Route                   string         `json:"route"`
+	ProxySelection          ProxySelection `json:"proxySelection"`
 }
 
 // HTTPTimings exposes the major httptrace phases.
@@ -423,19 +515,24 @@ type HTTPTimings struct {
 
 // HTTPResult stores bounded, redacted application-response metadata.
 type HTTPResult struct {
-	Method        string              `json:"method"`
-	FinalURL      string              `json:"finalUrl"`
-	StatusCode    int                 `json:"statusCode"`
-	Status        string              `json:"status"`
-	Redirects     []Redirect          `json:"redirects,omitempty"`
-	Headers       map[string][]string `json:"headers,omitempty"`
-	Timings       HTTPTimings         `json:"timings"`
-	RemoteIP      string              `json:"remoteIp,omitempty"`
-	Protocol      string              `json:"protocol,omitempty"`
-	BodyBytesRead int64               `json:"bodyBytesRead"`
-	BodyTruncated bool                `json:"bodyTruncated"`
-	ErrorCode     string              `json:"errorCode,omitempty"`
-	Error         string              `json:"error,omitempty"`
+	Method            string                 `json:"method"`
+	FinalURL          string                 `json:"finalUrl"`
+	StatusCode        int                    `json:"statusCode"`
+	Status            string                 `json:"status"`
+	Redirects         []Redirect             `json:"redirects,omitempty"`
+	Headers           map[string][]string    `json:"headers,omitempty"`
+	Timings           HTTPTimings            `json:"timings"`
+	RemoteIP          string                 `json:"remoteIp,omitempty"`
+	Protocol          string                 `json:"protocol,omitempty"`
+	BodyBytesRead     int64                  `json:"bodyBytesRead"`
+	BodyTruncated     bool                   `json:"bodyTruncated"`
+	Route             string                 `json:"route"`
+	ProxySource       string                 `json:"proxySource,omitempty"`
+	ProxyURL          string                 `json:"proxyUrl,omitempty"`
+	ProxyValidity     ProxySelectionValidity `json:"proxyValidity,omitempty"`
+	ProxyBypassReason ProxyBypassReason      `json:"proxyBypassReason,omitempty"`
+	ErrorCode         string                 `json:"errorCode,omitempty"`
+	Error             string                 `json:"error,omitempty"`
 }
 
 // State carries mutable artifacts between checks. It is per diagnosis and
@@ -541,6 +638,12 @@ func cloneTLS(value TLSResult) TLSResult {
 
 func cloneHTTP(v HTTPResult) HTTPResult {
 	v.Redirects = append([]Redirect(nil), v.Redirects...)
+	for index := range v.Redirects {
+		v.Redirects[index].SensitiveHeadersRemoved = append(
+			[]string(nil),
+			v.Redirects[index].SensitiveHeadersRemoved...,
+		)
+	}
 	if v.Headers != nil {
 		headers := v.Headers
 		v.Headers = make(map[string][]string, len(headers))

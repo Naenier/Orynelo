@@ -27,13 +27,14 @@ func TestStatusKeyMapsDomainValues(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]Key{
-		"passed":    StatusPassed,
-		" WARNING ": StatusWarning,
-		"failed":    StatusFailed,
-		"running":   StatusRunning,
-		"skipped":   StatusSkipped,
-		"cancelled": StatusCancelled,
-		"unknown":   StatusPending,
+		"passed":         StatusPassed,
+		" WARNING ":      StatusWarning,
+		"failed":         StatusFailed,
+		"running":        StatusRunning,
+		"skipped":        StatusSkipped,
+		"not_applicable": StatusNotApplicable,
+		"cancelled":      StatusCancelled,
+		"unknown":        StatusPending,
 	}
 	for value, want := range tests {
 		if got := StatusKey(value); got != want {

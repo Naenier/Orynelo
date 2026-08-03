@@ -59,13 +59,14 @@ const (
 	OptionWarn     Key = "option.warn"
 	OptionError    Key = "option.error"
 
-	StatusPending   Key = "status.pending"
-	StatusRunning   Key = "status.running"
-	StatusPassed    Key = "status.passed"
-	StatusWarning   Key = "status.warning"
-	StatusFailed    Key = "status.failed"
-	StatusSkipped   Key = "status.skipped"
-	StatusCancelled Key = "status.cancelled"
+	StatusPending       Key = "status.pending"
+	StatusRunning       Key = "status.running"
+	StatusPassed        Key = "status.passed"
+	StatusWarning       Key = "status.warning"
+	StatusFailed        Key = "status.failed"
+	StatusSkipped       Key = "status.skipped"
+	StatusNotApplicable Key = "status.not_applicable"
+	StatusCancelled     Key = "status.cancelled"
 
 	HeaderReady           Key = "header.ready"
 	HeaderDevelopment     Key = "header.development"
@@ -84,6 +85,8 @@ const (
 	DiagnoseDefaultMaxRedirects       Key = "diagnose.default_max_redirects"
 	DiagnoseZeroDuration              Key = "diagnose.zero_duration"
 	DiagnoseInsecureTLS               Key = "diagnose.insecure_tls"
+	DiagnoseAllowInsecureRedirects    Key = "diagnose.allow_insecure_redirects"
+	DiagnoseAllowPrivateRedirects     Key = "diagnose.allow_private_redirects"
 	DiagnoseReportVerbosity           Key = "diagnose.report_verbosity"
 	DiagnoseRun                       Key = "diagnose.run"
 	DiagnoseAdvancedOptions           Key = "diagnose.advanced_options"
@@ -266,6 +269,19 @@ const (
 	DialogReportFilenameBase      Key = "dialog.report_filename_base"
 	DialogRawStructuredData       Key = "dialog.raw_structured_data"
 	DialogLogDirectoryUnavailable Key = "dialog.log_directory_unavailable"
+	DialogExportPrivacyTitle      Key = "dialog.export_privacy_title"
+	DialogExportPrivacyBody       Key = "dialog.export_privacy_body"
+	DialogExportFilename          Key = "dialog.export_filename"
+	DialogExportStandard          Key = "dialog.export_standard"
+	DialogExportStrict            Key = "dialog.export_strict"
+	DialogExportContinue          Key = "dialog.export_continue"
+	DialogExportSavedTitle        Key = "dialog.export_saved_title"
+	DialogExportSavedAtomicFormat Key = "dialog.export_saved_atomic_format"
+	DialogExportSavedURIFormat    Key = "dialog.export_saved_uri_format"
+	DialogExportOverwriteTitle    Key = "dialog.export_overwrite_title"
+	DialogExportOverwriteFormat   Key = "dialog.export_overwrite_format"
+	DialogProfileRedactedTitle    Key = "dialog.profile_redacted_title"
+	DialogProfileRedactedFormat   Key = "dialog.profile_redacted_format"
 
 	TechnicalJSONEncodingError         Key = "technical.json_encoding_error"
 	TechnicalCheckIDFormat             Key = "technical.check_id_format"
@@ -306,6 +322,8 @@ func StatusKey(status string) Key {
 		return StatusFailed
 	case "skipped":
 		return StatusSkipped
+	case "not_applicable":
+		return StatusNotApplicable
 	case "cancelled":
 		return StatusCancelled
 	default:
@@ -373,13 +391,14 @@ var english = map[Key]string{
 	OptionWarn:     "Warning",
 	OptionError:    "Error",
 
-	StatusPending:   "PENDING",
-	StatusRunning:   "RUNNING",
-	StatusPassed:    "PASSED",
-	StatusWarning:   "WARNING",
-	StatusFailed:    "FAILED",
-	StatusSkipped:   "SKIPPED",
-	StatusCancelled: "CANCELLED",
+	StatusPending:       "PENDING",
+	StatusRunning:       "RUNNING",
+	StatusPassed:        "PASSED",
+	StatusWarning:       "WARNING",
+	StatusFailed:        "FAILED",
+	StatusSkipped:       "SKIPPED",
+	StatusNotApplicable: "NOT APPLICABLE",
+	StatusCancelled:     "CANCELLED",
 
 	HeaderReady:           "Ready",
 	HeaderDevelopment:     "dev",
@@ -398,6 +417,8 @@ var english = map[Key]string{
 	DiagnoseDefaultMaxRedirects:       "10",
 	DiagnoseZeroDuration:              "0ms",
 	DiagnoseInsecureTLS:               "Insecure TLS (verification disabled)",
+	DiagnoseAllowInsecureRedirects:    "Allow HTTPS to HTTP redirects (unsafe)",
+	DiagnoseAllowPrivateRedirects:     "Allow public to private-network redirects (unsafe)",
 	DiagnoseReportVerbosity:           "Report verbosity",
 	DiagnoseRun:                       "Run diagnostics",
 	DiagnoseAdvancedOptions:           "Advanced options",
@@ -424,8 +445,8 @@ var english = map[Key]string{
 	DiagnoseSaveAsProfile:             "Save as profile",
 	DiagnoseTimingWaterfall:           "Timing waterfall",
 	DiagnoseTimingSubtitle:            "DNS, TCP, TLS, TTFB, and total",
-	DiagnoseInvalidTimeout:            "timeout must be a positive Go duration such as 15s",
-	DiagnoseInvalidCheckTimeout:       "per-check timeout must be a positive Go duration such as 5s",
+	DiagnoseInvalidTimeout:            "timeout must be a positive Go duration no longer than 24h, such as 15s",
+	DiagnoseInvalidCheckTimeout:       "per-check timeout must be positive and no longer than the total timeout",
 	DiagnoseInvalidRedirects:          "maximum redirects must be between 0 and 50",
 	DiagnoseTargetRequired:            "target is required",
 	DiagnoseRunningTitle:              "Diagnostics running…",
@@ -501,7 +522,7 @@ var english = map[Key]string{
 	ProfilesIPPreference:         "IP preference",
 	ProfilesProxy:                "Proxy",
 	ProfilesInvalidTimeout:       "profile timeout must be a positive duration",
-	ProfilesInvalidCheckTimeout:  "profile per-check timeout must be a positive duration",
+	ProfilesInvalidCheckTimeout:  "profile per-check timeout must be positive and no longer than the total timeout",
 	ProfilesInvalidRedirects:     "profile maximum redirects must be between 0 and 50",
 	ProfilesRequiredFields:       "profile name, target, and a valid IP preference are required",
 	ProfilesNameTargetRequired:   "profile name and target are required",
@@ -512,7 +533,7 @@ var english = map[Key]string{
 	ProfilesNoMatchesHint:        "Try another search or clear the current query.",
 	ProfilesClearSearch:          "Clear search",
 
-	SettingsUseSystemProxy:        "Use system proxy settings",
+	SettingsUseSystemProxy:        "Use proxy environment variables",
 	SettingsSaveHistory:           "Save diagnostic history",
 	SettingsSave:                  "Save settings",
 	SettingsSaveErrorPrefix:       "Settings were not saved: ",
@@ -580,6 +601,19 @@ var english = map[Key]string{
 	DialogReportFilenameBase:      "opsdoctor-report",
 	DialogRawStructuredData:       "Raw structured data",
 	DialogLogDirectoryUnavailable: "log directory is unavailable",
+	DialogExportPrivacyTitle:      "Export privacy",
+	DialogExportPrivacyBody:       "Choose how much identifying context the exported report should retain.",
+	DialogExportFilename:          "File name",
+	DialogExportStandard:          "Standard — remove credentials and secret-like values",
+	DialogExportStrict:            "Strict — also hide URL paths, query values, internal hosts/IPs, and local paths",
+	DialogExportContinue:          "Continue",
+	DialogExportSavedTitle:        "Export complete",
+	DialogExportSavedAtomicFormat: "Report saved atomically to %s.",
+	DialogExportSavedURIFormat:    "Report saved to %s. This URI provider does not guarantee atomic replacement.",
+	DialogExportOverwriteTitle:    "Replace existing export?",
+	DialogExportOverwriteFormat:   "An item already exists at %s. Replace it?",
+	DialogProfileRedactedTitle:    "Sensitive target parts will be removed",
+	DialogProfileRedactedFormat:   "For privacy, the saved profile target will be:\n\n%s\n\nThe profile may no longer work without the removed value. Save it anyway?",
 
 	TechnicalJSONEncodingError:         "technical details could not be encoded",
 	TechnicalCheckIDFormat:             "Check ID: %s",

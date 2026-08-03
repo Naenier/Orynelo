@@ -74,6 +74,9 @@ Useful CLI invocations:
 ./bin/opsdoctor diagnose https://example.com --ip-version 4
 ./bin/opsdoctor diagnose https://example.com --format json
 ./bin/opsdoctor diagnose https://example.com --format markdown --output report.md
+./bin/opsdoctor diagnose https://example.com --anonymize strict --output report.json
+./bin/opsdoctor diagnose https://example.com --allow-insecure-redirects
+./bin/opsdoctor diagnose https://example.com --allow-private-redirects
 ./bin/opsdoctor version
 ./bin/opsdoctor version --json
 ./bin/opsdoctor completion bash
@@ -203,10 +206,10 @@ go build -tags migrated_fynedo -o bin\opsdoctor-desktop.exe .\cmd\opsdoctor-desk
 ```
 
 Native Fyne build dependencies are still required for the desktop binary.
-Make builds record the commit, build date, and whether the source tree was
-modified without rewriting tracked source files. Go module and VCS metadata
-provide local-build fallbacks; otherwise the application reports its build as
-`dev`.
+Make builds record the application version, commit, build date, and whether the
+source tree was modified without rewriting tracked source files. Go module and
+VCS metadata provide local-build fallbacks; otherwise the application reports
+the current stage version (`0.2.0`).
 
 ## Docker
 
@@ -267,9 +270,20 @@ user explicitly exports or shares it.
 
 Authorization and cookie headers, URL userinfo, proxy credentials, and
 token-like query parameters are redacted before logging, reporting, or
-persistence. HTTP response bodies are bounded and are not written to history.
-TLS verification is enabled by default; `--insecure` is an explicit diagnostic
-override and is reported as a warning.
+persistence. Standard report anonymization keeps useful non-secret context;
+`--anonymize strict` also hides URL paths and query values, internal hosts and
+IP addresses, and recognizable local paths. Local report files are replaced
+atomically with private permissions.
+
+Proxy behavior is derived from `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and
+`NO_PROXY` environment variables; the desktop setting does not claim native
+system/PAC support. Invalid proxy configuration fails closed instead of
+silently using a direct HTTP route. HTTPS-to-HTTP and public-to-private or
+local redirects are blocked by default and require explicit unsafe opt-in
+flags. Cross-origin redirects remove sensitive request headers. HTTP response
+bodies are bounded and are not written to history. TLS verification is enabled
+by default; `--insecure` is an explicit diagnostic override and is reported as
+a warning.
 
 Read the [security design](docs/security.md) and
 [vulnerability reporting policy](.github/SECURITY.md) before handling sensitive

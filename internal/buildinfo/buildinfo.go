@@ -9,10 +9,13 @@ import (
 )
 
 var (
+	version   = ""
 	commit    = "unknown"
 	buildDate = "unknown"
 	modified  = "unknown"
 )
+
+const fallbackVersion = "0.2.0"
 
 // Info describes the source and toolchain used to build the application.
 type Info struct {
@@ -44,7 +47,7 @@ func Get() Info {
 
 func resolve(build *debug.BuildInfo) Info {
 	info := Info{
-		Version:   "dev",
+		Version:   fallbackVersion,
 		Commit:    commit,
 		BuildDate: buildDate,
 		GoVersion: runtime.Version(),
@@ -61,7 +64,9 @@ func resolve(build *debug.BuildInfo) Info {
 		return info
 	}
 
-	if build.Main.Version != "" && build.Main.Version != "(devel)" {
+	if version != "" {
+		info.Version = strings.TrimPrefix(version, "v")
+	} else if build.Main.Version != "" && build.Main.Version != "(devel)" {
 		info.Version = strings.TrimPrefix(build.Main.Version, "v")
 	}
 

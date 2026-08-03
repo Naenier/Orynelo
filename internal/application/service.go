@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
+	"github.com/Naenier/opsdoctor/internal/privacy"
 )
 
 // DiagnosticRunner is implemented by the shared diagnostic core.
@@ -40,7 +41,11 @@ type ConfigurationStore interface {
 }
 
 // ReportRenderer produces one of the stable report formats.
-type ReportRenderer func(format string, diagnosis model.Diagnosis) ([]byte, error)
+type ReportRenderer func(
+	format string,
+	diagnosis model.Diagnosis,
+	mode privacy.Mode,
+) ([]byte, error)
 
 // Dependencies contains application infrastructure adapters.
 type Dependencies struct {
@@ -110,11 +115,18 @@ func (s *Service) Diagnose(
 	}
 	options.UserAgent = cfg.Network.UserAgent
 	options.CertificateWarningThreshold = cfg.Diagnostics.CertificateWarningThreshold
-	diagnosis, err := s.runner.Diagnose(ctx, options, sink)
+	projectedSink := sink
+	if sink != nil {
+		projectedSink = func(event model.CheckEvent) {
+			sink(privacy.Standard().Event(event))
+		}
+	}
+	diagnosis, err := s.runner.Diagnose(ctx, options, projectedSink)
 	if err != nil {
-		return diagnosis, err
+		return privacy.Standard().Diagnosis(diagnosis), err
 	}
 	diagnosis.Build = s.build
+	diagnosis = privacy.Standard().Diagnosis(diagnosis)
 
 	if cfg.History.Enabled && s.persistence != nil {
 		if err := s.persistence.SaveDiagnosis(ctx, diagnosis, cfg.History.MaxEntries); err != nil {
@@ -193,7 +205,9 @@ func (s *Service) ListHistory(
 		if err != nil {
 			return nil, err
 		}
-		entries = append(entries, page...)
+		for _, entry := range page {
+			entries = append(entries, privacy.Standard().HistoryEntry(entry))
+		}
 		if len(page) < pageSize {
 			return entries, nil
 		}
@@ -205,7 +219,11 @@ func (s *Service) GetDiagnosis(ctx context.Context, id string) (model.Diagnosis,
 	if s.persistence == nil {
 		return model.Diagnosis{}, errors.New("diagnostic history is unavailable")
 	}
-	return s.persistence.GetDiagnosis(ctx, id)
+	diagnosis, err := s.persistence.GetDiagnosis(ctx, id)
+	if err != nil {
+		return model.Diagnosis{}, err
+	}
+	return privacy.Standard().Diagnosis(diagnosis), nil
 }
 
 // DeleteDiagnosis removes one history entry.
@@ -229,7 +247,14 @@ func (s *Service) ListProfiles(ctx context.Context) ([]model.Profile, error) {
 	if s.persistence == nil {
 		return []model.Profile{}, nil
 	}
-	return s.persistence.ListProfiles(ctx)
+	profiles, err := s.persistence.ListProfiles(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for index := range profiles {
+		profiles[index] = privacy.Standard().Profile(profiles[index])
+	}
+	return profiles, nil
 }
 
 // SaveProfile creates or updates a reusable profile.
@@ -237,10 +262,18 @@ func (s *Service) SaveProfile(ctx context.Context, profile model.Profile) (model
 	if s.persistence == nil {
 		return model.Profile{}, errors.New("profile storage is unavailable")
 	}
+	profile = privacy.Standard().Profile(profile)
+	var saved model.Profile
+	var err error
 	if profile.ID == 0 {
-		return s.persistence.CreateProfile(ctx, profile)
+		saved, err = s.persistence.CreateProfile(ctx, profile)
+	} else {
+		saved, err = s.persistence.UpdateProfile(ctx, profile)
 	}
-	return s.persistence.UpdateProfile(ctx, profile)
+	if err != nil {
+		return model.Profile{}, err
+	}
+	return privacy.Standard().Profile(saved), nil
 }
 
 // DeleteProfile removes one profile.
@@ -252,11 +285,18 @@ func (s *Service) DeleteProfile(ctx context.Context, id int64) error {
 }
 
 // RenderReport renders a completed diagnosis in a stable format.
-func (s *Service) RenderReport(format string, diagnosis model.Diagnosis) ([]byte, error) {
+func (s *Service) RenderReport(
+	format string,
+	diagnosis model.Diagnosis,
+	mode privacy.Mode,
+) ([]byte, error) {
 	if s.renderReport == nil {
 		return nil, errors.New("report renderer is unavailable")
 	}
-	return s.renderReport(format, diagnosis)
+	if _, err := privacy.New(mode); err != nil {
+		return nil, err
+	}
+	return s.renderReport(format, diagnosis, mode)
 }
 
 // Close releases application-owned infrastructure.
