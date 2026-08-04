@@ -19,9 +19,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Naenier/opsdoctor/internal/diagnostics/checks/environment"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
-	"github.com/Naenier/opsdoctor/internal/redaction"
+	"github.com/Naenier/orynelo/internal/diagnostics/checks/environment"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/redaction"
 )
 
 const (
@@ -73,7 +73,7 @@ type Check struct {
 	Resolver         Resolver
 	DialContext      DialContextFunc
 	// RequestHeaders is an internal test seam. Production constructors leave
-	// it nil because OpsDoctor never accepts arbitrary outbound headers.
+	// it nil because Orynelo never accepts arbitrary outbound headers.
 	RequestHeaders stdhttp.Header
 	Now            func() time.Time
 }
@@ -81,9 +81,13 @@ type Check struct {
 // New constructs an HTTP check.
 func New() *Check { return &Check{Now: time.Now} }
 
-func (*Check) ID() string   { return "http" }
+// ID returns the stable diagnostic identifier.
+func (*Check) ID() string { return "http" }
+
+// Name returns the human-readable check name.
 func (*Check) Name() string { return "HTTP request" }
 
+// Run performs the bounded HTTP request and records redirects, policy, and timing.
 func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 	if state.Target.Kind != model.TargetHTTP {
 		return model.CheckResult{
@@ -766,11 +770,6 @@ func sameOrigin(left, right *url.URL) bool {
 	return strings.EqualFold(left.Scheme, right.Scheme) &&
 		strings.EqualFold(left.Hostname(), right.Hostname()) &&
 		effectivePort(left) == effectivePort(right)
-}
-
-func sameHostname(left, right *url.URL) bool {
-	return left != nil && right != nil &&
-		strings.EqualFold(strings.TrimSuffix(left.Hostname(), "."), strings.TrimSuffix(right.Hostname(), "."))
 }
 
 func effectivePort(value *url.URL) string {

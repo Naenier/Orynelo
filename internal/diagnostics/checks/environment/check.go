@@ -10,10 +10,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
 	"golang.org/x/net/http/httpproxy"
 )
 
+// ErrorProxyConfigInvalid identifies a malformed proxy environment setting.
 const ErrorProxyConfigInvalid = "PROXY_CONFIG_INVALID"
 
 var proxyVariables = []string{
@@ -31,9 +32,13 @@ type Check struct {
 // New constructs an environment check using the process environment.
 func New() *Check { return &Check{LookupEnv: os.LookupEnv} }
 
-func (*Check) ID() string   { return "environment" }
+// ID returns the stable diagnostic identifier.
+func (*Check) ID() string { return "environment" }
+
+// Name returns the human-readable check name.
 func (*Check) Name() string { return "Environment and proxy" }
 
+// Run captures proxy environment and computes the immutable route selection.
 func (c *Check) Run(_ context.Context, state *model.State) model.CheckResult {
 	lookup := c.LookupEnv
 	if lookup == nil {

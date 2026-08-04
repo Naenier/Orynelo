@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
 )
 
 const (
@@ -24,6 +24,7 @@ type SourceDiscoverer interface {
 
 type udpDiscoverer struct{}
 
+// SourceIP discovers the local source address selected for a remote endpoint.
 func (udpDiscoverer) SourceIP(ctx context.Context, remote net.IP, port uint16) (net.IP, error) {
 	connection, err := (&net.Dialer{}).DialContext(
 		ctx,
@@ -60,9 +61,13 @@ func New(discoverer SourceDiscoverer) *Check {
 	return &Check{Discoverer: discoverer, Interfaces: net.Interfaces}
 }
 
-func (*Check) ID() string   { return "route" }
+// ID returns the stable diagnostic identifier.
+func (*Check) ID() string { return "route" }
+
+// Name returns the human-readable check name.
 func (*Check) Name() string { return "Route and source address" }
 
+// Run discovers source addresses and interface metadata for each remote address.
 func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 	dnsResult := state.DNS()
 	addresses := usableAddresses(dnsResult.IPv4, dnsResult.IPv6)
@@ -183,9 +188,10 @@ func (c *Check) result(results []model.RouteInfo, total int, cancelled bool) mod
 		} else if result.Error != "" {
 			details["error"] = result.Error
 		}
-		if result.State == model.AttemptStateCancelled {
+		switch result.State {
+		case model.AttemptStateCancelled:
 			message = "Route source discovery was cancelled after it started."
-		} else if result.State == model.AttemptStateCompleted {
+		case model.AttemptStateCompleted:
 			completedAttempts++
 		}
 		evidence = append(evidence, model.Evidence{

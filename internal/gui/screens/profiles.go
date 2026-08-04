@@ -10,16 +10,16 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/Naenier/opsdoctor/internal/gui/localization"
-	"github.com/Naenier/opsdoctor/internal/gui/presenter"
+	"github.com/Naenier/orynelo/internal/gui/localization"
+	"github.com/Naenier/orynelo/internal/gui/presenter"
 )
 
 // ProfileActions connects profile operations to the application layer.
 type ProfileActions struct {
-	Load      func() ([]presenter.ProfileView, error)
+	Load      func()
 	Create    func()
 	Edit      func(presenter.ProfileView)
-	Duplicate func(presenter.ProfileView) error
+	Duplicate func(presenter.ProfileView)
 	Delete    func(presenter.ProfileView)
 	Run       func(presenter.ProfileView)
 }
@@ -46,6 +46,7 @@ type ProfilesScreen struct {
 	actionBar   fyne.CanvasObject
 	actions     ProfileActions
 	texts       localization.Catalog
+	loading     bool
 }
 
 // NewProfiles creates the Profiles screen.
@@ -140,13 +141,7 @@ func NewProfiles(texts localization.Catalog, actions ProfileActions) *ProfilesSc
 			if !ok || actions.Duplicate == nil {
 				return
 			}
-			if err := actions.Duplicate(profile); err != nil {
-				s.SetMessage(
-					s.texts.Text(localization.ProfilesDuplicateErrorPrefix) + err.Error(),
-				)
-				return
-			}
-			s.Reload()
+			actions.Duplicate(profile)
 		},
 	)
 	s.delete = widget.NewButtonWithIcon(
@@ -243,22 +238,31 @@ func (s *ProfilesScreen) Reload() {
 		s.SetProfiles(nil)
 		return
 	}
-	profiles, err := s.actions.Load()
-	if err != nil {
-		s.SetMessage(s.texts.Text(localization.ProfilesLoadErrorPrefix) + err.Error())
-		return
+	s.SetLoading(true)
+	s.actions.Load()
+}
+
+// SetLoading reflects asynchronous profile work without blocking the UI.
+func (s *ProfilesScreen) SetLoading(loading bool) {
+	s.loading = loading
+	if loading {
+		s.SetMessage(s.texts.Text(localization.CommonLoading))
+	} else if s.message.Text == s.texts.Text(localization.CommonLoading) {
+		s.SetMessage("")
 	}
-	s.SetMessage("")
-	s.SetProfiles(profiles)
+	s.updateActionState()
 }
 
 // SetProfiles replaces the displayed profiles.
 func (s *ProfilesScreen) SetProfiles(profiles []presenter.ProfileView) {
+	s.loading = false
+	s.SetMessage("")
 	s.list.UnselectAll()
 	s.profiles = append(s.profiles[:0], profiles...)
 	s.applySearch()
 }
 
+// applySearch derives visible profiles from the loaded snapshot and query.
 func (s *ProfilesScreen) applySearch() {
 	s.list.UnselectAll()
 	query := strings.ToLower(strings.TrimSpace(s.search.Text))
@@ -276,6 +280,7 @@ func (s *ProfilesScreen) applySearch() {
 	s.updateActionState()
 }
 
+// selectedProfile returns the currently selected visible profile.
 func (s *ProfilesScreen) selectedProfile() (presenter.ProfileView, bool) {
 	if s.selected < 0 || s.selected >= len(s.filtered) {
 		s.SetMessage(s.texts.Text(localization.ProfilesSelectFirst))
@@ -284,6 +289,7 @@ func (s *ProfilesScreen) selectedProfile() (presenter.ProfileView, bool) {
 	return s.filtered[s.selected], true
 }
 
+// updateContentState switches between loading, empty, error, and list content.
 func (s *ProfilesScreen) updateContentState() {
 	if len(s.filtered) == 0 {
 		hasUnmatchedQuery := len(s.profiles) > 0 &&
@@ -310,14 +316,16 @@ func (s *ProfilesScreen) updateContentState() {
 	s.actionBar.Show()
 }
 
+// updateActionState enables profile actions only for a valid selection.
 func (s *ProfilesScreen) updateActionState() {
-	hasSelection := s.selected >= 0 && s.selected < len(s.filtered)
+	hasSelection := !s.loading && s.selected >= 0 && s.selected < len(s.filtered)
 	setButtonEnabled(s.edit, hasSelection && s.actions.Edit != nil)
 	setButtonEnabled(s.duplicate, hasSelection && s.actions.Duplicate != nil)
 	setButtonEnabled(s.delete, hasSelection && s.actions.Delete != nil)
 	setButtonEnabled(s.run, hasSelection && s.actions.Run != nil)
 }
 
+// profileModeLabel maps a stored diagnostic mode to its localized label.
 func profileModeLabel(texts localization.Catalog, value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "auto", "":
@@ -331,6 +339,7 @@ func profileModeLabel(texts localization.Catalog, value string) string {
 	}
 }
 
+// profileIPLabel maps a stored address-family preference to its localized label.
 func profileIPLabel(texts localization.Catalog, value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "auto", "":

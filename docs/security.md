@@ -1,6 +1,6 @@
 # Security design
 
-OpsDoctor processes untrusted targets, environment values, configuration,
+Orynelo processes untrusted targets, environment values, configuration,
 network responses, certificates, and report paths. Its security posture is to
 collect the minimum evidence needed for diagnosis while bounding work and
 keeping data local.
@@ -12,7 +12,7 @@ For confidential vulnerability reports, follow
 
 ```mermaid
 flowchart LR
-    USER["User input and report path"] --> APP["OpsDoctor process"]
+    USER["User input and report path"] --> APP["Orynelo process"]
     ENV["Proxy environment"] --> APP
     CONFIG["Local config and database"] <--> APP
     APP --> NET["DNS and remote services"]
@@ -31,7 +31,7 @@ The process does not assume that:
 
 ## Privacy properties
 
-OpsDoctor has:
+Orynelo has:
 
 - no telemetry or analytics;
 - no cloud account integration;
@@ -96,6 +96,19 @@ paths. Unknown `slog.Any` structures, `Stringer` values, and `LogValuer`
 implementations are not recursively serialized unless an explicit sanitizer
 allows their type.
 
+`ResolveDiagnoseOptions` returns request-capable execution options and is kept
+inside the execution path. `PreviewDiagnoseOptions` applies the selected
+privacy projection and is the only resolved option value permitted in UI output
+or serialization. Completed diagnoses receive the same projection before they
+cross report, history, or rerun boundaries.
+
+Application errors cross the CLI and GUI boundary as a stable category, code,
+message ID, and redacted arguments. Their wrapped technical cause is retained
+only for `errors.Is`/`errors.As` and safe logging; it is excluded from the error
+string and JSON representation. A filesystem, database, network-policy, or
+operating-system error therefore cannot accidentally become user-visible JSON
+through ordinary application error handling.
+
 ## Network safety
 
 - Global and per-check contexts bound elapsed work.
@@ -131,7 +144,7 @@ runtime failures do not panic the process.
 ## Command execution and privileges
 
 The base diagnostic path uses Go network APIs and does not require root.
-OpsDoctor does not accept or execute arbitrary user commands, invoke a shell,
+Orynelo does not accept or execute arbitrary user commands, invoke a shell,
 escalate privileges, or modify firewall, DNS, route, proxy, or certificate
 settings.
 
@@ -157,7 +170,7 @@ contents remain untouched.
 
 Desktop `file://` export uses the same helper and asks for confirmation before
 replacing an existing file. If the picker observed no file, a no-replace atomic
-install prevents a file created before commit from being overwritten. For other URI providers, OpsDoctor verifies a full
+install prevents a file created before commit from being overwritten. For other URI providers, Orynelo verifies a full
 write and close, reports the exact URI, and explicitly states that the provider
 does not guarantee atomic replacement.
 
@@ -197,11 +210,22 @@ a diagnostic limitation, not a sandbox escape mechanism.
 ## Supply chain
 
 CI verifies module checksums, formatting, static analysis, tests, and the
-Linux CLI/desktop builds. Dependabot tracks Go modules, GitHub Actions, and
-Docker base images. Native packaging, race tests, vulnerability scanning, and
-container validation remain available as explicit local checks. Container
-labels retain the source, license, commit, and build date; the binary also
-records whether its source tree was modified.
+Linux CLI/desktop builds. Release tags trigger checksummed Linux x86_64
+packaging. The release workflow uses commit-pinned official setup actions,
+does not persist checkout credentials, and builds tagged source in a job with
+read-only repository access. A separate publish job receives scoped
+`contents: write` access only after the checksummed artifacts are built. It
+never creates a tag or release and never edits release metadata. Existing
+assets are reused only when GitHub reports the expected SHA-256 digest, and a
+different artifact with the same name is not overwritten. Archive ownership,
+ordering, timestamps, and gzip headers are normalized from the tagged commit.
+The tag's peeled commit is checked on the default branch before building and
+again while assets are uploaded. Linux desktop packages remain unsigned.
+
+Dependabot tracks Go modules, GitHub Actions, and Docker base images. Race
+tests, vulnerability scanning, and container validation remain available as
+explicit local checks. Container labels retain the source, license, commit,
+and build date; the binary also records whether its source tree was modified.
 
 ## Explicit non-goals
 

@@ -2,14 +2,14 @@
 package checks
 
 import (
-	"github.com/Naenier/opsdoctor/internal/diagnostics/checks/dns"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/checks/environment"
-	httpcheck "github.com/Naenier/opsdoctor/internal/diagnostics/checks/http"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/checks/route"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/checks/target"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/checks/tcp"
-	tlscheck "github.com/Naenier/opsdoctor/internal/diagnostics/checks/tls"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/engine"
+	"github.com/Naenier/orynelo/internal/diagnostics/checks/dns"
+	"github.com/Naenier/orynelo/internal/diagnostics/checks/environment"
+	httpcheck "github.com/Naenier/orynelo/internal/diagnostics/checks/http"
+	"github.com/Naenier/orynelo/internal/diagnostics/checks/route"
+	"github.com/Naenier/orynelo/internal/diagnostics/checks/target"
+	"github.com/Naenier/orynelo/internal/diagnostics/checks/tcp"
+	tlscheck "github.com/Naenier/orynelo/internal/diagnostics/checks/tls"
+	"github.com/Naenier/orynelo/internal/diagnostics/engine"
 )
 
 // Default returns the ordered production plan. Each inner slice is one

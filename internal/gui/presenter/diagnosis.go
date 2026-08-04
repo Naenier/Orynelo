@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
-	"github.com/Naenier/opsdoctor/internal/gui/localization"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/gui/localization"
 )
 
 // Diagnosis converts the domain result to a display-only view.
@@ -220,6 +220,7 @@ func CheckDetailsText(texts localization.Catalog, value CheckView) string {
 	}, "\n\n")
 }
 
+// formatDetailTime renders a timestamp for clipboard-oriented check details.
 func formatDetailTime(texts localization.Catalog, value time.Time) string {
 	if value.IsZero() {
 		return texts.Text(localization.CommonUnavailable)
@@ -227,6 +228,7 @@ func formatDetailTime(texts localization.Catalog, value time.Time) string {
 	return value.Local().Format(time.RFC3339)
 }
 
+// formatDetailDuration renders a duration for clipboard-oriented check details.
 func formatDetailDuration(texts localization.Catalog, value time.Duration) string {
 	if value <= 0 {
 		return texts.Text(localization.CommonUnavailable)
@@ -237,6 +239,7 @@ func formatDetailDuration(texts localization.Catalog, value time.Duration) strin
 	return value.Round(time.Millisecond).String()
 }
 
+// formatDetailList appends a labeled list to a check-detail text buffer.
 func formatDetailList(
 	texts localization.Catalog,
 	values []string,

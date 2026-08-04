@@ -130,6 +130,26 @@ Internationalized hostnames are normalized before DNS use.
 `Original` and `Normalized` are report-safe forms. A raw request URL is kept
 out of serialization because userinfo and query values can be sensitive.
 
+## Effective run options
+
+Interface input is represented as optional overrides rather than a complete
+options value containing adapter defaults. The application layer resolves each
+field with the precedence model defaults, configuration, optional profile,
+then explicit override. This is also where TCP/TLS mode, target, method,
+timeouts, address family, proxy behavior, redirects, and verbosity are
+normalized and validated.
+
+`ResolveDiagnoseOptions` returns the request-capable execution value, including
+the target and user agent needed to perform network requests. That value must
+not be displayed or serialized. `PreviewDiagnoseOptions` applies the requested
+privacy projection to the same resolved fields and is the only effective option
+value safe for preview or serialization.
+
+After execution, `Diagnosis.Options` contains the application-projected value,
+not the raw form input or request-capable resolver result. Report rendering and
+history reruns therefore retain the same non-secret network semantics whether
+the request originated in the CLI or desktop application.
+
 ## Events and deterministic ordering
 
 Events allow a desktop timeline or verbose CLI to show progress:

@@ -6,15 +6,15 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/Naenier/opsdoctor/internal/application"
-	"github.com/Naenier/opsdoctor/internal/buildinfo"
-	"github.com/Naenier/opsdoctor/internal/config"
-	"github.com/Naenier/opsdoctor/internal/diagnostics"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
-	"github.com/Naenier/opsdoctor/internal/platform"
-	"github.com/Naenier/opsdoctor/internal/privacy"
-	"github.com/Naenier/opsdoctor/internal/report"
-	"github.com/Naenier/opsdoctor/internal/storage"
+	"github.com/Naenier/orynelo/internal/application"
+	"github.com/Naenier/orynelo/internal/buildinfo"
+	"github.com/Naenier/orynelo/internal/config"
+	"github.com/Naenier/orynelo/internal/diagnostics"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/platform"
+	"github.com/Naenier/orynelo/internal/privacy"
+	"github.com/Naenier/orynelo/internal/report"
+	"github.com/Naenier/orynelo/internal/storage"
 )
 
 // Runtime owns the common application service and local resources.
@@ -24,29 +24,97 @@ type Runtime struct {
 	Paths   platform.Paths
 }
 
+type runtimeConfigStore interface {
+	application.ConfigurationStore
+	Load() (application.Config, error)
+}
+
+type runtimeOpeners struct {
+	resolvePaths   func() (platform.Paths, error)
+	ensurePaths    func(platform.Paths) error
+	newConfigStore func(string) runtimeConfigStore
+	openLogging    func(string, string) (*Logging, error)
+	openStorage    func(string) (application.Persistence, error)
+	newService     func(application.Dependencies) (*application.Service, error)
+}
+
 // OpenRuntime initializes platform directories, configuration, logging,
 // SQLite migrations, and the shared diagnostic core.
 func OpenRuntime(info buildinfo.Info) (*Runtime, error) {
-	paths, err := platform.DefaultPaths()
+	return openRuntime(info, defaultRuntimeOpeners())
+}
+
+func defaultRuntimeOpeners() runtimeOpeners {
+	return runtimeOpeners{
+		resolvePaths: platform.DefaultPaths,
+		ensurePaths: func(paths platform.Paths) error {
+			return paths.Ensure()
+		},
+		newConfigStore: func(path string) runtimeConfigStore {
+			return config.NewStore(path)
+		},
+		openLogging: NewLogging,
+		openStorage: func(path string) (application.Persistence, error) {
+			return storage.Open(path)
+		},
+		newService: application.New,
+	}
+}
+
+func openRuntime(info buildinfo.Info, openers runtimeOpeners) (*Runtime, error) {
+	paths, err := openers.resolvePaths()
 	if err != nil {
-		return nil, err
+		return nil, bootstrapBoundaryError(
+			err,
+			application.ErrorCategoryConfiguration,
+			"APP_PATHS_RESOLVE_FAILED",
+			"error.paths_resolve_failed",
+		)
 	}
-	if err := paths.Ensure(); err != nil {
-		return nil, err
+	if err := openers.ensurePaths(paths); err != nil {
+		return nil, bootstrapBoundaryError(
+			err,
+			application.ErrorCategoryStorage,
+			"APP_PATHS_PREPARE_FAILED",
+			"error.paths_prepare_failed",
+		)
 	}
-	configStore := config.NewStore(paths.ConfigFile)
+	configStore := openers.newConfigStore(paths.ConfigFile)
 	cfg, err := configStore.Load()
 	if err != nil {
-		return nil, err
+		if config.IsInvalid(err) {
+			return nil, bootstrapBoundaryError(
+				err,
+				application.ErrorCategoryConfiguration,
+				"APP_CONFIGURATION_INVALID",
+				"error.configuration_invalid",
+			)
+		}
+		return nil, bootstrapBoundaryError(
+			err,
+			application.ErrorCategoryStorage,
+			"APP_CONFIGURATION_LOAD_FAILED",
+			"error.configuration_load_failed",
+		)
 	}
-	logging, err := NewLogging(paths.LogFile, cfg.Logging.Level)
+	logging, err := openers.openLogging(paths.LogFile, cfg.Logging.Level)
 	if err != nil {
-		return nil, err
+		return nil, bootstrapBoundaryError(
+			err,
+			application.ErrorCategoryStorage,
+			"APP_LOGGING_INITIALIZATION_FAILED",
+			"error.logging_initialization_failed",
+		)
 	}
-	database, err := storage.Open(paths.DatabaseFile)
+	database, err := openers.openStorage(paths.DatabaseFile)
 	if err != nil {
 		_ = logging.Close()
-		return nil, err
+		return nil, bootstrapBoundaryError(
+			err,
+			application.ErrorCategoryStorage,
+			"APP_STORAGE_INITIALIZATION_FAILED",
+			"error.storage_initialization_failed",
+		)
 	}
 	domainBuild := model.BuildInfo{
 		Version:   info.Version,
@@ -58,7 +126,7 @@ func OpenRuntime(info buildinfo.Info) (*Runtime, error) {
 		Arch:      info.Arch,
 	}
 	runner := diagnostics.NewRunner(diagnostics.WithBuildInfo(domainBuild))
-	service, err := application.New(application.Dependencies{
+	service, err := openers.newService(application.Dependencies{
 		Runner:      runner,
 		Persistence: database,
 		ConfigStore: configStore,
@@ -80,9 +148,16 @@ func OpenRuntime(info buildinfo.Info) (*Runtime, error) {
 		},
 	})
 	if err != nil {
-		_ = database.Close()
+		if database != nil {
+			_ = database.Close()
+		}
 		_ = logging.Close()
-		return nil, fmt.Errorf("initialize application service: %w", err)
+		return nil, bootstrapBoundaryError(
+			fmt.Errorf("initialize application service: %w", err),
+			application.ErrorCategoryInternal,
+			"APP_SERVICE_INITIALIZATION_FAILED",
+			"error.service_initialization_failed",
+		)
 	}
 	return &Runtime{Service: service, Logging: logging, Paths: paths}, nil
 }
@@ -99,5 +174,18 @@ func (r *Runtime) Close() error {
 	if r.Logging != nil {
 		logErr = r.Logging.Close()
 	}
-	return errors.Join(serviceErr, logErr)
+	return runtimeCloseError(serviceErr, logErr)
+}
+
+// runtimeCloseError always places a privacy-safe application error at the
+// display boundary while preserving every close failure for errors.Is/As and
+// internal logging.
+func runtimeCloseError(serviceErr, logErr error) error {
+	return application.WrapError(
+		errors.Join(serviceErr, logErr),
+		application.ErrorCategoryStorage,
+		"APP_RUNTIME_CLOSE_FAILED",
+		"error.runtime_close_failed",
+		nil,
+	)
 }

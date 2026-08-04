@@ -7,6 +7,8 @@ import "strings"
 // Key identifies a user-facing string.
 type Key string
 
+// Localization keys are stable identifiers shared by screens, components, and
+// user-facing application error rendering.
 const (
 	AppName Key = "app.name"
 
@@ -38,6 +40,8 @@ const (
 	CommonNo               Key = "common.no"
 	CommonUnavailable      Key = "common.unavailable"
 	CommonListItemFormat   Key = "common.list_item_format"
+	CommonLoading          Key = "common.loading"
+	CommonSaving           Key = "common.saving"
 
 	OptionAuto     Key = "option.auto"
 	OptionTCP      Key = "option.tcp"
@@ -283,6 +287,16 @@ const (
 	DialogProfileRedactedTitle    Key = "dialog.profile_redacted_title"
 	DialogProfileRedactedFormat   Key = "dialog.profile_redacted_format"
 
+	ErrorValidationGuidance    Key = "error.validation_guidance"
+	ErrorConfigurationGuidance Key = "error.configuration_guidance"
+	ErrorStorageGuidance       Key = "error.storage_guidance"
+	ErrorPermissionGuidance    Key = "error.permission_guidance"
+	ErrorCancelledGuidance     Key = "error.cancelled_guidance"
+	ErrorNetworkPolicyGuidance Key = "error.network_policy_guidance"
+	ErrorInternalGuidance      Key = "error.internal_guidance"
+	ErrorReferenceFormat       Key = "error.reference_format"
+	ErrorFieldFormat           Key = "error.field_format"
+
 	TechnicalJSONEncodingError         Key = "technical.json_encoding_error"
 	TechnicalCheckIDFormat             Key = "technical.check_id_format"
 	TechnicalStatusFormat              Key = "technical.status_format"
@@ -339,8 +353,9 @@ func (English) Text(key Key) string {
 	return string(key)
 }
 
+// english contains the complete built-in text catalog.
 var english = map[Key]string{
-	AppName: "OpsDoctor",
+	AppName: "Orynelo",
 
 	NavigationDiagnose: "Diagnose",
 	NavigationHistory:  "History",
@@ -370,6 +385,8 @@ var english = map[Key]string{
 	CommonNo:               "no",
 	CommonUnavailable:      "—",
 	CommonListItemFormat:   "• %s",
+	CommonLoading:          "Loading…",
+	CommonSaving:           "Saving…",
 
 	OptionAuto:     "Auto",
 	OptionTCP:      "TCP",
@@ -555,7 +572,7 @@ var english = map[Key]string{
 	SettingsNetworkSubtitle:       "Connection defaults for HTTP requests",
 	SettingsHistorySubtitle:       "Local diagnostic run retention",
 	SettingsAppearanceSubtitle:    "Applied immediately; save to keep it",
-	SettingsLoggingSubtitle:       "Tools for troubleshooting OpsDoctor",
+	SettingsLoggingSubtitle:       "Tools for troubleshooting Orynelo",
 	SettingsPrivacySubtitle:       "No accounts, cloud sync, or analytics",
 	SettingsDurationHint:          "Durations accept values such as 15s, 5m, 2h, or 30d.",
 	SettingsClearHistoryHint:      "Permanently delete every locally stored diagnostic run.",
@@ -567,7 +584,7 @@ var english = map[Key]string{
 	SettingsInvalidRedirects:      "maximum redirects: %w",
 	SettingsInvalidCertificate:    "certificate warning threshold: %w",
 	SettingsInvalidHistoryLimit:   "history limit: %w",
-	PrivacyNoTelemetry:            "OpsDoctor does not send telemetry.",
+	PrivacyNoTelemetry:            "Orynelo does not send telemetry.",
 	PrivacyDataRemainsOnDevice:    "Diagnostic data remains on this computer.",
 
 	AboutVersion:                  "Version",
@@ -579,7 +596,7 @@ var english = map[Key]string{
 	AboutPlatformFormat:           "%s/%s",
 	AboutLicense:                  "License",
 	AboutLicenseMIT:               "MIT",
-	AboutAcknowledgementsMarkdown: "OpsDoctor is built with [Go](https://go.dev/), [Fyne](https://fyne.io/), [Cobra](https://cobra.dev/), and [modernc SQLite](https://pkg.go.dev/modernc.org/sqlite).",
+	AboutAcknowledgementsMarkdown: "Orynelo is built with [Go](https://go.dev/), [Fyne](https://fyne.io/), [Cobra](https://cobra.dev/), and [modernc SQLite](https://pkg.go.dev/modernc.org/sqlite).",
 	AboutSubtitle:                 "Evidence-based network reachability diagnostics.",
 	AboutBuildInformation:         "Build information",
 	AboutSourceRepository:         "Source repository",
@@ -598,7 +615,7 @@ var english = map[Key]string{
 	DialogNoCompletedDiagnosis:    "No completed diagnosis",
 	DialogRunBeforeExporting:      "Run or open a diagnosis before exporting.",
 	DialogRunBeforeSavingProfile:  "Run a diagnosis before saving a profile.",
-	DialogReportFilenameBase:      "opsdoctor-report",
+	DialogReportFilenameBase:      "orynelo-report",
 	DialogRawStructuredData:       "Raw structured data",
 	DialogLogDirectoryUnavailable: "log directory is unavailable",
 	DialogExportPrivacyTitle:      "Export privacy",
@@ -614,6 +631,16 @@ var english = map[Key]string{
 	DialogExportOverwriteFormat:   "An item already exists at %s. Replace it?",
 	DialogProfileRedactedTitle:    "Sensitive target parts will be removed",
 	DialogProfileRedactedFormat:   "For privacy, the saved profile target will be:\n\n%s\n\nThe profile may no longer work without the removed value. Save it anyway?",
+
+	ErrorValidationGuidance:    "Check the entered values and try again.",
+	ErrorConfigurationGuidance: "Review the application settings and try again.",
+	ErrorStorageGuidance:       "Local data is unavailable. Retry the operation; diagnostics can continue without saved history.",
+	ErrorPermissionGuidance:    "Permission was denied. Choose a writable destination and try again.",
+	ErrorCancelledGuidance:     "The operation was cancelled.",
+	ErrorNetworkPolicyGuidance: "Network policy blocked this operation. Review proxy and redirect settings before retrying.",
+	ErrorInternalGuidance:      "The operation could not be completed. Retry it; if the problem continues, open the log directory from Settings.",
+	ErrorReferenceFormat:       "Error reference: %s",
+	ErrorFieldFormat:           "Check field: %s",
 
 	TechnicalJSONEncodingError:         "technical details could not be encoded",
 	TechnicalCheckIDFormat:             "Check ID: %s",

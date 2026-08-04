@@ -11,9 +11,9 @@ import (
 	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/test"
 
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
-	"github.com/Naenier/opsdoctor/internal/redaction"
-	"github.com/Naenier/opsdoctor/internal/secureio"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/redaction"
+	"github.com/Naenier/orynelo/internal/secureio"
 )
 
 func TestExportDestinationSelectionDoesNotOpenOrTruncateExistingFile(t *testing.T) {

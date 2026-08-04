@@ -11,7 +11,7 @@ func TestResolveUsesInjectedBuildMetadata(t *testing.T) {
 		version, commit, buildDate, modified = originalVersion, originalCommit, originalDate, originalModified
 	})
 
-	version = "v0.2.0"
+	version = "v0.2.1"
 	commit = "abc123"
 	buildDate = "2026-07-28T10:00:00Z"
 	modified = "true"
@@ -24,7 +24,7 @@ func TestResolveUsesInjectedBuildMetadata(t *testing.T) {
 		},
 	})
 
-	if got.Version != "0.2.0" || got.Commit != commit || got.BuildDate != buildDate {
+	if got.Version != "0.2.1" || got.Commit != commit || got.BuildDate != buildDate {
 		t.Fatalf("resolve() did not preserve build metadata: %#v", got)
 	}
 	if !got.Dirty {
@@ -68,7 +68,7 @@ func TestResolveUsesStageVersionAsLocalFallback(t *testing.T) {
 	t.Cleanup(func() { version = originalVersion })
 	version = ""
 
-	if got := resolve(nil).Version; got != "0.2.0" {
-		t.Fatalf("local fallback version = %q, want 0.2.0", got)
+	if got := resolve(nil).Version; got != "0.2.1" {
+		t.Fatalf("local fallback version = %q, want 0.2.1", got)
 	}
 }

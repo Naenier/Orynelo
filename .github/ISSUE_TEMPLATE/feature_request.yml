@@ -15,7 +15,7 @@ body:
     id: evidence
     attributes:
       label: Required evidence
-      description: What facts should OpsDoctor observe and present without overstating causality?
+      description: What facts should Orynelo observe and present without overstating causality?
     validations:
       required: true
 

@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
 )
 
 const (
@@ -50,9 +50,13 @@ func New(dialer Dialer) *Check {
 	return &Check{Dialer: dialer, Now: time.Now}
 }
 
-func (*Check) ID() string   { return "tcp" }
+// ID returns the stable diagnostic identifier.
+func (*Check) ID() string { return "tcp" }
+
+// Name returns the human-readable check name.
 func (*Check) Name() string { return "TCP connection" }
 
+// Run attempts bounded connections to all selected addresses.
 func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 	resolved := state.DNS()
 	addresses := usableAddresses(resolved.IPv4, resolved.IPv6)

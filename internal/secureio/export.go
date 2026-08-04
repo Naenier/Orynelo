@@ -21,6 +21,7 @@ var ErrDestinationExists = errors.New("export destination already exists")
 // WriteFile atomically replaces a local report with a private regular file.
 // The temporary file is created in the target directory, fully written,
 // synced, closed, and only then renamed into place.
+// WriteFile atomically replaces path with a complete private regular file.
 func WriteFile(path string, content []byte) (resultErr error) {
 	return writeFile(path, content, replaceFile)
 }
@@ -28,6 +29,7 @@ func WriteFile(path string, content []byte) (resultErr error) {
 // WriteFileIfAbsent atomically installs a complete local report only while the
 // destination is absent. It is used after a GUI picker observed no existing
 // file, so a file created before commit is never overwritten without consent.
+// WriteFileIfAbsent installs content only if path remains absent until commit.
 func WriteFileIfAbsent(path string, content []byte) (resultErr error) {
 	return writeFileWithPolicy(path, content, false, installFile)
 }
@@ -157,7 +159,7 @@ func createTemporary(root *os.Root) (*os.File, string, error) {
 	if _, err := rand.Read(suffix[:]); err != nil {
 		return nil, "", err
 	}
-	name := fmt.Sprintf(".opsdoctor-export-%x", suffix)
+	name := fmt.Sprintf(".orynelo-export-%x", suffix)
 	file, err := root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, "", err

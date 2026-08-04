@@ -6,7 +6,7 @@ usage() {
 	printf '%s\n' \
 		"Usage: scripts/package-desktop.sh <linux|darwin> <executable> <output.tar.gz>" \
 		"" \
-		"Package a prebuilt OpsDoctor desktop binary with Fyne metadata and icon." \
+		"Package a prebuilt Orynelo desktop binary with Fyne metadata and icon." \
 		"Set FYNE_PACKAGE_TOOL to the pinned fyne executable when it is not on PATH."
 }
 
@@ -84,46 +84,46 @@ mkdir -p "$stage"
 	cd "$work_dir"
 	"$fyne_package_tool" package \
 		--target "$target" \
-		--source-dir "$project_root/cmd/opsdoctor-desktop" \
+		--source-dir "$project_root/cmd/orynelo-desktop" \
 		--executable "$executable" \
-		--name OpsDoctor \
+		--name Orynelo \
 		--icon "$icon" \
-		--app-id io.github.naenier.opsdoctor \
+		--app-id io.github.naenier.orynelo \
 		--release
 )
 
 case "$target" in
 linux)
-	native_archive=$work_dir/OpsDoctor.tar.xz
+	native_archive=$work_dir/Orynelo.tar.xz
 	if [ ! -s "$native_archive" ]; then
 		printf '%s\n' "Fyne did not create the expected Linux package" >&2
 		exit 1
 	fi
 	tar -xJf "$native_archive" -C "$stage"
 
-	packaged_binary=$stage/opsdoctor-desktop/usr/local/bin/opsdoctor-desktop
-	desktop_entry=$stage/opsdoctor-desktop/usr/local/share/applications/io.github.naenier.opsdoctor.desktop
-	packaged_icon=$stage/opsdoctor-desktop/usr/local/share/pixmaps/io.github.naenier.opsdoctor.png
+	packaged_binary=$stage/orynelo-desktop/usr/local/bin/orynelo-desktop
+	desktop_entry=$stage/orynelo-desktop/usr/local/share/applications/io.github.naenier.orynelo.desktop
+	packaged_icon=$stage/orynelo-desktop/usr/local/share/pixmaps/io.github.naenier.orynelo.png
 	if [ ! -f "$desktop_entry" ] || [ ! -f "$packaged_icon" ]; then
 		printf '%s\n' "Fyne Linux package is missing desktop metadata or icon" >&2
 		exit 1
 	fi
 	;;
 darwin)
-	app=$work_dir/OpsDoctor.app
+	app=$work_dir/Orynelo.app
 	if [ ! -d "$app" ]; then
 		printf '%s\n' "Fyne did not create the expected macOS application bundle" >&2
 		exit 1
 	fi
-	mv "$app" "$stage/OpsDoctor.app"
-	app=$stage/OpsDoctor.app
+	mv "$app" "$stage/Orynelo.app"
+	app=$stage/Orynelo.app
 	plist=$app/Contents/Info.plist
 	plutil -replace LSApplicationCategoryType \
 		-string public.app-category.utilities "$plist"
 	plutil -replace LSMinimumSystemVersion -string 12.0 "$plist"
 	plutil -lint "$plist"
 
-	packaged_binary=$app/Contents/MacOS/opsdoctor-desktop
+	packaged_binary=$app/Contents/MacOS/orynelo-desktop
 	packaged_icon=$app/Contents/Resources/icon.icns
 	if [ ! -f "$packaged_icon" ]; then
 		printf '%s\n' "Fyne macOS package is missing its native icon" >&2

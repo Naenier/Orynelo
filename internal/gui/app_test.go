@@ -3,7 +3,10 @@
 package gui
 
 import (
+	"context"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,13 +14,190 @@ import (
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/Naenier/opsdoctor/internal/buildinfo"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
-	"github.com/Naenier/opsdoctor/internal/gui/components"
-	"github.com/Naenier/opsdoctor/internal/gui/localization"
-	"github.com/Naenier/opsdoctor/internal/gui/presenter"
-	"github.com/Naenier/opsdoctor/internal/gui/screens"
+	"github.com/Naenier/orynelo/internal/application"
+	"github.com/Naenier/orynelo/internal/buildinfo"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/gui/components"
+	"github.com/Naenier/orynelo/internal/gui/localization"
+	"github.com/Naenier/orynelo/internal/gui/presenter"
+	"github.com/Naenier/orynelo/internal/gui/screens"
+	"github.com/Naenier/orynelo/internal/gui/taskrunner"
 )
+
+func TestDiagnoseRequestCarriesExplicitOverridesToApplicationResolver(t *testing.T) {
+	t.Parallel()
+
+	coordinator := &DiagnoseCoordinator{config: application.DefaultConfig()}
+	input := presenter.DiagnoseInput{
+		Target:       "  https://example.test/path  ",
+		Mode:         "tls",
+		IPVersion:    "4",
+		Timeout:      2 * time.Second,
+		CheckTimeout: 3 * time.Second,
+		Method:       "HEAD",
+		NoProxy:      true,
+		MaxRedirects: 5,
+		Verbosity:    "verbose",
+		Insecure:     true,
+	}
+	request := coordinator.request(input)
+	if request.Profile != nil || request.Overrides.Target == nil ||
+		*request.Overrides.Target != input.Target || request.Overrides.Mode == nil ||
+		*request.Overrides.Mode != model.DiagnosticModeTLS {
+		t.Fatalf("request = %#v", request)
+	}
+	if request.Overrides.EnableTLS != nil {
+		t.Fatal("GUI duplicated mode-to-TLS normalization")
+	}
+	if _, err := application.ResolveDiagnoseOptions(
+		application.DefaultConfig(),
+		nil,
+		request.Overrides,
+	); err == nil || !application.IsErrorCode(err, "APP_DIAGNOSE_OPTIONS_INVALID") {
+		t.Fatalf("application resolver error = %v, want typed options validation", err)
+	}
+}
+
+func TestDiagnoseRequestUsesProfileWithoutReencodingItsDefaults(t *testing.T) {
+	t.Parallel()
+
+	profile := model.Profile{
+		Name:         "Saved",
+		Target:       "saved.example:443",
+		Mode:         model.DiagnosticModeTCP,
+		IPVersion:    model.IPVersion6,
+		Timeout:      10 * time.Second,
+		CheckTimeout: 4 * time.Second,
+		MaxRedirects: 3,
+		Method:       "HEAD",
+	}
+	coordinator := &DiagnoseCoordinator{
+		config:         application.DefaultConfig(),
+		pendingProfile: &profile,
+	}
+	request := coordinator.request(presenter.DiagnoseInput{
+		Target:                 "must-not-override.example",
+		Mode:                   "tls",
+		Timeout:                time.Minute,
+		Insecure:               true,
+		AllowPrivateRedirects:  true,
+		AllowInsecureRedirects: true,
+		Verbosity:              "verbose",
+	})
+	if request.Profile != &profile {
+		t.Fatalf("request profile = %p, want %p", request.Profile, &profile)
+	}
+	if request.Overrides.Target != nil || request.Overrides.Mode != nil ||
+		request.Overrides.Timeout != nil || request.Overrides.CheckTimeout != nil {
+		t.Fatalf("profile fields were redundantly encoded as overrides: %#v", request.Overrides)
+	}
+	if request.Overrides.Insecure == nil || !*request.Overrides.Insecure ||
+		request.Overrides.ReportVerbosity == nil ||
+		*request.Overrides.ReportVerbosity != model.ReportVerbosityVerbose {
+		t.Fatalf("transient overrides = %#v", request.Overrides)
+	}
+	if coordinator.pendingProfile != nil {
+		t.Fatal("pending profile was not consumed")
+	}
+}
+
+func TestDiagnoseRequestDoesNotEncodeDisplayedConfigurationAsOverrides(t *testing.T) {
+	t.Parallel()
+
+	config := application.DefaultConfig()
+	config.Diagnostics.DefaultTimeout = 21 * time.Second
+	config.Diagnostics.CheckTimeout = 7 * time.Second
+	config.Diagnostics.PreferredIPVersion = "6"
+	config.Diagnostics.MaxRedirects = 4
+	config.Network.UseSystemProxy = false
+	coordinator := &DiagnoseCoordinator{config: config}
+	request := coordinator.request(presenter.DiagnoseInput{
+		Target:       "https://example.test",
+		Mode:         "auto",
+		IPVersion:    "6",
+		Timeout:      21 * time.Second,
+		CheckTimeout: 7 * time.Second,
+		Method:       "GET",
+		NoProxy:      true,
+		MaxRedirects: 4,
+		Verbosity:    "normal",
+	})
+	overrides := request.Overrides
+	if overrides.Target == nil {
+		t.Fatal("target was not explicitly submitted")
+	}
+	if overrides.Mode != nil || overrides.Timeout != nil ||
+		overrides.CheckTimeout != nil || overrides.IPVersion != nil ||
+		overrides.NoProxy != nil || overrides.MaxRedirects != nil ||
+		overrides.Method != nil || overrides.Insecure != nil ||
+		overrides.ReportVerbosity != nil {
+		t.Fatalf("displayed configuration leaked into explicit overrides: %#v", overrides)
+	}
+}
+
+func TestUserFacingApplicationErrorNeverShowsWrappedCause(t *testing.T) {
+	t.Parallel()
+
+	const secretCause = "database /private/path failed with password=hunter2"
+	err := application.WrapError(
+		errors.New(secretCause),
+		application.ErrorCategoryStorage,
+		"APP_HISTORY_LIST_FAILED",
+		"error.history_list_failed",
+		nil,
+	)
+	message := (&controller{texts: localization.English{}}).userFacingError(err)
+	if strings.Contains(message, secretCause) || strings.Contains(message, "hunter2") ||
+		strings.Contains(message, "/private/path") {
+		t.Fatalf("user-facing message leaked wrapped cause: %q", message)
+	}
+	if !strings.Contains(message, "Retry") || !strings.Contains(message, "APP_HISTORY_LIST_FAILED") {
+		t.Fatalf("user-facing message lacks recovery guidance/reference: %q", message)
+	}
+}
+
+func TestUserFacingValidationErrorNamesSafeField(t *testing.T) {
+	t.Parallel()
+
+	err := application.NewError(
+		application.ErrorCategoryValidation,
+		"APP_DIAGNOSE_OPTIONS_INVALID",
+		"error.diagnose_options_invalid",
+		map[string]string{"field": "checkTimeout"},
+	)
+	message := (&controller{texts: localization.English{}}).userFacingError(err)
+	if !strings.Contains(message, "Per-check timeout") {
+		t.Fatalf("validation message does not identify the field: %q", message)
+	}
+}
+
+func TestReportWriteBoundaryPreservesCauseButDisplaysTypedStorageError(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("writer failed for /private/report with token=export-secret")
+	err := guiBoundaryError(
+		cause,
+		application.ErrorCategoryStorage,
+		"APP_REPORT_WRITE_FAILED",
+		"error.report_write_failed",
+		nil,
+	)
+	if !errors.Is(err, cause) {
+		t.Fatal("typed report error did not preserve its logging cause")
+	}
+	view := application.ToErrorView(err)
+	if view == nil || view.Category != application.ErrorCategoryStorage ||
+		view.Code != "APP_REPORT_WRITE_FAILED" {
+		t.Fatalf("typed report error view = %#v", view)
+	}
+	message := (&controller{texts: localization.English{}}).userFacingError(err)
+	if strings.Contains(message, "private/report") || strings.Contains(message, "export-secret") {
+		t.Fatalf("report write cause leaked to UI: %q", message)
+	}
+	if !strings.Contains(message, "APP_REPORT_WRITE_FAILED") {
+		t.Fatalf("report write reference missing: %q", message)
+	}
+}
 
 func TestHistoryRunOptionsAreRestoredToDiagnoseScreen(t *testing.T) {
 	test.NewTempApp(t)
@@ -245,17 +425,21 @@ func TestStartProfileCancelsActiveRunBeforeReplacingInputs(t *testing.T) {
 	)
 	diagnose.SetTarget("active.example:443")
 	diagnose.SetRunning(true)
-	cancelled := make(chan struct{})
+	runner, coordinator, operationID, cancelled := activeDiagnosticTask(t)
+	t.Cleanup(func() {
+		runner.Close()
+		runner.Wait()
+	})
 	controller := &controller{
-		content:       container.NewStack(),
-		diagnose:      diagnose,
-		currentScreen: "profiles",
-		currentRun:    4,
-		activeCancel:  func() { close(cancelled) },
-		texts:         localization.English{},
+		content:             container.NewStack(),
+		diagnose:            diagnose,
+		currentScreen:       "profiles",
+		diagnoseCoordinator: coordinator,
+		texts:               localization.English{},
 	}
 
 	controller.startProfile(presenter.ProfileView{
+		Name:         "Profile",
 		Target:       "profile.example:8443",
 		Mode:         "tcp",
 		IPVersion:    "4",
@@ -270,7 +454,7 @@ func TestStartProfileCancelsActiveRunBeforeReplacingInputs(t *testing.T) {
 	default:
 		t.Fatal("active diagnostic was not cancelled")
 	}
-	if controller.shouldPresent(4) {
+	if controller.shouldPresentDiagnostic(operationID) {
 		t.Fatal("events from the replaced diagnostic are still presentable")
 	}
 	if started.Target != "profile.example:8443" ||
@@ -296,16 +480,19 @@ func TestHistoricalDiagnosisInvalidatesRunAndRestoresRunAgainInput(t *testing.T)
 	)
 	diagnose.SetTarget("active.example:443")
 	diagnose.SetRunning(true)
-	cancelled := make(chan struct{})
+	runner, coordinator, operationID, cancelled := activeDiagnosticTask(t)
+	t.Cleanup(func() {
+		runner.Close()
+		runner.Wait()
+	})
 	controller := &controller{
-		content:       container.NewStack(),
-		diagnose:      diagnose,
-		header:        widget.NewLabel(""),
-		currentScreen: "history",
-		currentRun:    8,
-		activeCancel:  func() { close(cancelled) },
-		texts:         localization.English{},
-		info:          buildinfo.Info{Version: "1.2.3"},
+		content:             container.NewStack(),
+		diagnose:            diagnose,
+		header:              widget.NewLabel(""),
+		currentScreen:       "history",
+		diagnoseCoordinator: coordinator,
+		texts:               localization.English{},
+		info:                buildinfo.Info{Version: "1.2.3"},
 	}
 	diagnosis := model.Diagnosis{
 		Target: model.Target{
@@ -334,7 +521,7 @@ func TestHistoricalDiagnosisInvalidatesRunAndRestoresRunAgainInput(t *testing.T)
 	default:
 		t.Fatal("active diagnostic was not cancelled before opening history")
 	}
-	if controller.shouldPresent(8) {
+	if controller.shouldPresentDiagnostic(operationID) {
 		t.Fatal("events from the replaced diagnostic are still presentable")
 	}
 	if !controller.haveDiagnosis ||
@@ -348,6 +535,144 @@ func TestHistoricalDiagnosisInvalidatesRunAndRestoresRunAgainInput(t *testing.T)
 		rerun.Method != "OPTIONS" {
 		t.Fatalf("Run again input = %#v", rerun)
 	}
+}
+
+func TestHistoricalDiagnosisSuppressesQueuedCancellationPresentation(t *testing.T) {
+	test.NewTempApp(t)
+	dispatcher := &queuedTestDispatcher{}
+	runner, err := taskrunner.New(context.Background(), dispatcher.dispatch, taskrunner.Options{})
+	if err != nil {
+		t.Fatalf("taskrunner.New() error = %v", err)
+	}
+	diagnose := screens.NewDiagnose(localization.English{}, screens.DiagnoseActions{})
+	controller := &controller{
+		content:       container.NewStack(),
+		diagnose:      diagnose,
+		currentScreen: "history",
+		texts:         localization.English{},
+	}
+	coordinator := &DiagnoseCoordinator{
+		observer: controller.observeDiagnosis,
+		config:   application.DefaultConfig(),
+		state:    DiagnoseViewModel{State: taskrunner.StateIdle},
+	}
+	scope, err := taskrunner.NewScope(runner, "diagnose", coordinator.observe)
+	if err != nil {
+		t.Fatalf("taskrunner.NewScope() error = %v", err)
+	}
+	coordinator.scope = scope
+	controller.diagnoseCoordinator = coordinator
+	started := make(chan struct{})
+	if _, err := scope.StartRead(func(ctx context.Context) (model.Diagnosis, error) {
+		close(started)
+		<-ctx.Done()
+		return model.Diagnosis{}, ctx.Err()
+	}); err != nil {
+		t.Fatalf("StartRead() error = %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("diagnostic test task did not start")
+	}
+
+	controller.presentHistoricalDiagnosis(model.Diagnosis{
+		Target: model.Target{
+			Original:    "https://history.example",
+			DisplayHost: "history.example",
+		},
+		Options: model.DefaultDiagnoseOptions("https://history.example"),
+		Summary: model.Summary{
+			Status: model.StatusFailed,
+			Title:  "Historical TLS failure",
+		},
+	})
+	runner.Wait()
+	dispatcher.drain()
+	runner.Close()
+
+	labels := make([]string, 0)
+	for _, object := range test.LaidOutObjects(diagnose.Root) {
+		if label, ok := object.(*widget.Label); ok {
+			labels = append(labels, label.Text)
+		}
+	}
+	joined := strings.Join(labels, "\n")
+	if !strings.Contains(joined, "Historical TLS failure") {
+		t.Fatalf("historical result was overwritten after queued delivery:\n%s", joined)
+	}
+	if strings.Contains(joined, "Diagnostics cancelled") {
+		t.Fatalf("stale cancellation was presented over history:\n%s", joined)
+	}
+}
+
+type queuedTestDispatcher struct {
+	mu        sync.Mutex
+	callbacks []func()
+}
+
+func (dispatcher *queuedTestDispatcher) dispatch(callback func()) {
+	dispatcher.mu.Lock()
+	defer dispatcher.mu.Unlock()
+	dispatcher.callbacks = append(dispatcher.callbacks, callback)
+}
+
+func (dispatcher *queuedTestDispatcher) drain() {
+	for {
+		dispatcher.mu.Lock()
+		if len(dispatcher.callbacks) == 0 {
+			dispatcher.mu.Unlock()
+			return
+		}
+		callbacks := dispatcher.callbacks
+		dispatcher.callbacks = nil
+		dispatcher.mu.Unlock()
+		for _, callback := range callbacks {
+			callback()
+		}
+	}
+}
+
+func activeDiagnosticTask(
+	t *testing.T,
+) (*taskrunner.Runner, *DiagnoseCoordinator, taskrunner.OperationID, <-chan struct{}) {
+	t.Helper()
+	runner, err := taskrunner.New(
+		context.Background(),
+		func(callback func()) { callback() },
+		taskrunner.Options{},
+	)
+	if err != nil {
+		t.Fatalf("taskrunner.New() error = %v", err)
+	}
+	scope, err := taskrunner.NewScope[model.Diagnosis](runner, "diagnose", nil)
+	if err != nil {
+		t.Fatalf("taskrunner.NewScope() error = %v", err)
+	}
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	operationID, err := scope.StartRead(func(ctx context.Context) (model.Diagnosis, error) {
+		close(started)
+		<-ctx.Done()
+		close(cancelled)
+		return model.Diagnosis{}, ctx.Err()
+	})
+	if err != nil {
+		t.Fatalf("StartRead() error = %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("diagnostic test task did not start")
+	}
+	return runner, &DiagnoseCoordinator{
+		scope:  scope,
+		config: application.DefaultConfig(),
+		state: DiagnoseViewModel{
+			OperationID: operationID,
+			State:       taskrunner.StateLoading,
+		},
+	}, operationID, cancelled
 }
 
 func TestProfileEditorMethodMappingIncludesOptions(t *testing.T) {

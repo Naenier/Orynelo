@@ -1,4 +1,4 @@
-// Package config loads, validates, and safely persists OpsDoctor settings.
+// Package config loads, validates, and safely persists Orynelo settings.
 package config
 
 import (
@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/Naenier/opsdoctor/internal/application"
-	"github.com/Naenier/opsdoctor/internal/platform"
+	"github.com/Naenier/orynelo/internal/application"
+	"github.com/Naenier/orynelo/internal/platform"
 	"gopkg.in/yaml.v3"
 )
 
@@ -34,6 +34,7 @@ func (e *InvalidError) Error() string {
 	return e.Err.Error()
 }
 
+// Unwrap returns the underlying configuration parsing error.
 func (e *InvalidError) Unwrap() error {
 	if e == nil {
 		return nil

@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	httpcheck "github.com/Naenier/opsdoctor/internal/diagnostics/checks/http"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/checks/tcp"
-	tlscheck "github.com/Naenier/opsdoctor/internal/diagnostics/checks/tls"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
+	httpcheck "github.com/Naenier/orynelo/internal/diagnostics/checks/http"
+	"github.com/Naenier/orynelo/internal/diagnostics/checks/tcp"
+	tlscheck "github.com/Naenier/orynelo/internal/diagnostics/checks/tls"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
 )
 
 func TestEvidenceBasedRules(t *testing.T) {

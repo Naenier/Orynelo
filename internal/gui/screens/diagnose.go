@@ -12,9 +12,9 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/Naenier/opsdoctor/internal/gui/components"
-	"github.com/Naenier/opsdoctor/internal/gui/localization"
-	"github.com/Naenier/opsdoctor/internal/gui/presenter"
+	"github.com/Naenier/orynelo/internal/gui/components"
+	"github.com/Naenier/orynelo/internal/gui/localization"
+	"github.com/Naenier/orynelo/internal/gui/presenter"
 )
 
 // DiagnoseActions connects user interactions to the GUI controller.
@@ -106,6 +106,7 @@ func NewDiagnose(texts localization.Catalog, actions DiagnoseActions) *DiagnoseS
 	return screen
 }
 
+// buildInputs constructs target, mode, timeout, proxy, and advanced controls.
 func (s *DiagnoseScreen) buildInputs() {
 	s.target = widget.NewEntry()
 	s.target.SetPlaceHolder(s.texts.Text(localization.DiagnoseTargetPlaceholder))
@@ -245,6 +246,7 @@ func (s *DiagnoseScreen) buildInputs() {
 	)
 }
 
+// buildResults constructs the summary, timeline, details, and action areas.
 func (s *DiagnoseScreen) buildResults() {
 	s.summaryTarget = widget.NewLabel("")
 	s.summaryTarget.Truncation = fyne.TextTruncateEllipsis
@@ -509,6 +511,7 @@ func (s *DiagnoseScreen) buildResults() {
 	s.content.Add(s.idleState)
 }
 
+// triggerRun validates current input before invoking the controller callback.
 func (s *DiagnoseScreen) triggerRun() {
 	if s.running {
 		return
@@ -534,29 +537,24 @@ func (s *DiagnoseScreen) triggerRun() {
 // Input validates and returns the current Diagnose controls.
 func (s *DiagnoseScreen) Input() (presenter.DiagnoseInput, error) {
 	timeout, err := time.ParseDuration(strings.TrimSpace(s.timeout.Text))
-	if err != nil || timeout <= 0 || timeout > 24*time.Hour {
+	if err != nil {
 		return presenter.DiagnoseInput{}, errors.New(
 			s.texts.Text(localization.DiagnoseInvalidTimeout),
 		)
 	}
 	checkTimeout, err := time.ParseDuration(strings.TrimSpace(s.checkTimeout.Text))
-	if err != nil || checkTimeout <= 0 || checkTimeout > timeout {
+	if err != nil {
 		return presenter.DiagnoseInput{}, errors.New(
 			s.texts.Text(localization.DiagnoseInvalidCheckTimeout),
 		)
 	}
 	redirects, err := strconv.Atoi(strings.TrimSpace(s.maxRedirects.Text))
-	if err != nil || redirects < 0 || redirects > 50 {
+	if err != nil {
 		return presenter.DiagnoseInput{}, errors.New(
 			s.texts.Text(localization.DiagnoseInvalidRedirects),
 		)
 	}
 	target := strings.TrimSpace(s.target.Text)
-	if target == "" {
-		return presenter.DiagnoseInput{}, errors.New(
-			s.texts.Text(localization.DiagnoseTargetRequired),
-		)
-	}
 	return presenter.DiagnoseInput{
 		Target:                 target,
 		Mode:                   s.modeValue(),
@@ -700,6 +698,16 @@ func (s *DiagnoseScreen) SetRunning(running bool) {
 	s.updateOverviewFooter()
 	s.cancel.Hide()
 	s.run.Show()
+}
+
+// SetRunEnabled keeps execution unavailable until application configuration
+// has been loaded and applied.
+func (s *DiagnoseScreen) SetRunEnabled(enabled bool) {
+	if enabled {
+		s.run.Enable()
+		return
+	}
+	s.run.Disable()
 }
 
 // ResetResults clears a previous timeline before a new run.
@@ -859,6 +867,7 @@ func (s *DiagnoseScreen) SetPageVisible(visible bool) {
 	s.updateOverviewFooter()
 }
 
+// showCheck renders details for the selected diagnostic check.
 func (s *DiagnoseScreen) showCheck(check presenter.CheckView) {
 	s.detailTitle.SetText(check.Name)
 	s.detailStatus.RemoveAll()
@@ -890,6 +899,7 @@ func (s *DiagnoseScreen) showCheck(check presenter.CheckView) {
 	s.technicalSections.CloseAll()
 }
 
+// setInputsEnabled toggles every diagnostic form control as one unit.
 func (s *DiagnoseScreen) setInputsEnabled(enabled bool) {
 	if enabled {
 		s.target.Enable()
@@ -920,6 +930,7 @@ func (s *DiagnoseScreen) setInputsEnabled(enabled bool) {
 	s.verbosity.Disable()
 }
 
+// clearDetails removes the currently selected check presentation.
 func (s *DiagnoseScreen) clearDetails() {
 	s.detailTitle.SetText(s.texts.Text(localization.DiagnoseSelectStep))
 	s.detailStatus.RemoveAll()
@@ -935,6 +946,7 @@ func (s *DiagnoseScreen) clearDetails() {
 	s.technicalSections.CloseAll()
 }
 
+// setAdvancedExpanded updates visibility and affordance for advanced controls.
 func (s *DiagnoseScreen) setAdvancedExpanded(expanded bool) {
 	s.advancedExpanded = expanded
 	if expanded {
@@ -957,10 +969,12 @@ func (s *DiagnoseScreen) setAdvancedExpanded(expanded bool) {
 	}
 }
 
+// diagnoseRootLayout balances the input sidebar and result content responsively.
 type diagnoseRootLayout struct {
 	screen *DiagnoseScreen
 }
 
+// Layout positions Diagnose panes according to the available width.
 func (layout diagnoseRootLayout) Layout(
 	objects []fyne.CanvasObject,
 	size fyne.Size,
@@ -996,6 +1010,7 @@ func (layout diagnoseRootLayout) Layout(
 	))
 }
 
+// MinSize returns the minimum usable size of the Diagnose page.
 func (layout diagnoseRootLayout) MinSize(
 	objects []fyne.CanvasObject,
 ) fyne.Size {
@@ -1009,6 +1024,7 @@ func (layout diagnoseRootLayout) MinSize(
 	)
 }
 
+// updateOverviewFooter refreshes run metadata below the summary.
 func (s *DiagnoseScreen) updateOverviewFooter() {
 	if s.activity.Visible() || s.postActions.Visible() {
 		s.overviewFooter.Show()
@@ -1017,6 +1033,7 @@ func (s *DiagnoseScreen) updateOverviewFooter() {
 	s.overviewFooter.Hide()
 }
 
+// preferredCheckIndex selects the most useful check to display after completion.
 func preferredCheckIndex(checks []presenter.CheckView) int {
 	for _, status := range []string{"failed", "cancelled", "warning"} {
 		for index, check := range checks {
@@ -1034,6 +1051,7 @@ func preferredCheckIndex(checks []presenter.CheckView) int {
 	return 0
 }
 
+// hasTimingBreakdown reports whether any timing phase contains useful data.
 func hasTimingBreakdown(timing []presenter.TimingView) bool {
 	for _, item := range timing {
 		if !item.IsTotal && item.Measured {
@@ -1043,6 +1061,7 @@ func hasTimingBreakdown(timing []presenter.TimingView) bool {
 	return false
 }
 
+// formatViewDuration renders a localized duration for the screen.
 func formatViewDuration(texts localization.Catalog, duration time.Duration) string {
 	if duration <= 0 {
 		return texts.Text(localization.CommonUnavailable)
@@ -1053,6 +1072,7 @@ func formatViewDuration(texts localization.Catalog, duration time.Duration) stri
 	return duration.Round(time.Millisecond).String()
 }
 
+// formatViewTime renders a localized timestamp for the screen.
 func formatViewTime(texts localization.Catalog, value time.Time) string {
 	if value.IsZero() {
 		return texts.Text(localization.CommonUnavailable)
@@ -1060,6 +1080,7 @@ func formatViewTime(texts localization.Catalog, value time.Time) string {
 	return value.Local().Format(time.RFC3339)
 }
 
+// joinDisplayLines removes empty values and returns localized fallback text.
 func joinDisplayLines(texts localization.Catalog, lines []string, empty string) string {
 	if len(lines) == 0 {
 		return empty
@@ -1072,6 +1093,7 @@ func joinDisplayLines(texts localization.Catalog, lines []string, empty string) 
 	return strings.TrimSuffix(builder.String(), "\n")
 }
 
+// modeValue maps the localized selector value to the diagnostic mode contract.
 func (s *DiagnoseScreen) modeValue() string {
 	switch s.mode.Selected {
 	case s.texts.Text(localization.OptionTCP):
@@ -1083,6 +1105,7 @@ func (s *DiagnoseScreen) modeValue() string {
 	}
 }
 
+// ipVersionValue maps the localized selector value to the IP family contract.
 func (s *DiagnoseScreen) ipVersionValue() string {
 	switch s.ipVersion.Selected {
 	case s.texts.Text(localization.OptionIPv4):
@@ -1094,6 +1117,7 @@ func (s *DiagnoseScreen) ipVersionValue() string {
 	}
 }
 
+// verbosityValue maps the localized selector value to report verbosity.
 func (s *DiagnoseScreen) verbosityValue() string {
 	if s.verbosity.Selected == s.texts.Text(localization.OptionVerbose) {
 		return "verbose"
@@ -1101,6 +1125,7 @@ func (s *DiagnoseScreen) verbosityValue() string {
 	return "normal"
 }
 
+// methodValue maps the localized selector value to a canonical HTTP method.
 func (s *DiagnoseScreen) methodValue() string {
 	switch s.method.Selected {
 	case s.texts.Text(localization.OptionHEAD):

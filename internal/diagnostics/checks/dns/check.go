@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
 )
 
 const (
@@ -40,7 +40,10 @@ func New(resolver Resolver) *Check {
 	return &Check{Resolver: resolver, Now: time.Now}
 }
 
-func (*Check) ID() string   { return "dns" }
+// ID returns the stable diagnostic identifier.
+func (*Check) ID() string { return "dns" }
+
+// Name returns the human-readable check name.
 func (*Check) Name() string { return "DNS resolution" }
 
 type lookupResult struct {
@@ -50,6 +53,7 @@ type lookupResult struct {
 	duration  time.Duration
 }
 
+// Run resolves the target's A and AAAA records.
 func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 	host := state.Target.Host
 	if ip := net.ParseIP(host); ip != nil {
@@ -195,16 +199,6 @@ func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 		Status:   model.StatusPassed,
 		Summary:  summary,
 		Evidence: evidence,
-	}
-}
-
-func noRecordsResult(c *Check, summary string) model.CheckResult {
-	return model.CheckResult{
-		ID:        c.ID(),
-		Name:      c.Name(),
-		Status:    model.StatusFailed,
-		Summary:   summary,
-		ErrorCode: ErrorNoRecords,
 	}
 }
 

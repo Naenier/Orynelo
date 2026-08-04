@@ -4,14 +4,16 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
-	"github.com/Naenier/opsdoctor/internal/privacy"
-	"github.com/Naenier/opsdoctor/internal/redaction"
+	"github.com/Naenier/orynelo/internal/diagnostics"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/privacy"
+	"github.com/Naenier/orynelo/internal/redaction"
 )
 
 type fakeRunner struct {
@@ -96,11 +98,11 @@ func TestServiceDiagnoseAddsBuildAndPersists(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.History.MaxEntries = 42
-	cfg.Network.UserAgent = "OpsDoctor-Test/1"
+	cfg.Network.UserAgent = "Orynelo-Test/1"
 	cfg.Diagnostics.CertificateWarningThreshold = 7 * 24 * time.Hour
 	runner := &fakeRunner{diagnosis: model.Diagnosis{
 		ID:      "diagnosis-1",
-		Options: model.DiagnoseOptions{UserAgent: "OpsDoctor token=persisted-user-agent-secret"},
+		Options: model.DiagnoseOptions{UserAgent: "Orynelo token=persisted-user-agent-secret"},
 		Summary: model.Summary{Status: model.StatusPassed},
 	}}
 	persistence := &fakePersistence{}
@@ -131,13 +133,162 @@ func TestServiceDiagnoseAddsBuildAndPersists(t *testing.T) {
 	if persistence.saveLimit != 42 {
 		t.Errorf("history limit = %d, want 42", persistence.saveLimit)
 	}
-	if runner.options.UserAgent != "OpsDoctor-Test/1" ||
+	if runner.options.UserAgent != "Orynelo-Test/1" ||
 		runner.options.CertificateWarningThreshold != 7*24*time.Hour {
 		t.Errorf("config-backed diagnostic options = %+v", runner.options)
 	}
 	if strings.Contains(got.Options.UserAgent, "persisted-user-agent-secret") ||
 		strings.Contains(persistence.saved.Options.UserAgent, "persisted-user-agent-secret") {
 		t.Fatalf("user agent crossed the privacy boundary: got=%q saved=%q", got.Options.UserAgent, persistence.saved.Options.UserAgent)
+	}
+}
+
+func TestServiceDiagnoseRequestResolvesEffectiveOptionsOnce(t *testing.T) {
+	t.Parallel()
+
+	cfg := DefaultConfig()
+	cfg.History.Enabled = false
+	cfg.Diagnostics.DefaultTimeout = 40 * time.Second
+	cfg.Diagnostics.CheckTimeout = 8 * time.Second
+	cfg.Diagnostics.MaxRedirects = 9
+	cfg.Network.UseSystemProxy = false
+	cfg.Network.UserAgent = "Orynelo/service-config"
+	profile := model.Profile{
+		Name:         "saved",
+		Target:       "profile.example:443",
+		Mode:         model.DiagnosticModeTLS,
+		IPVersion:    model.IPVersion4,
+		Timeout:      20 * time.Second,
+		CheckTimeout: 4 * time.Second,
+		NoProxy:      true,
+		MaxRedirects: 3,
+		Method:       "HEAD",
+	}
+	runner := &fakeRunner{diagnosis: model.Diagnosis{
+		Summary: model.Summary{Status: model.StatusPassed},
+	}}
+	service, err := New(Dependencies{Runner: runner, Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	target := " https://override.example/status "
+	timeout := 25 * time.Second
+	noProxy := false
+	diagnosis, err := service.DiagnoseRequest(context.Background(), DiagnoseRequest{
+		Profile: &profile,
+		Overrides: DiagnoseOverrides{
+			Target:  &target,
+			Timeout: &timeout,
+			NoProxy: &noProxy,
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("DiagnoseRequest() error = %v", err)
+	}
+
+	if runner.options.Target != "https://override.example/status" ||
+		runner.options.Timeout != 25*time.Second ||
+		runner.options.CheckTimeout != 4*time.Second ||
+		runner.options.IPVersion != model.IPVersion4 ||
+		runner.options.NoProxy ||
+		!runner.options.EnableTLS ||
+		runner.options.MaxRedirects != 3 ||
+		runner.options.Method != "HEAD" ||
+		runner.options.UserAgent != "Orynelo/service-config" {
+		t.Fatalf("runner received non-effective options: %+v", runner.options)
+	}
+	if diagnosis.Build != (model.BuildInfo{}) {
+		t.Fatalf("unexpected build metadata: %+v", diagnosis.Build)
+	}
+}
+
+func TestServiceDiagnoseRequestReturnsTypedValidationError(t *testing.T) {
+	t.Parallel()
+
+	service, err := New(Dependencies{Runner: &fakeRunner{}, Config: DefaultConfig()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidTarget := "https://"
+	_, err = service.DiagnoseRequest(context.Background(), DiagnoseRequest{
+		Overrides: DiagnoseOverrides{Target: &invalidTarget},
+	}, nil)
+	if err == nil {
+		t.Fatal("DiagnoseRequest() error = nil")
+	}
+	applicationError, ok := AsError(err)
+	if !ok || applicationError.Category() != ErrorCategoryValidation ||
+		applicationError.Code() != "APP_DIAGNOSE_OPTIONS_INVALID" {
+		t.Fatalf("DiagnoseRequest() error = %#v", applicationError)
+	}
+	if !strings.Contains(fmt.Sprint(errors.Unwrap(applicationError)), "invalid target") {
+		t.Fatalf("wrapped cause was not retained: %v", errors.Unwrap(applicationError))
+	}
+	if strings.Contains(applicationError.Error(), "https://") ||
+		strings.Contains(applicationError.Error(), "invalid target") {
+		t.Fatalf("user-facing error leaked its cause: %q", applicationError.Error())
+	}
+}
+
+func TestServiceDiagnoseClassifiesRunnerLifecycleAndInputErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		runnerErr error
+		category  ErrorCategory
+		code      ErrorCode
+	}{
+		{
+			name:      "cancelled",
+			runnerErr: context.Canceled,
+			category:  ErrorCategoryCancelled,
+			code:      ErrorCodeOperationCancelled,
+		},
+		{
+			name: "input",
+			runnerErr: &diagnostics.InputError{
+				Code:    "INVALID_TARGET",
+				Message: "private parser detail",
+			},
+			category: ErrorCategoryValidation,
+			code:     "APP_DIAGNOSE_OPTIONS_INVALID",
+		},
+		{
+			name:      "internal",
+			runnerErr: errors.New("private adapter failure"),
+			category:  ErrorCategoryInternal,
+			code:      "APP_DIAGNOSE_FAILED",
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := DefaultConfig()
+			cfg.History.Enabled = false
+			service, err := New(Dependencies{
+				Runner: &fakeRunner{err: test.runnerErr},
+				Config: cfg,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := "example.test"
+			_, err = service.DiagnoseRequest(context.Background(), DiagnoseRequest{
+				Overrides: DiagnoseOverrides{Target: &target},
+			}, nil)
+			applicationError, ok := AsError(err)
+			if !ok || applicationError.Category() != test.category ||
+				applicationError.Code() != test.code {
+				t.Fatalf("DiagnoseRequest() error = %#v", applicationError)
+			}
+			if !errors.Is(applicationError, test.runnerErr) {
+				t.Fatalf("typed error no longer wraps %v", test.runnerErr)
+			}
+		})
 	}
 }
 
@@ -288,5 +439,117 @@ func TestServiceSaveConfigurationActivatesAfterPersistence(t *testing.T) {
 	}
 	if activeLevel != "debug" {
 		t.Fatalf("failed save did not restore active log level: %q", activeLevel)
+	}
+}
+
+func TestServiceClassifiesUserControlledAdapterValuesAsValidation(t *testing.T) {
+	t.Parallel()
+
+	service, err := New(Dependencies{
+		Runner:      &fakeRunner{},
+		Persistence: &fakePersistence{},
+		Config:      DefaultConfig(),
+		RenderReport: func(string, model.Diagnosis, privacy.Mode) ([]byte, error) {
+			return []byte("report"), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		run  func() error
+		code ErrorCode
+	}{
+		{
+			name: "history search",
+			run: func() error {
+				_, err := service.ListHistory(context.Background(), strings.Repeat("x", 4097), "")
+				return err
+			},
+			code: "APP_HISTORY_SEARCH_INVALID",
+		},
+		{
+			name: "history status",
+			run: func() error {
+				_, err := service.ListHistory(context.Background(), "", model.Status("unknown"))
+				return err
+			},
+			code: "APP_HISTORY_STATUS_INVALID",
+		},
+		{
+			name: "history ID",
+			run: func() error {
+				_, err := service.GetDiagnosis(context.Background(), "../private")
+				return err
+			},
+			code: "APP_HISTORY_ID_INVALID",
+		},
+		{
+			name: "profile values",
+			run: func() error {
+				_, err := service.SaveProfile(context.Background(), model.Profile{Name: "invalid"})
+				return err
+			},
+			code: "APP_PROFILE_VALUES_INVALID",
+		},
+		{
+			name: "profile ID",
+			run: func() error {
+				return service.DeleteProfile(context.Background(), 0)
+			},
+			code: "APP_PROFILE_ID_INVALID",
+		},
+		{
+			name: "report format",
+			run: func() error {
+				_, err := service.RenderReport("xml", model.Diagnosis{}, privacy.ModeStandard)
+				return err
+			},
+			code: "APP_REPORT_FORMAT_INVALID",
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			err := test.run()
+			applicationError, ok := AsError(err)
+			if !ok || applicationError.Category() != ErrorCategoryValidation ||
+				applicationError.Code() != test.code {
+				t.Fatalf("error = %#v", applicationError)
+			}
+		})
+	}
+}
+
+func TestServiceValidatesProfileBeforeCheckingStorageAvailability(t *testing.T) {
+	t.Parallel()
+
+	service, err := New(Dependencies{Runner: &fakeRunner{}, Config: DefaultConfig()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.SaveProfile(context.Background(), model.Profile{})
+	if !IsErrorCategory(err, ErrorCategoryValidation) ||
+		!IsErrorCode(err, "APP_PROFILE_VALUES_INVALID") {
+		t.Fatalf("invalid profile error = %v", err)
+	}
+
+	_, err = service.SaveProfile(context.Background(), model.Profile{
+		Name:         "valid",
+		Target:       "example.test",
+		Mode:         model.DiagnosticModeAuto,
+		IPVersion:    model.IPVersionAuto,
+		Timeout:      15 * time.Second,
+		CheckTimeout: 5 * time.Second,
+		MaxRedirects: 10,
+		Method:       "GET",
+	})
+	if !IsErrorCategory(err, ErrorCategoryStorage) ||
+		!IsErrorCode(err, "APP_PROFILE_STORAGE_UNAVAILABLE") {
+		t.Fatalf("valid profile without storage error = %v", err)
 	}
 }

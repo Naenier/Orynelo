@@ -22,21 +22,22 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
-	appassets "github.com/Naenier/opsdoctor/assets"
-	"github.com/Naenier/opsdoctor/internal/application"
-	"github.com/Naenier/opsdoctor/internal/buildinfo"
-	targetcheck "github.com/Naenier/opsdoctor/internal/diagnostics/checks/target"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
-	"github.com/Naenier/opsdoctor/internal/gui/components"
-	"github.com/Naenier/opsdoctor/internal/gui/localization"
-	"github.com/Naenier/opsdoctor/internal/gui/presenter"
-	"github.com/Naenier/opsdoctor/internal/gui/screens"
-	apptheme "github.com/Naenier/opsdoctor/internal/gui/theme"
-	"github.com/Naenier/opsdoctor/internal/privacy"
-	"github.com/Naenier/opsdoctor/internal/redaction"
-	"github.com/Naenier/opsdoctor/internal/secureio"
+	appassets "github.com/Naenier/orynelo/assets"
+	"github.com/Naenier/orynelo/internal/application"
+	"github.com/Naenier/orynelo/internal/buildinfo"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/gui/components"
+	"github.com/Naenier/orynelo/internal/gui/localization"
+	"github.com/Naenier/orynelo/internal/gui/presenter"
+	"github.com/Naenier/orynelo/internal/gui/screens"
+	"github.com/Naenier/orynelo/internal/gui/taskrunner"
+	apptheme "github.com/Naenier/orynelo/internal/gui/theme"
+	"github.com/Naenier/orynelo/internal/privacy"
+	"github.com/Naenier/orynelo/internal/redaction"
+	"github.com/Naenier/orynelo/internal/secureio"
 )
 
+// Desktop window defaults and minimum responsive dimensions.
 const (
 	defaultWidth  = 1280
 	defaultHeight = 820
@@ -44,6 +45,8 @@ const (
 	minimumHeight = 680
 )
 
+// controller owns the desktop window, navigation, lifecycle, and dialogs. Use-
+// case execution and testable screen state belong to dedicated coordinators.
 type controller struct {
 	app     fyne.App
 	window  fyne.Window
@@ -69,13 +72,23 @@ type controller struct {
 	navigationButtons  map[string]*widget.Button
 
 	mu            sync.Mutex
-	activeCancel  context.CancelFunc
-	currentRun    uint64
 	closing       bool
-	wg            sync.WaitGroup
 	lastDiagnosis model.Diagnosis
 	haveDiagnosis bool
 	currentScreen string
+	reportSession uint64
+	settingsDone  func(message string)
+	configuration application.Config
+	configLoaded  bool
+
+	tasks               *taskrunner.Runner
+	diagnoseCoordinator *DiagnoseCoordinator
+	historyCoordinator  *HistoryCoordinator
+	profilesCoordinator *ProfilesCoordinator
+	settingsCoordinator *SettingsCoordinator
+	reportPrepareTask   *taskrunner.Scope[reportPrepareResult]
+	reportInspectTask   *taskrunner.Scope[reportInspectResult]
+	reportWriteTask     *taskrunner.Scope[reportWriteResult]
 }
 
 // Run starts the desktop application and blocks until the main window closes.
@@ -83,10 +96,10 @@ func Run(ctx context.Context, backend Backend, info buildinfo.Info) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	fyneApp := app.NewWithID("io.github.naenier.opsdoctor")
+	fyneApp := app.NewWithID("io.github.naenier.orynelo")
 	fyneApp.SetIcon(fyne.NewStaticResource("Icon.png", appassets.IconPNG()))
 	texts := localization.English{}
-	cfg := backend.Configuration()
+	cfg := application.DefaultConfig()
 	_ = apptheme.Apply(texts, fyneApp, cfg.Appearance.Theme)
 
 	window := fyneApp.NewWindow(texts.Text(localization.AppName))
@@ -95,18 +108,29 @@ func Run(ctx context.Context, backend Backend, info buildinfo.Info) {
 	window.SetMaster()
 
 	c := &controller{
-		app:     fyneApp,
-		window:  window,
-		backend: backend,
-		info:    info,
-		texts:   texts,
-		content: container.NewStack(),
+		app:           fyneApp,
+		window:        window,
+		backend:       backend,
+		info:          info,
+		texts:         texts,
+		content:       container.NewStack(),
+		configuration: cfg,
 	}
-	c.buildScreens()
+	tasks, err := taskrunner.New(ctx, fyne.Do, taskrunner.Options{MaxConcurrentReads: 4})
+	if err != nil {
+		return
+	}
+	c.tasks = tasks
+	c.buildScreens(cfg)
+	if err := c.buildTaskScopes(); err != nil {
+		tasks.Close()
+		return
+	}
 	c.buildWindow()
 	c.registerShortcuts()
 	window.SetCloseIntercept(c.closeWindow)
 	c.showScreen("diagnose")
+	c.loadConfiguration()
 	stopped := make(chan struct{})
 	go func() {
 		select {
@@ -119,11 +143,13 @@ func Run(ctx context.Context, backend Backend, info buildinfo.Info) {
 	}()
 	window.ShowAndRun()
 	close(stopped)
-	c.cancelActive()
-	c.wg.Wait()
+	c.tasks.Close()
+	c.tasks.Wait()
 }
 
-func (c *controller) buildScreens() {
+// buildScreens constructs every top-level screen and wires user actions back
+// to controller operations.
+func (c *controller) buildScreens(cfg application.Config) {
 	c.diagnose = screens.NewDiagnose(c.texts, screens.DiagnoseActions{
 		Run: c.runDiagnostic,
 		InputError: func(error) {
@@ -139,7 +165,6 @@ func (c *controller) buildScreens() {
 			c.app.Clipboard().SetContent(privacy.Standard().Text(text))
 		},
 	})
-	cfg := c.backend.Configuration()
 	c.diagnose.SetDefaults(
 		cfg.Diagnostics.DefaultTimeout,
 		cfg.Diagnostics.CheckTimeout,
@@ -147,6 +172,7 @@ func (c *controller) buildScreens() {
 		cfg.Diagnostics.MaxRedirects,
 		!cfg.Network.UseSystemProxy,
 	)
+	c.diagnose.SetRunEnabled(false)
 	c.history = screens.NewHistory(c.texts, screens.HistoryActions{
 		Load:   c.loadHistory,
 		Open:   c.openHistory,
@@ -164,17 +190,12 @@ func (c *controller) buildScreens() {
 		Run:       c.runProfile,
 	})
 
-	c.settings = screens.NewSettings(c.texts, cfg, screens.SettingsActions{
-		Save:             c.saveSettings,
-		ClearHistory:     c.confirmClearHistory,
-		OpenLogDirectory: c.openLogDirectory,
-		ApplyTheme: func(value string) error {
-			return apptheme.Apply(c.texts, c.app, value)
-		},
-	})
+	c.settings = c.newSettings(cfg)
 	c.about = screens.NewAbout(c.texts, c.info)
 }
 
+// buildWindow assembles the responsive application shell, navigation, and
+// shared status header.
 func (c *controller) buildWindow() {
 	version := compactHeaderVersion(c.info.Version)
 	if version == "" {
@@ -233,12 +254,12 @@ func (c *controller) buildWindow() {
 			c.showScreen("diagnose")
 		}),
 		navigationButton("history", localization.NavigationHistory, theme.HistoryIcon(), func() {
-			c.history.Reload()
 			c.showScreen("history")
+			c.history.Reload()
 		}),
 		navigationButton("profiles", localization.NavigationProfiles, theme.DocumentCreateIcon(), func() {
-			c.profiles.Reload()
 			c.showScreen("profiles")
+			c.profiles.Reload()
 		}),
 		navigationButton("settings", localization.NavigationSettings, theme.SettingsIcon(), func() {
 			c.showScreen("settings")
@@ -270,6 +291,8 @@ func (c *controller) buildWindow() {
 	c.window.SetContent(container.NewStack(floor, layout))
 }
 
+// compactHeaderVersion removes build metadata that is too verbose for the
+// persistent window header.
 func compactHeaderVersion(value string) string {
 	value = strings.TrimSpace(value)
 	if separator := strings.IndexByte(value, '+'); separator > 0 {
@@ -278,6 +301,7 @@ func compactHeaderVersion(value string) string {
 	return value
 }
 
+// registerShortcuts installs the desktop keyboard navigation and action map.
 func (c *controller) registerShortcuts() {
 	add := func(key fyne.KeyName, modifier fyne.KeyModifier, handler func()) {
 		c.window.Canvas().AddShortcut(
@@ -296,7 +320,12 @@ func (c *controller) registerShortcuts() {
 	add(fyne.KeyComma, fyne.KeyModifierControl, func() { c.showScreen("settings") })
 }
 
+// showScreen activates one top-level page and cancels work owned by the page
+// being left.
 func (c *controller) showScreen(name string) {
+	if c.currentScreen != "" && c.currentScreen != name {
+		c.cancelScreenTasks(c.currentScreen)
+	}
 	var object fyne.CanvasObject
 	title := localization.NavigationDiagnose
 	switch name {
@@ -338,78 +367,32 @@ func (c *controller) showScreen(name string) {
 	c.content.Add(object)
 }
 
+// runDiagnostic resolves form input into an asynchronous backend diagnosis.
 func (c *controller) runDiagnostic(input presenter.DiagnoseInput) {
-	c.cancelActive()
-	targetValue := input.Target
-	if input.Mode == "tcp" {
-		parsed, err := targetcheck.Parse(input.Target)
-		if err != nil {
-			c.diagnose.ShowError(err.Error(), false)
-			c.setDiagnoseHeaderStatus(localization.HeaderError)
-			return
-		}
-		targetValue = parsed.Address()
-	}
-	options := model.DefaultDiagnoseOptions(targetValue)
-	options.Timeout = input.Timeout
-	options.CheckTimeout = input.CheckTimeout
-	options.IPVersion = model.IPVersion(input.IPVersion)
-	options.NoProxy = input.NoProxy
-	options.Insecure = input.Insecure
-	options.AllowInsecureRedirects = input.AllowInsecureRedirects
-	options.AllowPrivateRedirects = input.AllowPrivateRedirects
-	options.EnableTLS = input.Mode == "tls"
-	options.MaxRedirects = input.MaxRedirects
-	options.Method = input.Method
-	options.ReportVerbosity = model.ReportVerbosity(input.Verbosity)
-
-	ctx, cancel := context.WithCancel(context.Background())
 	c.mu.Lock()
-	c.currentRun++
-	runID := c.currentRun
-	c.activeCancel = cancel
+	ready := c.configLoaded
 	c.mu.Unlock()
-	c.diagnose.ResetResults()
-	c.diagnose.SetRunning(true)
-	c.setHeaderStatus(localization.HeaderRunning)
-
-	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
-		diagnosis, err := c.backend.Diagnose(ctx, options, func(event model.CheckEvent) {
-			c.handleEvent(runID, event)
-		})
-		wasCancelled := errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled)
-		if !c.shouldPresent(runID) {
-			cancel()
-			return
-		}
-		fyne.Do(func() {
-			if !c.shouldPresent(runID) {
-				cancel()
-				return
-			}
-			c.clearCancel(runID, cancel)
-			if err != nil {
-				c.diagnose.ShowError(err.Error(), wasCancelled)
-				if wasCancelled {
-					c.setHeaderStatus(localization.HeaderCancelled)
-				} else {
-					c.setHeaderStatus(localization.HeaderError)
-				}
-				return
-			}
-			diagnosis = privacy.Standard().Diagnosis(diagnosis)
-			c.lastDiagnosis = diagnosis
-			c.haveDiagnosis = true
-			c.diagnose.ShowDiagnosis(presenter.Diagnosis(c.texts, diagnosis))
-			c.setHeaderForDiagnosis(diagnosis)
-		})
-	}()
+	if !ready {
+		c.diagnose.ShowError(
+			c.texts.Text(localization.ErrorConfigurationGuidance),
+			false,
+		)
+		return
+	}
+	_, err := c.diagnoseCoordinator.Start(input, c.handleEvent)
+	if err != nil {
+		c.diagnose.ShowError(c.userFacingError(guiTaskStartError(err, "diagnose")), false)
+		c.setDiagnoseHeaderStatus(localization.HeaderError)
+	}
 }
 
-func (c *controller) handleEvent(runID uint64, event model.CheckEvent) {
-	if !c.shouldPresent(runID) {
+// handleEvent projects a streaming diagnostic event into the current GUI
+// operation while suppressing stale deliveries.
+func (c *controller) handleEvent(
+	operationID taskrunner.OperationID,
+	event model.CheckEvent,
+) {
+	if !c.shouldPresentDiagnostic(operationID) {
 		return
 	}
 	event = privacy.Standard().Event(event)
@@ -432,63 +415,62 @@ func (c *controller) handleEvent(runID uint64, event model.CheckEvent) {
 		return
 	}
 	fyne.Do(func() {
-		if c.shouldPresent(runID) {
+		if c.shouldPresentDiagnostic(operationID) {
 			c.diagnose.UpsertCheck(check)
 		}
 	})
 }
 
+// closeWindow marks shutdown, cancels background work, and closes the window.
 func (c *controller) closeWindow() {
 	c.mu.Lock()
 	c.closing = true
-	cancel := c.activeCancel
-	c.activeCancel = nil
 	c.mu.Unlock()
-	if cancel != nil {
-		cancel()
+	if c.tasks != nil {
+		c.tasks.Close()
 	}
 	c.window.Close()
 }
 
-func (c *controller) shouldPresent(runID uint64) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return !c.closing && c.currentRun == runID
+// shouldPresentDiagnostic reports whether an event belongs to the active
+// diagnostic generation.
+func (c *controller) shouldPresentDiagnostic(operationID taskrunner.OperationID) bool {
+	if c.diagnoseCoordinator == nil {
+		return false
+	}
+	return c.diagnoseCoordinator.Current(operationID)
 }
 
+// isClosing returns the synchronized application shutdown state.
 func (c *controller) isClosing() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.closing
 }
 
+// cancelActive invalidates diagnostic output and clears any pending profile.
 func (c *controller) cancelActive() {
-	c.mu.Lock()
-	c.currentRun++
-	cancel := c.activeCancel
-	c.activeCancel = nil
-	c.mu.Unlock()
-	if cancel != nil {
-		cancel()
+	if c.diagnoseCoordinator != nil {
+		c.diagnoseCoordinator.Invalidate()
 	}
 }
 
+// cancelDiagnostic requests cancellation for a currently running diagnosis.
 func (c *controller) cancelDiagnostic() {
-	c.mu.Lock()
-	cancel := c.activeCancel
-	c.activeCancel = nil
-	c.mu.Unlock()
-	if cancel != nil {
-		cancel()
+	if c.diagnoseCoordinator != nil &&
+		c.diagnoseCoordinator.Snapshot().State == taskrunner.StateLoading {
 		c.setHeaderStatus(localization.HeaderCancelling)
+		c.diagnoseCoordinator.Cancel()
 	}
 }
 
+// triggerDiagnosticShortcut navigates to Diagnose and invokes its primary action.
 func (c *controller) triggerDiagnosticShortcut() {
 	c.showScreen("diagnose")
 	c.diagnose.TriggerRun()
 }
 
+// setHeaderStatus updates both Diagnose and secondary-page status summaries.
 func (c *controller) setHeaderStatus(status localization.Key) {
 	c.setDiagnoseHeaderStatus(status)
 	label := c.texts.Text(status)
@@ -514,6 +496,7 @@ func (c *controller) setHeaderStatus(status localization.Key) {
 	c.refreshHeader()
 }
 
+// setDiagnoseHeaderStatus updates the status shown on the Diagnose page.
 func (c *controller) setDiagnoseHeaderStatus(status localization.Key) {
 	label := c.texts.Text(status)
 	c.diagnoseHeader = fmt.Sprintf(
@@ -526,6 +509,7 @@ func (c *controller) setDiagnoseHeaderStatus(status localization.Key) {
 	c.refreshHeader()
 }
 
+// setHeaderForDiagnosis derives persistent header state from a completed result.
 func (c *controller) setHeaderForDiagnosis(diagnosis model.Diagnosis) {
 	if diagnosis.Summary.Status == model.StatusCancelled {
 		c.setHeaderStatus(localization.HeaderCancelled)
@@ -563,6 +547,7 @@ func (c *controller) setHeaderForDiagnosis(diagnosis model.Diagnosis) {
 	c.refreshHeader()
 }
 
+// headerStatusValue maps localized header states to status badge vocabulary.
 func headerStatusValue(status localization.Key) string {
 	switch status {
 	case localization.HeaderRunning:
@@ -576,6 +561,7 @@ func headerStatusValue(status localization.Key) string {
 	}
 }
 
+// version returns the compact display version or the development label.
 func (c *controller) version() string {
 	version := compactHeaderVersion(c.info.Version)
 	if version == "" {
@@ -584,6 +570,7 @@ func (c *controller) version() string {
 	return version
 }
 
+// refreshHeader renders the header variant associated with the active page.
 func (c *controller) refreshHeader() {
 	if c.header == nil {
 		return
@@ -600,6 +587,7 @@ func (c *controller) refreshHeader() {
 	c.refreshHeaderStatus(c.secondaryStatus, c.secondaryStatusTip)
 }
 
+// refreshHeaderStatus updates or hides the accessible status badge.
 func (c *controller) refreshHeaderStatus(status, description string) {
 	if c.headerStatus == nil {
 		return
@@ -612,6 +600,7 @@ func (c *controller) refreshHeaderStatus(status, description string) {
 	c.headerStatus.Show()
 }
 
+// versionOnlyHeader returns the neutral header used outside Diagnose.
 func (c *controller) versionOnlyHeader() string {
 	return fmt.Sprintf(
 		"%s %s",
@@ -620,15 +609,7 @@ func (c *controller) versionOnlyHeader() string {
 	)
 }
 
-func (c *controller) clearCancel(runID uint64, completed context.CancelFunc) {
-	c.mu.Lock()
-	if c.currentRun == runID {
-		c.activeCancel = nil
-	}
-	c.mu.Unlock()
-	completed()
-}
-
+// copySummary writes a privacy-projected diagnosis summary to the clipboard.
 func (c *controller) copySummary() {
 	if !c.haveDiagnosis {
 		return
@@ -638,6 +619,7 @@ func (c *controller) copySummary() {
 	c.app.Clipboard().SetContent(privacy.Standard().Text(text))
 }
 
+// exportLast starts export for the most recent completed diagnosis.
 func (c *controller) exportLast(format string) {
 	if !c.haveDiagnosis {
 		dialog.ShowInformation(
@@ -650,6 +632,7 @@ func (c *controller) exportLast(format string) {
 	c.exportDiagnosis(c.lastDiagnosis, format)
 }
 
+// exportDiagnosis asks the user for privacy mode and a safe destination name.
 func (c *controller) exportDiagnosis(diagnosis model.Diagnosis, format string) {
 	extension := exportExtension(format)
 	standardLabel := c.texts.Text(localization.DialogExportStandard)
@@ -687,69 +670,18 @@ func (c *controller) exportDiagnosis(diagnosis model.Diagnosis, format string) {
 	).Show()
 }
 
+// exportDiagnosisWithPrivacy begins asynchronous rendering for the selected
+// privacy policy.
 func (c *controller) exportDiagnosisWithPrivacy(
 	diagnosis model.Diagnosis,
 	format string,
 	mode privacy.Mode,
 	filename string,
 ) {
-	content, err := c.backend.RenderReport(format, diagnosis, mode)
-	if err != nil {
-		dialog.ShowError(err, c.window)
-		return
-	}
-	picker := dialog.NewFolderOpen(func(folder fyne.ListableURI, pickErr error) {
-		if pickErr != nil {
-			dialog.ShowError(pickErr, c.window)
-			return
-		}
-		if folder == nil {
-			return
-		}
-		destination, err := exportDestination(folder, filename)
-		if err != nil {
-			dialog.ShowError(err, c.window)
-			return
-		}
-		commit := func(replaceExisting bool) {
-			atomic, err := writeExportURI(destination, content, replaceExisting)
-			if err != nil {
-				dialog.ShowError(err, c.window)
-				return
-			}
-			messageKey := localization.DialogExportSavedURIFormat
-			if atomic {
-				messageKey = localization.DialogExportSavedAtomicFormat
-			}
-			dialog.ShowInformation(
-				c.texts.Text(localization.DialogExportSavedTitle),
-				fmt.Sprintf(c.texts.Text(messageKey), destination.String()),
-				c.window,
-			)
-		}
-		exists, err := storage.Exists(destination)
-		if err != nil {
-			dialog.ShowError(fmt.Errorf("inspect export destination %q: %w", destination.String(), err), c.window)
-			return
-		}
-		if exists {
-			dialog.ShowConfirm(
-				c.texts.Text(localization.DialogExportOverwriteTitle),
-				fmt.Sprintf(c.texts.Text(localization.DialogExportOverwriteFormat), destination.String()),
-				func(confirmed bool) {
-					if confirmed {
-						commit(true)
-					}
-				},
-				c.window,
-			)
-			return
-		}
-		commit(false)
-	}, c.window)
-	picker.Show()
+	c.prepareReport(diagnosis, format, mode, filename)
 }
 
+// exportExtension returns the canonical file extension for a report format.
 func exportExtension(format string) string {
 	if format == "markdown" || format == "md" {
 		return ".md"
@@ -757,6 +689,8 @@ func exportExtension(format string) string {
 	return ".json"
 }
 
+// normalizeExportFilename validates a single path component and appends the
+// expected extension when absent.
 func normalizeExportFilename(input, extension string) (string, error) {
 	name := strings.TrimSpace(input)
 	if !validExportComponent(name) {
@@ -768,6 +702,7 @@ func normalizeExportFilename(input, extension string) (string, error) {
 	return name, nil
 }
 
+// exportDestination resolves a validated filename under a selected folder URI.
 func exportDestination(folder fyne.URI, filename string) (fyne.URI, error) {
 	if folder == nil {
 		return nil, errors.New("export folder is unavailable")
@@ -778,6 +713,7 @@ func exportDestination(folder fyne.URI, filename string) (fyne.URI, error) {
 	return storage.Child(folder, filename)
 }
 
+// validExportComponent reports whether value is a portable single filename.
 func validExportComponent(value string) bool {
 	if value == "" || value == "." || value == ".." || len(value) > 255 ||
 		strings.ContainsAny(value, `/\\`) {
@@ -791,6 +727,8 @@ func validExportComponent(value string) bool {
 	return true
 }
 
+// writeExportURI writes a complete report through secure local-file handling
+// or the Fyne storage abstraction. The boolean reports use of a local file.
 func writeExportURI(destination fyne.URI, content []byte, replaceExisting bool) (bool, error) {
 	if destination == nil {
 		return false, errors.New("export destination is unavailable")
@@ -816,6 +754,7 @@ func writeExportURI(destination fyne.URI, content []byte, replaceExisting bool) 
 	return false, nil
 }
 
+// saveLastAsProfile opens the profile editor with the last diagnosis defaults.
 func (c *controller) saveLastAsProfile() {
 	if !c.haveDiagnosis {
 		dialog.ShowInformation(
@@ -829,31 +768,22 @@ func (c *controller) saveLastAsProfile() {
 	c.showProfileEditor(&view, c.lastDiagnosis.Target.PrivacyRedacted)
 }
 
-func (c *controller) loadHistory(search, status string) ([]presenter.HistoryView, error) {
+// loadHistory normalizes screen filters and starts a history query.
+func (c *controller) loadHistory(search, status string) {
 	filter := model.Status("")
 	if status != "" && status != "all" {
 		filter = model.Status(status)
 	}
-	entries, err := c.backend.ListHistory(context.Background(), search, filter)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]presenter.HistoryView, 0, len(entries))
-	for _, entry := range entries {
-		result = append(result, presenter.History(entry))
-	}
-	return result, nil
+	c.startHistoryLoad(search, filter)
 }
 
+// openHistory loads a stored diagnosis for presentation.
 func (c *controller) openHistory(row presenter.HistoryView) {
-	diagnosis, err := c.backend.GetDiagnosis(context.Background(), row.ID)
-	if err != nil {
-		dialog.ShowError(err, c.window)
-		return
-	}
-	c.presentHistoricalDiagnosis(diagnosis)
+	c.startHistoryRead(HistoryReadOpen, row.ID)
 }
 
+// presentHistoricalDiagnosis projects and displays a stored diagnosis without
+// rerunning network checks.
 func (c *controller) presentHistoricalDiagnosis(diagnosis model.Diagnosis) {
 	c.cancelActive()
 	diagnosis = privacy.Standard().Diagnosis(diagnosis)
@@ -865,24 +795,17 @@ func (c *controller) presentHistoricalDiagnosis(diagnosis model.Diagnosis) {
 	c.showScreen("diagnose")
 }
 
+// rerunHistory loads a stored diagnosis and starts it as a new request.
 func (c *controller) rerunHistory(row presenter.HistoryView) {
-	diagnosis, err := c.backend.GetDiagnosis(context.Background(), row.ID)
-	if err != nil {
-		dialog.ShowError(err, c.window)
-		return
-	}
-	c.startProfile(profileViewFromDiagnosis(diagnosis))
+	c.startHistoryRead(HistoryReadRerun, row.ID)
 }
 
+// exportHistory loads a stored diagnosis and opens the export workflow.
 func (c *controller) exportHistory(row presenter.HistoryView) {
-	diagnosis, err := c.backend.GetDiagnosis(context.Background(), row.ID)
-	if err != nil {
-		dialog.ShowError(err, c.window)
-		return
-	}
-	c.exportDiagnosis(diagnosis, "markdown")
+	c.startHistoryRead(HistoryReadExport, row.ID)
 }
 
+// confirmDeleteHistory requires explicit confirmation before deleting one run.
 func (c *controller) confirmDeleteHistory(row presenter.HistoryView) {
 	dialog.ShowConfirm(
 		c.texts.Text(localization.HistoryDeleteTitle),
@@ -891,18 +814,13 @@ func (c *controller) confirmDeleteHistory(row presenter.HistoryView) {
 			if !confirmed {
 				return
 			}
-			if err := c.backend.DeleteDiagnosis(context.Background(), row.ID); err != nil {
-				c.history.SetMessage(
-					c.texts.Text(localization.HistoryDeleteErrorPrefix) + err.Error(),
-				)
-				return
-			}
-			c.history.Reload()
+			c.startHistoryMutation(HistoryMutationDelete, row.ID)
 		},
 		c.window,
 	)
 }
 
+// confirmClearHistory requires explicit confirmation before clearing all runs.
 func (c *controller) confirmClearHistory() {
 	dialog.ShowConfirm(
 		c.texts.Text(localization.HistoryClearTitle),
@@ -911,41 +829,32 @@ func (c *controller) confirmClearHistory() {
 			if !confirmed {
 				return
 			}
-			if err := c.backend.ClearHistory(context.Background()); err != nil {
-				dialog.ShowError(err, c.window)
-				return
-			}
-			c.history.Reload()
+			c.startHistoryMutation(HistoryMutationClear, "")
 		},
 		c.window,
 	)
 }
 
-func (c *controller) loadProfiles() ([]presenter.ProfileView, error) {
-	profiles, err := c.backend.ListProfiles(context.Background())
-	if err != nil {
-		return nil, err
-	}
-	result := make([]presenter.ProfileView, 0, len(profiles))
-	for _, profile := range profiles {
-		result = append(result, presenter.Profile(profile))
-	}
-	return result, nil
+// loadProfiles starts an asynchronous saved-profile query.
+func (c *controller) loadProfiles() {
+	c.startProfilesLoad()
 }
 
-func (c *controller) duplicateProfile(profile presenter.ProfileView) error {
+// duplicateProfile validates a view model and saves an independent copy.
+func (c *controller) duplicateProfile(profile presenter.ProfileView) {
 	value, err := profileModel(c.texts, profile)
 	if err != nil {
-		return err
+		c.profiles.SetMessage(c.texts.Text(localization.ProfilesDuplicateErrorPrefix) + err.Error())
+		return
 	}
 	value.ID = 0
 	value.Name += c.texts.Text(localization.ProfilesCopySuffix)
 	value.CreatedAt = time.Time{}
 	value.UpdatedAt = time.Time{}
-	_, err = c.backend.SaveProfile(context.Background(), value)
-	return err
+	c.startProfileMutation(ProfileMutationDuplicate, value)
 }
 
+// confirmDeleteProfile requires explicit confirmation before profile deletion.
 func (c *controller) confirmDeleteProfile(profile presenter.ProfileView) {
 	dialog.ShowConfirm(
 		c.texts.Text(localization.ProfilesDeleteTitle),
@@ -957,30 +866,34 @@ func (c *controller) confirmDeleteProfile(profile presenter.ProfileView) {
 			if !confirmed {
 				return
 			}
-			if err := c.backend.DeleteProfile(context.Background(), profile.ID); err != nil {
-				c.profiles.SetMessage(
-					c.texts.Text(localization.ProfilesDeleteErrorPrefix) + err.Error(),
-				)
-				return
-			}
-			c.profiles.Reload()
+			c.startProfileDelete(profile.ID)
 		},
 		c.window,
 	)
 }
 
+// runProfile forwards a selected saved profile into the Diagnose workflow.
 func (c *controller) runProfile(profile presenter.ProfileView) {
 	c.startProfile(profile)
 }
 
+// startProfile converts a display profile into a pending backend request.
 func (c *controller) startProfile(profile presenter.ProfileView) {
 	c.cancelActive()
+	value, err := profileModel(c.texts, profile)
+	if err != nil {
+		c.diagnose.ShowError(err.Error(), false)
+		return
+	}
+	c.diagnoseCoordinator.SetPendingProfile(&value)
 	c.diagnose.SetRunning(false)
 	c.diagnose.SetProfile(profile)
 	c.showScreen("diagnose")
 	c.diagnose.TriggerRun()
 }
 
+// showProfileEditor presents validation, privacy projection, and persistence
+// controls for creating or editing a profile.
 func (c *controller) showProfileEditor(
 	existing *presenter.ProfileView,
 	targetWasRedacted bool,
@@ -1124,11 +1037,7 @@ func (c *controller) showProfileEditor(
 			}
 			projected, changed := projectProfileForSave(profile, targetWasRedacted)
 			saveProjected := func() {
-				if _, err := c.backend.SaveProfile(context.Background(), projected); err != nil {
-					dialog.ShowError(err, c.window)
-					return
-				}
-				c.profiles.Reload()
+				c.startProfileMutation(ProfileMutationSave, projected)
 			}
 			if changed {
 				dialog.ShowConfirm(
@@ -1152,6 +1061,8 @@ func (c *controller) showProfileEditor(
 	).Show()
 }
 
+// projectProfileForSave applies the standard privacy policy and reports
+// whether confirmation is required because target data was removed.
 func projectProfileForSave(
 	input model.Profile,
 	privacyRedacted ...bool,
@@ -1163,6 +1074,7 @@ func projectProfileForSave(
 	return projected, changed || alreadyRedacted || redactionProvenance
 }
 
+// profileMethodLabel maps a stored HTTP method to its localized selector label.
 func profileMethodLabel(texts localization.Catalog, method string) string {
 	switch strings.ToUpper(method) {
 	case "HEAD":
@@ -1174,6 +1086,7 @@ func profileMethodLabel(texts localization.Catalog, method string) string {
 	}
 }
 
+// profileMethodValue maps a localized selector label to a canonical HTTP method.
 func profileMethodValue(texts localization.Catalog, label string) string {
 	switch label {
 	case texts.Text(localization.OptionHEAD):
@@ -1185,31 +1098,45 @@ func profileMethodValue(texts localization.Catalog, label string) string {
 	}
 }
 
-func (c *controller) saveSettings(cfg application.Config) error {
-	if err := c.backend.SaveConfiguration(cfg); err != nil {
-		return err
-	}
-	if err := apptheme.Apply(c.texts, c.app, cfg.Appearance.Theme); err != nil {
-		return err
-	}
-	c.diagnose.SetDefaults(
-		cfg.Diagnostics.DefaultTimeout,
-		cfg.Diagnostics.CheckTimeout,
-		cfg.Diagnostics.PreferredIPVersion,
-		cfg.Diagnostics.MaxRedirects,
-		!cfg.Network.UseSystemProxy,
-	)
-	return nil
+// newSettings constructs the settings screen with controller callbacks.
+func (c *controller) newSettings(cfg application.Config) fyne.CanvasObject {
+	return screens.NewSettings(c.texts, cfg, screens.SettingsActions{
+		Save:             c.saveSettings,
+		ClearHistory:     c.confirmClearHistory,
+		OpenLogDirectory: c.openLogDirectory,
+		ApplyTheme: func(value string) error {
+			return apptheme.Apply(c.texts, c.app, value)
+		},
+	})
 }
 
+// saveSettings delegates validated settings to the serialized mutation scope.
+func (c *controller) saveSettings(
+	cfg application.Config,
+	complete func(message string),
+) {
+	c.startSettingsSave(cfg, complete)
+}
+
+// openLogDirectory asks the desktop environment to reveal the backend log path.
 func (c *controller) openLogDirectory() error {
 	path := c.backend.LogDirectory()
 	if path == "" {
 		return errors.New(c.texts.Text(localization.DialogLogDirectoryUnavailable))
 	}
-	return c.app.OpenURL(&url.URL{Scheme: "file", Path: filepath.ToSlash(path)})
+	if err := c.app.OpenURL(&url.URL{Scheme: "file", Path: filepath.ToSlash(path)}); err != nil {
+		return errors.New(c.userFacingError(guiBoundaryError(
+			err,
+			application.ErrorCategoryInternal,
+			"APP_LOG_DIRECTORY_OPEN_FAILED",
+			"error.log_directory_open_failed",
+			nil,
+		)))
+	}
+	return nil
 }
 
+// profileViewFromDiagnosis extracts reusable settings from a completed run.
 func profileViewFromDiagnosis(diagnosis model.Diagnosis) presenter.ProfileView {
 	mode := "auto"
 	if diagnosis.Target.Kind == model.TargetTCP {
@@ -1235,6 +1162,7 @@ func profileViewFromDiagnosis(diagnosis model.Diagnosis) presenter.ProfileView {
 	}
 }
 
+// profileModel validates and converts editable GUI values into a domain profile.
 func profileModel(
 	texts localization.Catalog,
 	profile presenter.ProfileView,

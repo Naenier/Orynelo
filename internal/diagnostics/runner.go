@@ -10,13 +10,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Naenier/opsdoctor/internal/diagnostics/checks"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/checks/environment"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/checks/target"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/engine"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/summary"
-	"github.com/Naenier/opsdoctor/internal/privacy"
+	"github.com/Naenier/orynelo/internal/diagnostics/checks"
+	"github.com/Naenier/orynelo/internal/diagnostics/checks/environment"
+	"github.com/Naenier/orynelo/internal/diagnostics/checks/target"
+	"github.com/Naenier/orynelo/internal/diagnostics/engine"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/diagnostics/summary"
+	"github.com/Naenier/orynelo/internal/privacy"
 )
 
 // InputError reports invalid user-controlled options.
@@ -33,6 +33,7 @@ func (e *InputError) Error() string {
 	return e.Message + ": " + e.Err.Error()
 }
 
+// Unwrap returns the parser or validator error that caused the input failure.
 func (e *InputError) Unwrap() error { return e.Err }
 
 // IsInputError distinguishes invalid input from runtime diagnostic failures.

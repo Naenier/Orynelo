@@ -66,7 +66,7 @@ func DefaultConfig() Config {
 		},
 		Network: NetworkConfig{
 			UseSystemProxy: true,
-			UserAgent:      "OpsDoctor",
+			UserAgent:      "Orynelo",
 		},
 		History: HistoryConfig{
 			Enabled:    true,

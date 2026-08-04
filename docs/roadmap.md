@@ -1,6 +1,6 @@
 # Roadmap
 
-OpsDoctor is organized around usable phases rather than inactive screens or
+Orynelo is organized around usable phases rather than inactive screens or
 commands. A feature appears in the CLI or desktop application only when its
 diagnostic path, evidence, cancellation, redaction, tests, and documentation
 work end to end.
@@ -24,6 +24,11 @@ The current scope focuses on:
 - text, JSON, and Markdown reports;
 - local YAML configuration, SQLite history, and saved profiles;
 - a shared CLI and Fyne desktop application;
+- centralized request-capable option resolution plus privacy-projected previews
+  shared by CLI, profiles, and GUI;
+- typed, privacy-safe application errors for UI and JSON consumers;
+- cancellable GUI operation scopes with stale-response suppression, bounded
+  reads, and serialized mutations;
 - build metadata, cross-platform builds, and a non-root CLI container.
 
 Hardening continues through fuzzing of target and certificate inputs, more
@@ -36,7 +41,7 @@ Kubernetes service diagnosis is a future, separately delivered phase. The
 planned CLI starts with:
 
 ```bash
-opsdoctor kube service \
+orynelo kube service \
   --context my-cluster \
   --namespace default \
   --service api

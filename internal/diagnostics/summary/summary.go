@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"strings"
 
-	httpcheck "github.com/Naenier/opsdoctor/internal/diagnostics/checks/http"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/checks/tcp"
-	tlscheck "github.com/Naenier/opsdoctor/internal/diagnostics/checks/tls"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
+	httpcheck "github.com/Naenier/orynelo/internal/diagnostics/checks/http"
+	"github.com/Naenier/orynelo/internal/diagnostics/checks/tcp"
+	tlscheck "github.com/Naenier/orynelo/internal/diagnostics/checks/tls"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
 )
 
 const (
@@ -53,6 +53,7 @@ type diagnosticFacts struct {
 // Build gathers facts first, creates independently ranked conclusion
 // candidates, and only then chooses the primary conclusion. This prevents plan
 // order from allowing a degraded-path warning to hide a blocker.
+// Build derives the highest-severity evidence-based conclusion from results.
 func Build(results []model.CheckResult) model.Summary {
 	facts := collectFacts(results)
 	candidates := buildCandidates(facts)
@@ -141,7 +142,7 @@ func buildCandidates(facts diagnosticFacts) []conclusionCandidate {
 	}
 	if invalid := proxyInvalidResults(facts.results); len(invalid) > 0 {
 		add(blocker(875, "Proxy configuration is invalid",
-			"The configured proxy was rejected, so OpsDoctor did not silently fall back to a direct request.",
+			"The configured proxy was rejected, so Orynelo did not silently fall back to a direct request.",
 			invalid,
 			"Correct or remove the invalid proxy setting, then run the diagnosis again."))
 	}
@@ -804,6 +805,7 @@ func transportPassed(results []model.CheckResult) bool {
 }
 
 // ExplainReference returns a readable fallback for an evidence reference.
+// ExplainReference returns a stable human-readable explanation for an evidence reference.
 func ExplainReference(reference string) string {
 	return fmt.Sprintf("See evidence %q.", reference)
 }

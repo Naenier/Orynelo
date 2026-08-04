@@ -1,4 +1,4 @@
-// Package theme applies the supported OpsDoctor appearance preferences.
+// Package theme applies the supported Orynelo appearance preferences.
 package theme
 
 import (
@@ -9,13 +9,17 @@ import (
 	"fyne.io/fyne/v2"
 	fynetheme "fyne.io/fyne/v2/theme"
 
-	"github.com/Naenier/opsdoctor/internal/gui/localization"
+	"github.com/Naenier/orynelo/internal/gui/localization"
 )
 
+// Supported appearance preference values.
 const (
+	// System follows the desktop environment's current appearance.
 	System = "system"
-	Light  = "light"
-	Dark   = "dark"
+	// Light forces the light Fyne color variant.
+	Light = "light"
+	// Dark forces the dark Fyne color variant.
+	Dark = "dark"
 )
 
 // Apply changes the Fyne application theme.
@@ -50,6 +54,7 @@ type fixedVariantTheme struct {
 	variant fyne.ThemeVariant
 }
 
+// Color resolves colors using the explicitly selected light or dark variant.
 func (t fixedVariantTheme) Color(name fyne.ThemeColorName, _ fyne.ThemeVariant) color.Color {
 	return t.Theme.Color(name, t.variant)
 }

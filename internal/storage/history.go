@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
 )
 
 const (
@@ -32,6 +32,8 @@ type DiagnosisSnapshot struct {
 // Persistence query aliases retain the storage package's public names while
 // keeping the application-facing contract in the domain model.
 type HistorySort = model.HistorySort
+
+// HistoryQuery aliases the domain history query used by storage callers.
 type HistoryQuery = model.HistoryQuery
 
 const (

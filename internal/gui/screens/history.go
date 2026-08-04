@@ -11,14 +11,14 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/Naenier/opsdoctor/internal/gui/components"
-	"github.com/Naenier/opsdoctor/internal/gui/localization"
-	"github.com/Naenier/opsdoctor/internal/gui/presenter"
+	"github.com/Naenier/orynelo/internal/gui/components"
+	"github.com/Naenier/orynelo/internal/gui/localization"
+	"github.com/Naenier/orynelo/internal/gui/presenter"
 )
 
 // HistoryActions connects history operations to the application layer.
 type HistoryActions struct {
-	Load   func(search, status string) ([]presenter.HistoryView, error)
+	Load   func(search, status string)
 	Open   func(presenter.HistoryView)
 	Rerun  func(presenter.HistoryView)
 	Export func(presenter.HistoryView)
@@ -65,6 +65,7 @@ type HistoryScreen struct {
 	actionBar    fyne.CanvasObject
 	actions      HistoryActions
 	texts        localization.Catalog
+	loading      bool
 }
 
 // NewHistory creates the History screen.
@@ -337,23 +338,32 @@ func (s *HistoryScreen) Reload() {
 		s.SetRows(nil)
 		return
 	}
-	rows, err := s.actions.Load(strings.TrimSpace(s.search.Text), s.statusValue())
-	if err != nil {
-		s.SetMessage(s.texts.Text(localization.HistoryLoadErrorPrefix) + err.Error())
-		return
+	s.SetLoading(true)
+	s.actions.Load(strings.TrimSpace(s.search.Text), s.statusValue())
+}
+
+// SetLoading reflects asynchronous history work without blocking the UI.
+func (s *HistoryScreen) SetLoading(loading bool) {
+	s.loading = loading
+	if loading {
+		s.SetMessage(s.texts.Text(localization.CommonLoading))
+	} else if s.message.Text == s.texts.Text(localization.CommonLoading) {
+		s.SetMessage("")
 	}
-	s.SetMessage("")
-	s.SetRows(rows)
+	s.updateActionState()
 }
 
 // SetRows replaces the loaded history entries.
 func (s *HistoryScreen) SetRows(rows []presenter.HistoryView) {
+	s.loading = false
+	s.SetMessage("")
 	s.list.UnselectAll()
 	s.rows = append(s.rows[:0], rows...)
 	s.selected = -1
 	s.applyFilterAndSort()
 }
 
+// applyFilterAndSort derives visible rows from the loaded history snapshot.
 func (s *HistoryScreen) applyFilterAndSort() {
 	s.filtered = append(s.filtered[:0], s.rows...)
 	newest := s.order.Selected != s.texts.Text(localization.HistoryOldestFirst)
@@ -370,6 +380,7 @@ func (s *HistoryScreen) applyFilterAndSort() {
 	s.updateActionState()
 }
 
+// selectedRow returns the currently selected visible history entry.
 func (s *HistoryScreen) selectedRow() (presenter.HistoryView, bool) {
 	if s.selected < 0 || s.selected >= len(s.filtered) {
 		s.SetMessage(s.texts.Text(localization.HistorySelectFirst))
@@ -378,6 +389,7 @@ func (s *HistoryScreen) selectedRow() (presenter.HistoryView, bool) {
 	return s.filtered[s.selected], true
 }
 
+// updateContentState switches between loading, empty, error, and table content.
 func (s *HistoryScreen) updateContentState() {
 	if len(s.filtered) == 0 {
 		if s.hasActiveFilter() {
@@ -404,19 +416,22 @@ func (s *HistoryScreen) updateContentState() {
 	s.actionBar.Show()
 }
 
+// updateActionState enables row actions only when a valid selection exists.
 func (s *HistoryScreen) updateActionState() {
-	hasSelection := s.selected >= 0 && s.selected < len(s.filtered)
+	hasSelection := !s.loading && s.selected >= 0 && s.selected < len(s.filtered)
 	setButtonEnabled(s.open, hasSelection && s.actions.Open != nil)
 	setButtonEnabled(s.rerun, hasSelection && s.actions.Rerun != nil)
 	setButtonEnabled(s.export, hasSelection && s.actions.Export != nil)
 	setButtonEnabled(s.delete, hasSelection && s.actions.Delete != nil)
-	setButtonEnabled(s.clear, len(s.filtered) > 0 && s.actions.Clear != nil)
+	setButtonEnabled(s.clear, !s.loading && len(s.filtered) > 0 && s.actions.Clear != nil)
 }
 
+// hasActiveFilter reports whether search or status filters constrain the list.
 func (s *HistoryScreen) hasActiveFilter() bool {
 	return strings.TrimSpace(s.search.Text) != "" || s.statusValue() != "all"
 }
 
+// historyToolbarField gives a toolbar control a stable desktop width.
 func historyToolbarField(width float32, object fyne.CanvasObject) fyne.CanvasObject {
 	return container.NewGridWrap(
 		fyne.NewSize(width, object.MinSize().Height),
@@ -424,12 +439,14 @@ func historyToolbarField(width float32, object fyne.CanvasObject) fyne.CanvasObj
 	)
 }
 
+// historyColumnsLayout assigns stable proportions to the history table columns.
 type historyColumnsLayout struct {
 	width        float32
 	targetWidth  float32
 	versionWidth float32
 }
 
+// Layout positions history cells using the configured column proportions.
 func (l *historyColumnsLayout) Layout(
 	objects []fyne.CanvasObject,
 	size fyne.Size,
@@ -477,6 +494,7 @@ func (l *historyColumnsLayout) Layout(
 	}
 }
 
+// MinSize returns the minimum width required by a history row.
 func (*historyColumnsLayout) MinSize(
 	objects []fyne.CanvasObject,
 ) fyne.Size {
@@ -490,6 +508,7 @@ func (*historyColumnsLayout) MinSize(
 	)
 }
 
+// setButtonEnabled updates a button only when it is available.
 func setButtonEnabled(button *widget.Button, enabled bool) {
 	if enabled {
 		button.Enable()
@@ -498,6 +517,7 @@ func setButtonEnabled(button *widget.Button, enabled bool) {
 	button.Disable()
 }
 
+// statusValue maps the localized status selector to the domain vocabulary.
 func (s *HistoryScreen) statusValue() string {
 	switch s.status.Selected {
 	case s.texts.Text(localization.HistoryFilterPassed):

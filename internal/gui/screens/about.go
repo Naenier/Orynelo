@@ -1,3 +1,5 @@
+// Package screens builds the user-facing pages of the desktop application and
+// exposes action callbacks without depending on backend implementations.
 package screens
 
 import (
@@ -11,12 +13,12 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/Naenier/opsdoctor/internal/buildinfo"
-	"github.com/Naenier/opsdoctor/internal/gui/localization"
+	"github.com/Naenier/orynelo/internal/buildinfo"
+	"github.com/Naenier/orynelo/internal/gui/localization"
 )
 
 const (
-	repositoryURL = "https://github.com/Naenier/opsdoctor"
+	repositoryURL = "https://github.com/Naenier/orynelo"
 	issueURL      = repositoryURL + "/issues/new"
 	licenseURL    = repositoryURL + "/blob/main/LICENSE"
 	aboutMaxWidth = 920
@@ -139,6 +141,7 @@ func NewAbout(texts localization.Catalog, info buildinfo.Info) fyne.CanvasObject
 	))
 }
 
+// newAboutFact renders one labeled build or platform fact.
 func newAboutFact(name, value string) fyne.CanvasObject {
 	label := widget.NewLabelWithStyle(
 		name,
@@ -154,6 +157,7 @@ func newAboutFact(name, value string) fyne.CanvasObject {
 	return container.NewVBox(label, detail)
 }
 
+// buildInformationText produces the clipboard-ready version and platform summary.
 func buildInformationText(
 	texts localization.Catalog,
 	info buildinfo.Info,
@@ -201,6 +205,7 @@ func buildInformationText(
 	}, "\n")
 }
 
+// displayBuildValue substitutes a localized placeholder for missing metadata.
 func displayBuildValue(texts localization.Catalog, value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" || strings.EqualFold(value, "unknown") {
@@ -209,6 +214,7 @@ func displayBuildValue(texts localization.Catalog, value string) string {
 	return value
 }
 
+// friendlyBuildDate formats supported build timestamps for local display.
 func friendlyBuildDate(texts localization.Catalog, value string) string {
 	value = displayBuildValue(texts, value)
 	if value == texts.Text(localization.CommonUnavailable) {
@@ -221,6 +227,7 @@ func friendlyBuildDate(texts localization.Catalog, value string) string {
 	return parsed.Format("2 Jan 2006, 15:04 MST")
 }
 
+// friendlyOperatingSystem maps Go operating-system identifiers to display names.
 func friendlyOperatingSystem(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "darwin":
@@ -234,6 +241,7 @@ func friendlyOperatingSystem(value string) string {
 	}
 }
 
+// friendlyArchitecture maps Go architecture identifiers to display names.
 func friendlyArchitecture(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "amd64":
@@ -247,6 +255,7 @@ func friendlyArchitecture(value string) string {
 	}
 }
 
+// displayPlatformValue normalizes platform labels for the About screen.
 func displayPlatformValue(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -255,10 +264,12 @@ func displayPlatformValue(value string) string {
 	return value
 }
 
+// aboutPanelLayout constrains the About content to a readable centered width.
 type aboutPanelLayout struct {
 	maxWidth float32
 }
 
+// Layout centers and sizes the About panel within the available area.
 func (layout aboutPanelLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 	for _, object := range objects {
 		if !object.Visible() {
@@ -275,6 +286,7 @@ func (layout aboutPanelLayout) Layout(objects []fyne.CanvasObject, size fyne.Siz
 	}
 }
 
+// MinSize returns the minimum readable panel size.
 func (layout aboutPanelLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 	minimum := fyne.NewSize(0, 0)
 	for _, object := range objects {

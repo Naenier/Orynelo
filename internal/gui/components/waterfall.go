@@ -7,7 +7,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/Naenier/opsdoctor/internal/gui/localization"
+	"github.com/Naenier/orynelo/internal/gui/localization"
 )
 
 // TimingSegment is one measured stage in a diagnostic request.
@@ -95,6 +95,7 @@ func (w *TimingWaterfall) SetSegments(segments []TimingSegment) {
 	w.Refresh()
 }
 
+// formatDuration renders compact, human-readable timing labels.
 func formatDuration(duration time.Duration) string {
 	if duration < time.Microsecond {
 		return duration.String()

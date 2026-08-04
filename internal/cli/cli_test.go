@@ -13,15 +13,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Naenier/opsdoctor/internal/buildinfo"
-	"github.com/Naenier/opsdoctor/internal/config"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
-	"github.com/Naenier/opsdoctor/internal/privacy"
+	"github.com/Naenier/orynelo/internal/application"
+	"github.com/Naenier/orynelo/internal/buildinfo"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/privacy"
 )
 
 type fakeApplication struct {
 	diagnosis model.Diagnosis
 	err       error
+	renderErr error
+	config    application.Config
+	request   application.DiagnoseRequest
 	options   model.DiagnoseOptions
 	format    string
 	mode      privacy.Mode
@@ -37,11 +40,26 @@ func (shortWriter) Write(content []byte) (int, error) {
 	return len(content) - 1, nil
 }
 
-func (f *fakeApplication) Diagnose(
+func (f *fakeApplication) DiagnoseRequest(
 	_ context.Context,
-	options model.DiagnoseOptions,
+	request application.DiagnoseRequest,
 	sink model.EventSink,
 ) (model.Diagnosis, error) {
+	f.request = request
+	config := f.config
+	if config.SchemaVersion == "" {
+		config = application.DefaultConfig()
+	}
+	options, err := application.ResolveDiagnoseOptions(config, request.Profile, request.Overrides)
+	if err != nil {
+		return model.Diagnosis{}, application.WrapError(
+			err,
+			application.ErrorCategoryValidation,
+			"APP_DIAGNOSE_OPTIONS_INVALID",
+			"error.diagnose_options_invalid",
+			nil,
+		)
+	}
 	f.options = options
 	if sink != nil {
 		sink(model.CheckEvent{
@@ -60,7 +78,7 @@ func (f *fakeApplication) RenderReport(
 ) ([]byte, error) {
 	f.format = format
 	f.mode = mode
-	return f.content, nil
+	return f.content, f.renderErr
 }
 
 func TestDiagnoseCommand(t *testing.T) {
@@ -129,6 +147,13 @@ func TestDiagnoseCommand(t *testing.T) {
 			status:   model.StatusPassed,
 			appErr:   context.Canceled,
 			wantCode: ExitCancel,
+		},
+		{
+			name:     "timed out",
+			args:     []string{"diagnose", "host.test"},
+			status:   model.StatusPassed,
+			appErr:   context.DeadlineExceeded,
+			wantCode: ExitFailure,
 		},
 	}
 
@@ -274,10 +299,10 @@ func TestWriteOutputReplacesHardLinkWithoutChangingItsFormerTarget(t *testing.T)
 	}
 }
 
-func TestDiagnoseUsesPersistedDefaultsUnlessFlagChanged(t *testing.T) {
+func TestDiagnoseSendsOnlyExplicitOverridesToApplicationResolver(t *testing.T) {
 	t.Parallel()
 
-	cfg := config.Default()
+	cfg := application.DefaultConfig()
 	cfg.Diagnostics.DefaultTimeout = 45 * time.Second
 	cfg.Diagnostics.CheckTimeout = 9 * time.Second
 	cfg.Diagnostics.PreferredIPVersion = "6"
@@ -287,13 +312,13 @@ func TestDiagnoseUsesPersistedDefaultsUnlessFlagChanged(t *testing.T) {
 	app := &fakeApplication{
 		diagnosis: model.Diagnosis{Summary: model.Summary{Status: model.StatusPassed}},
 		content:   []byte("report\n"),
+		config:    cfg,
 	}
 	var stdout, stderr bytes.Buffer
 	root := NewRoot(Options{
 		Application: app,
 		Stdout:      &stdout,
 		Stderr:      &stderr,
-		LoadConfig:  func() (config.Config, error) { return cfg, nil },
 	})
 	root.SetArgs([]string{"diagnose", "host.test", "--timeout", "12s"})
 	if code := Execute(context.Background(), root, &stderr); code != ExitOK {
@@ -307,6 +332,62 @@ func TestDiagnoseUsesPersistedDefaultsUnlessFlagChanged(t *testing.T) {
 		app.options.MaxRedirects != 3 ||
 		!app.options.NoProxy {
 		t.Errorf("persisted options not applied: %+v", app.options)
+	}
+	overrides := app.request.Overrides
+	if overrides.Target == nil || *overrides.Target != "host.test" ||
+		overrides.Timeout == nil || *overrides.Timeout != 12*time.Second {
+		t.Fatalf("explicit overrides not forwarded: %+v", overrides)
+	}
+	if overrides.CheckTimeout != nil || overrides.IPVersion != nil ||
+		overrides.MaxRedirects != nil || overrides.NoProxy != nil ||
+		overrides.Method != nil || overrides.Insecure != nil ||
+		overrides.AllowInsecureRedirects != nil ||
+		overrides.AllowPrivateRedirects != nil ||
+		overrides.ReportVerbosity != nil {
+		t.Fatalf("CLI populated omitted defaults: %+v", overrides)
+	}
+}
+
+func TestDiagnosePreservesExplicitFalseOverrides(t *testing.T) {
+	t.Parallel()
+
+	config := application.DefaultConfig()
+	config.Network.UseSystemProxy = false
+	app := &fakeApplication{
+		diagnosis: model.Diagnosis{Summary: model.Summary{Status: model.StatusPassed}},
+		content:   []byte("report\n"),
+		config:    config,
+	}
+	var stdout, stderr bytes.Buffer
+	root := NewRoot(Options{Application: app, Stdout: &stdout, Stderr: &stderr})
+	root.SetArgs([]string{
+		"diagnose", "host.test",
+		"--no-proxy=false",
+		"--insecure=false",
+		"--allow-insecure-redirects=false",
+		"--allow-private-redirects=false",
+		"--verbose=false",
+	})
+	if code := Execute(context.Background(), root, &stderr); code != ExitOK {
+		t.Fatalf("Execute() = %d; stderr=%q", code, stderr.String())
+	}
+	overrides := app.request.Overrides
+	for name, value := range map[string]*bool{
+		"no-proxy":                 overrides.NoProxy,
+		"insecure":                 overrides.Insecure,
+		"allow-insecure-redirects": overrides.AllowInsecureRedirects,
+		"allow-private-redirects":  overrides.AllowPrivateRedirects,
+	} {
+		if value == nil || *value {
+			t.Errorf("%s override = %v, want explicit false", name, value)
+		}
+	}
+	if overrides.ReportVerbosity == nil ||
+		*overrides.ReportVerbosity != model.ReportVerbosityNormal {
+		t.Fatalf("verbose override = %v, want explicit normal", overrides.ReportVerbosity)
+	}
+	if app.options.NoProxy {
+		t.Fatal("application resolver did not apply explicit no-proxy=false over configuration")
 	}
 }
 
@@ -347,22 +428,294 @@ func TestDiagnoseRedirectPolicyRequiresExplicitFlags(t *testing.T) {
 	}
 }
 
-func TestDiagnoseMapsInvalidPersistedConfigurationToInputError(t *testing.T) {
+func TestDiagnoseMapsApplicationConfigurationErrorToInputError(t *testing.T) {
 	t.Parallel()
 
 	var stderr bytes.Buffer
 	root := NewRoot(Options{
-		Application: &fakeApplication{},
-		Stdout:      &bytes.Buffer{},
-		Stderr:      &stderr,
-		LoadConfig: func() (config.Config, error) {
-			return config.Config{}, &config.InvalidError{Err: errors.New("invalid configuration")}
-		},
-		IsConfigInvalid: config.IsInvalid,
+		Application: &fakeApplication{err: application.NewError(
+			application.ErrorCategoryConfiguration,
+			"APP_CONFIGURATION_INVALID",
+			"error.configuration_invalid",
+			nil,
+		)},
+		Stdout: &bytes.Buffer{},
+		Stderr: &stderr,
 	})
 	root.SetArgs([]string{"diagnose", "host.test"})
 	if got := Execute(context.Background(), root, &stderr); got != ExitInput {
 		t.Fatalf("Execute() = %d, want %d; stderr=%q", got, ExitInput, stderr.String())
+	}
+}
+
+func TestDiagnoseJSONErrorEnvelopeIsTypedAndPrivacySafe(t *testing.T) {
+	t.Parallel()
+
+	const causeSecret = "database-password=raw-cause-secret"
+	appErr := application.WrapError(
+		errors.New(causeSecret),
+		application.ErrorCategoryValidation,
+		"APP_TARGET_REJECTED",
+		"error.target_rejected",
+		map[string]string{
+			"field":        "target",
+			"access_token": "raw-argument-secret",
+		},
+	)
+	app := &fakeApplication{err: appErr}
+	var stdout, stderr bytes.Buffer
+	root := NewRoot(Options{Application: app, Stdout: &stdout, Stderr: &stderr})
+	root.SetArgs([]string{"diagnose", "host.test", "--format", "json"})
+
+	if got := Execute(context.Background(), root, &stderr); got != ExitInput {
+		t.Fatalf("Execute() = %d, want %d; stderr=%q", got, ExitInput, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout contains a partial report: %q", stdout.String())
+	}
+	var got errorEnvelope
+	if err := json.Unmarshal(stderr.Bytes(), &got); err != nil {
+		t.Fatalf("JSON error envelope is invalid: %v; output=%q", err, stderr.String())
+	}
+	if got.Error.Category != application.ErrorCategoryValidation ||
+		got.Error.Code != "APP_TARGET_REJECTED" ||
+		got.Error.MessageID != "error.target_rejected" ||
+		got.Error.Arguments["field"] != "target" ||
+		got.Error.Arguments["access_token"] != "[REDACTED]" {
+		t.Fatalf("unexpected JSON error envelope: %#v", got)
+	}
+	for _, secret := range []string{causeSecret, "raw-cause-secret", "raw-argument-secret"} {
+		if strings.Contains(stderr.String(), secret) {
+			t.Fatalf("JSON error envelope exposed %q: %s", secret, stderr.String())
+		}
+	}
+	if strings.Contains(stderr.String(), "cause") || strings.Contains(stderr.String(), "Error:") {
+		t.Fatalf("JSON error envelope contains text-only data: %s", stderr.String())
+	}
+}
+
+func TestDiagnoseJSONFlagParseFailureUsesErrorEnvelope(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "format before timeout",
+			args: []string{"diagnose", "host.test", "--format", "json", "--timeout", "not-a-duration"},
+		},
+		{
+			name: "format after timeout",
+			args: []string{"diagnose", "host.test", "--timeout", "not-a-duration", "--format", "json"},
+		},
+		{
+			name: "format before check timeout",
+			args: []string{"diagnose", "host.test", "--format", "json", "--check-timeout", "not-a-duration"},
+		},
+		{
+			name: "format after check timeout",
+			args: []string{"diagnose", "host.test", "--check-timeout", "not-a-duration", "--format", "json"},
+		},
+		{
+			name: "format before maximum redirects",
+			args: []string{"diagnose", "host.test", "--format", "json", "--max-redirects", "not-an-integer"},
+		},
+		{
+			name: "format after maximum redirects",
+			args: []string{"diagnose", "host.test", "--max-redirects", "not-an-integer", "--format", "json"},
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var stderr bytes.Buffer
+			root := NewRoot(Options{
+				Application: &fakeApplication{},
+				Stdout:      &bytes.Buffer{},
+				Stderr:      &stderr,
+			})
+			root.SetArgs(test.args)
+
+			if got := Execute(context.Background(), root, &stderr); got != ExitInput {
+				t.Fatalf("Execute() = %d, want %d; stderr=%q", got, ExitInput, stderr.String())
+			}
+			var got errorEnvelope
+			if err := json.Unmarshal(stderr.Bytes(), &got); err != nil {
+				t.Fatalf("JSON error envelope is invalid: %v; output=%q", err, stderr.String())
+			}
+			if got.Error.Category != application.ErrorCategoryValidation ||
+				got.Error.Code != "APP_CLI_FLAGS_INVALID" {
+				t.Fatalf("unexpected flag error: %#v", got.Error)
+			}
+		})
+	}
+}
+
+func TestDiagnoseVerboseJSONErrorRemainsSingleDocument(t *testing.T) {
+	t.Parallel()
+
+	const causeSecret = "renderer-private-detail"
+	app := &fakeApplication{
+		diagnosis: model.Diagnosis{Summary: model.Summary{Status: model.StatusPassed}},
+		renderErr: errors.New(causeSecret),
+	}
+	var stdout, stderr bytes.Buffer
+	root := NewRoot(Options{Application: app, Stdout: &stdout, Stderr: &stderr})
+	root.SetArgs([]string{"diagnose", "host.test", "--verbose", "--format", "json"})
+
+	if got := Execute(context.Background(), root, &stderr); got != ExitInternal {
+		t.Fatalf("Execute() = %d, want %d; stderr=%q", got, ExitInternal, stderr.String())
+	}
+	var got errorEnvelope
+	if err := json.Unmarshal(stderr.Bytes(), &got); err != nil {
+		t.Fatalf("verbose JSON error is not one JSON document: %v; output=%q", err, stderr.String())
+	}
+	if got.Error.Code != "APP_REPORT_RENDER_FAILED" {
+		t.Fatalf("unexpected error envelope: %#v", got.Error)
+	}
+	if strings.Contains(stderr.String(), "PASSED") || strings.Contains(stderr.String(), causeSecret) {
+		t.Fatalf("JSON error contains progress or private cause: %q", stderr.String())
+	}
+}
+
+func TestDiagnoseTypedErrorExitCodesAndTextGuidance(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		category application.ErrorCategory
+		code     application.ErrorCode
+		wantExit int
+		guidance string
+	}{
+		{
+			name:     "validation",
+			category: application.ErrorCategoryValidation,
+			code:     "APP_TEST_VALIDATION",
+			wantExit: ExitInput,
+			guidance: "Correct the requested value",
+		},
+		{
+			name:     "configuration",
+			category: application.ErrorCategoryConfiguration,
+			code:     "APP_TEST_CONFIGURATION",
+			wantExit: ExitInput,
+			guidance: "Correct the settings",
+		},
+		{
+			name:     "network policy",
+			category: application.ErrorCategoryNetworkPolicy,
+			code:     "APP_TEST_NETWORK_POLICY",
+			wantExit: ExitFailure,
+			guidance: "Network policy blocked",
+		},
+		{
+			name:     "cancelled",
+			category: application.ErrorCategoryCancelled,
+			code:     "APP_TEST_CANCELLED",
+			wantExit: ExitCancel,
+			guidance: "Operation cancelled",
+		},
+		{
+			name:     "timed out",
+			category: application.ErrorCategoryCancelled,
+			code:     application.ErrorCodeOperationTimedOut,
+			wantExit: ExitFailure,
+			guidance: "Operation timed out",
+		},
+		{
+			name:     "storage",
+			category: application.ErrorCategoryStorage,
+			code:     "APP_TEST_STORAGE",
+			wantExit: ExitInternal,
+			guidance: "continue without history",
+		},
+		{
+			name:     "permission",
+			category: application.ErrorCategoryPermission,
+			code:     "APP_TEST_PERMISSION",
+			wantExit: ExitInternal,
+			guidance: "Check access",
+		},
+		{
+			name:     "internal",
+			category: application.ErrorCategoryInternal,
+			code:     "APP_TEST_INTERNAL",
+			wantExit: ExitInternal,
+			guidance: "inspect the application logs",
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			const causeSecret = "internal-cause-secret"
+			app := &fakeApplication{err: application.WrapError(
+				errors.New(causeSecret),
+				test.category,
+				test.code,
+				"error.test",
+				nil,
+			)}
+			var stderr bytes.Buffer
+			root := NewRoot(Options{
+				Application: app,
+				Stdout:      &bytes.Buffer{},
+				Stderr:      &stderr,
+			})
+			root.SetArgs([]string{"diagnose", "host.test"})
+			if got := Execute(context.Background(), root, &stderr); got != test.wantExit {
+				t.Fatalf("Execute() = %d, want %d; stderr=%q", got, test.wantExit, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), string(test.code)) ||
+				!strings.Contains(stderr.String(), test.guidance) {
+				t.Fatalf("stderr lacks code or guidance: %q", stderr.String())
+			}
+			if strings.Contains(stderr.String(), causeSecret) {
+				t.Fatalf("stderr exposed wrapped cause: %q", stderr.String())
+			}
+		})
+	}
+}
+
+func TestApplicationErrorGuidanceUsesReportErrorCode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		code application.ErrorCode
+		want string
+	}{
+		{
+			name: "report write",
+			code: "APP_REPORT_WRITE_FAILED",
+			want: "Check the destination path",
+		},
+		{
+			name: "report destination",
+			code: "APP_REPORT_DESTINATION_INVALID",
+			want: "Choose a valid output path",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			err := application.NewError(
+				application.ErrorCategoryStorage,
+				test.code,
+				"error.test",
+				nil,
+			)
+			got := applicationErrorGuidance(err)
+			if !strings.Contains(got, test.want) || strings.Contains(got, "history") {
+				t.Fatalf("guidance = %q, want code-specific report recovery", got)
+			}
+		})
 	}
 }
 

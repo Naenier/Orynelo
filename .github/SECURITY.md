@@ -13,7 +13,7 @@ a public discussion.
 
 Use GitHub's private vulnerability reporting form:
 
-<https://github.com/Naenier/opsdoctor/security/advisories/new>
+<https://github.com/Naenier/orynelo/security/advisories/new>
 
 Include only the information needed to reproduce and assess the issue:
 
@@ -46,7 +46,7 @@ Security-relevant behavior includes:
 - diagnostic report injection that crosses a trust boundary;
 - dependency or build-pipeline compromise.
 
-OpsDoctor is a diagnostic client. A remote service returning an error,
+Orynelo is a diagnostic client. A remote service returning an error,
 certificate failure, or malformed response is not by itself a vulnerability
 unless it causes unsafe local behavior.
 
