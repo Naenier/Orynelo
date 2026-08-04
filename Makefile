@@ -5,7 +5,7 @@ GOLANGCI_LINT ?= golangci-lint
 DOCKER ?= docker
 
 MODULE := github.com/Naenier/orynelo
-VERSION ?= 0.2.0
+VERSION ?= 0.2.1
 COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || printf '%s' unknown)
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 MODIFIED ?= $(shell if test -n "$$(git status --porcelain --untracked-files=normal 2>/dev/null)"; then printf '%s' true; else printf '%s' false; fi)

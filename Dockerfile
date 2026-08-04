@@ -8,7 +8,7 @@ WORKDIR /src
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
-ARG VERSION=0.2.0
+ARG VERSION=0.2.1
 ARG COMMIT=unknown
 ARG BUILD_DATE=unknown
 ARG MODIFIED=false
@@ -38,7 +38,7 @@ FROM gcr.io/distroless/static-debian13:nonroot
 
 ARG COMMIT=unknown
 ARG BUILD_DATE=unknown
-ARG VERSION=0.2.0
+ARG VERSION=0.2.1
 
 LABEL org.opencontainers.image.title="Orynelo" \
       org.opencontainers.image.description="Evidence-based network reachability diagnostics" \

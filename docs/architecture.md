@@ -243,8 +243,8 @@ non-atomic.
 ## Build metadata
 
 `internal/buildinfo` is the single source of runtime build metadata for the CLI
-version command, GUI About screen, and stored history. Stage 1 is version
-`0.2.0`. Make builds inject the version, commit, build date, and source-tree
+version command, GUI About screen, and stored history. The current release is
+version `0.2.1`. Make builds inject the version, commit, build date, and source-tree
 modification state, while
 `runtime/debug.ReadBuildInfo` supplies VCS and module fallbacks for local or
 `go install` builds. When no injected or module version is available, the

@@ -239,7 +239,7 @@ Native Fyne build dependencies are still required for the desktop binary.
 Make builds record the application version, commit, build date, and whether the
 source tree was modified without rewriting tracked source files. Go module and
 VCS metadata provide local-build fallbacks; otherwise the application reports
-the current stage version (`0.2.0`).
+the current stage version (`0.2.1`).
 
 ## Releases
 

@@ -15,7 +15,7 @@ var (
 	modified  = "unknown"
 )
 
-const fallbackVersion = "0.2.0"
+const fallbackVersion = "0.2.1"
 
 // Info describes the source and toolchain used to build the application.
 type Info struct {
