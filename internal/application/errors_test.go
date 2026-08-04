@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Naenier/opsdoctor/internal/redaction"
+	"github.com/Naenier/orynelo/internal/redaction"
 )
 
 func TestErrorCategoriesAreStableAndValid(t *testing.T) {

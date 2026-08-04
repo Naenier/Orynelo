@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Naenier/opsdoctor/internal/platform"
+	"github.com/Naenier/orynelo/internal/platform"
 	_ "modernc.org/sqlite"
 )
 
@@ -28,7 +28,7 @@ const (
 var ErrNotFound = errors.New("storage: not found")
 
 // Store owns a SQLite connection pool. A single connection is intentional:
-// OpsDoctor is an interactive application and serialized writes avoid SQLite
+// Orynelo is an interactive application and serialized writes avoid SQLite
 // lock contention while still allowing WAL-backed persistence.
 type Store struct {
 	db       *sql.DB

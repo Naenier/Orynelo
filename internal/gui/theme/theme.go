@@ -1,4 +1,4 @@
-// Package theme applies the supported OpsDoctor appearance preferences.
+// Package theme applies the supported Orynelo appearance preferences.
 package theme
 
 import (
@@ -9,7 +9,7 @@ import (
 	"fyne.io/fyne/v2"
 	fynetheme "fyne.io/fyne/v2/theme"
 
-	"github.com/Naenier/opsdoctor/internal/gui/localization"
+	"github.com/Naenier/orynelo/internal/gui/localization"
 )
 
 // Supported appearance preference values.

@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"strings"
 
-	httpcheck "github.com/Naenier/opsdoctor/internal/diagnostics/checks/http"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/checks/tcp"
-	tlscheck "github.com/Naenier/opsdoctor/internal/diagnostics/checks/tls"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
+	httpcheck "github.com/Naenier/orynelo/internal/diagnostics/checks/http"
+	"github.com/Naenier/orynelo/internal/diagnostics/checks/tcp"
+	tlscheck "github.com/Naenier/orynelo/internal/diagnostics/checks/tls"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
 )
 
 const (
@@ -142,7 +142,7 @@ func buildCandidates(facts diagnosticFacts) []conclusionCandidate {
 	}
 	if invalid := proxyInvalidResults(facts.results); len(invalid) > 0 {
 		add(blocker(875, "Proxy configuration is invalid",
-			"The configured proxy was rejected, so OpsDoctor did not silently fall back to a direct request.",
+			"The configured proxy was rejected, so Orynelo did not silently fall back to a direct request.",
 			invalid,
 			"Correct or remove the invalid proxy setting, then run the diagnosis again."))
 	}

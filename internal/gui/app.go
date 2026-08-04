@@ -22,19 +22,19 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
-	appassets "github.com/Naenier/opsdoctor/assets"
-	"github.com/Naenier/opsdoctor/internal/application"
-	"github.com/Naenier/opsdoctor/internal/buildinfo"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
-	"github.com/Naenier/opsdoctor/internal/gui/components"
-	"github.com/Naenier/opsdoctor/internal/gui/localization"
-	"github.com/Naenier/opsdoctor/internal/gui/presenter"
-	"github.com/Naenier/opsdoctor/internal/gui/screens"
-	"github.com/Naenier/opsdoctor/internal/gui/taskrunner"
-	apptheme "github.com/Naenier/opsdoctor/internal/gui/theme"
-	"github.com/Naenier/opsdoctor/internal/privacy"
-	"github.com/Naenier/opsdoctor/internal/redaction"
-	"github.com/Naenier/opsdoctor/internal/secureio"
+	appassets "github.com/Naenier/orynelo/assets"
+	"github.com/Naenier/orynelo/internal/application"
+	"github.com/Naenier/orynelo/internal/buildinfo"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/gui/components"
+	"github.com/Naenier/orynelo/internal/gui/localization"
+	"github.com/Naenier/orynelo/internal/gui/presenter"
+	"github.com/Naenier/orynelo/internal/gui/screens"
+	"github.com/Naenier/orynelo/internal/gui/taskrunner"
+	apptheme "github.com/Naenier/orynelo/internal/gui/theme"
+	"github.com/Naenier/orynelo/internal/privacy"
+	"github.com/Naenier/orynelo/internal/redaction"
+	"github.com/Naenier/orynelo/internal/secureio"
 )
 
 // Desktop window defaults and minimum responsive dimensions.
@@ -96,7 +96,7 @@ func Run(ctx context.Context, backend Backend, info buildinfo.Info) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	fyneApp := app.NewWithID("io.github.naenier.opsdoctor")
+	fyneApp := app.NewWithID("io.github.naenier.orynelo")
 	fyneApp.SetIcon(fyne.NewStaticResource("Icon.png", appassets.IconPNG()))
 	texts := localization.English{}
 	cfg := application.DefaultConfig()

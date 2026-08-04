@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
-	"github.com/Naenier/opsdoctor/internal/privacy"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/privacy"
 )
 
 func TestRenderJSONSchemaAndPrivacy(t *testing.T) {
@@ -17,7 +17,7 @@ func TestRenderJSONSchemaAndPrivacy(t *testing.T) {
 	diagnosis.Target.Normalized = diagnosis.Target.Original
 	diagnosis.Target.RequestURL = "https://example.com/?token=top-secret"
 	diagnosis.Options.Target = "https://alice:password@example.com/?token=top-secret"
-	diagnosis.Options.UserAgent = "OpsDoctor token=user-agent-secret"
+	diagnosis.Options.UserAgent = "Orynelo token=user-agent-secret"
 	diagnosis.Checks[0].Evidence[0].Details["unsafe"] = "https://alice:password@example.com/?api_key=top-secret"
 	diagnosis.Checks[0].Evidence[0].Details["responseHeader.Authorization"] = "Bearer namespaced-report-secret"
 	output, err := Render(diagnosis, FormatJSON)
@@ -50,7 +50,7 @@ func TestRenderStrictAnonymizationIsOptIn(t *testing.T) {
 	diagnosis.Target.Host = "service.internal"
 	diagnosis.Target.Path = "/private/customer/42"
 	diagnosis.Checks[0].Evidence[0].Details["remoteIp"] = "10.2.3.4"
-	diagnosis.Checks[0].Evidence[0].Details["logPath"] = "/home/alice/.local/share/opsdoctor/app.log"
+	diagnosis.Checks[0].Evidence[0].Details["logPath"] = "/home/alice/.local/share/orynelo/app.log"
 	diagnosis.Checks[0].Evidence[0].Details["error"] = "lookup backend01: no such host"
 
 	standard, err := Render(diagnosis, FormatJSON, privacy.ModeStandard)
@@ -208,7 +208,7 @@ func TestRenderMarkdownAndParseFormat(t *testing.T) {
 	}
 	text := string(output)
 	for _, expected := range []string{
-		"# OpsDoctor diagnostic report",
+		"# Orynelo diagnostic report",
 		"## Target reachable with application-level error",
 		"### HTTP request — WARNING",
 		"## Recommended next actions",

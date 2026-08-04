@@ -5,11 +5,11 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/Naenier/opsdoctor/internal/application"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
-	"github.com/Naenier/opsdoctor/internal/gui/presenter"
-	"github.com/Naenier/opsdoctor/internal/gui/taskrunner"
-	"github.com/Naenier/opsdoctor/internal/privacy"
+	"github.com/Naenier/orynelo/internal/application"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/gui/presenter"
+	"github.com/Naenier/orynelo/internal/gui/taskrunner"
+	"github.com/Naenier/orynelo/internal/privacy"
 )
 
 var errCoordinatorBackendRequired = errors.New("gui coordinator: backend is nil")

@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Naenier/opsdoctor/internal/diagnostics"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
-	"github.com/Naenier/opsdoctor/internal/privacy"
-	"github.com/Naenier/opsdoctor/internal/redaction"
+	"github.com/Naenier/orynelo/internal/diagnostics"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/privacy"
+	"github.com/Naenier/orynelo/internal/redaction"
 )
 
 type fakeRunner struct {
@@ -98,11 +98,11 @@ func TestServiceDiagnoseAddsBuildAndPersists(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.History.MaxEntries = 42
-	cfg.Network.UserAgent = "OpsDoctor-Test/1"
+	cfg.Network.UserAgent = "Orynelo-Test/1"
 	cfg.Diagnostics.CertificateWarningThreshold = 7 * 24 * time.Hour
 	runner := &fakeRunner{diagnosis: model.Diagnosis{
 		ID:      "diagnosis-1",
-		Options: model.DiagnoseOptions{UserAgent: "OpsDoctor token=persisted-user-agent-secret"},
+		Options: model.DiagnoseOptions{UserAgent: "Orynelo token=persisted-user-agent-secret"},
 		Summary: model.Summary{Status: model.StatusPassed},
 	}}
 	persistence := &fakePersistence{}
@@ -133,7 +133,7 @@ func TestServiceDiagnoseAddsBuildAndPersists(t *testing.T) {
 	if persistence.saveLimit != 42 {
 		t.Errorf("history limit = %d, want 42", persistence.saveLimit)
 	}
-	if runner.options.UserAgent != "OpsDoctor-Test/1" ||
+	if runner.options.UserAgent != "Orynelo-Test/1" ||
 		runner.options.CertificateWarningThreshold != 7*24*time.Hour {
 		t.Errorf("config-backed diagnostic options = %+v", runner.options)
 	}
@@ -152,7 +152,7 @@ func TestServiceDiagnoseRequestResolvesEffectiveOptionsOnce(t *testing.T) {
 	cfg.Diagnostics.CheckTimeout = 8 * time.Second
 	cfg.Diagnostics.MaxRedirects = 9
 	cfg.Network.UseSystemProxy = false
-	cfg.Network.UserAgent = "OpsDoctor/service-config"
+	cfg.Network.UserAgent = "Orynelo/service-config"
 	profile := model.Profile{
 		Name:         "saved",
 		Target:       "profile.example:443",
@@ -195,7 +195,7 @@ func TestServiceDiagnoseRequestResolvesEffectiveOptionsOnce(t *testing.T) {
 		!runner.options.EnableTLS ||
 		runner.options.MaxRedirects != 3 ||
 		runner.options.Method != "HEAD" ||
-		runner.options.UserAgent != "OpsDoctor/service-config" {
+		runner.options.UserAgent != "Orynelo/service-config" {
 		t.Fatalf("runner received non-effective options: %+v", runner.options)
 	}
 	if diagnosis.Build != (model.BuildInfo{}) {

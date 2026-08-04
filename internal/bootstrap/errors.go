@@ -1,7 +1,7 @@
 package bootstrap
 
 import (
-	"github.com/Naenier/opsdoctor/internal/application"
+	"github.com/Naenier/orynelo/internal/application"
 )
 
 // bootstrapBoundaryError assigns operation-specific categories to otherwise

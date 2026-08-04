@@ -13,12 +13,12 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/Naenier/opsdoctor/internal/buildinfo"
-	"github.com/Naenier/opsdoctor/internal/gui/localization"
+	"github.com/Naenier/orynelo/internal/buildinfo"
+	"github.com/Naenier/orynelo/internal/gui/localization"
 )
 
 const (
-	repositoryURL = "https://github.com/Naenier/opsdoctor"
+	repositoryURL = "https://github.com/Naenier/orynelo"
 	issueURL      = repositoryURL + "/issues/new"
 	licenseURL    = repositoryURL + "/blob/main/LICENSE"
 	aboutMaxWidth = 920

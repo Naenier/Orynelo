@@ -15,12 +15,12 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/Naenier/opsdoctor/internal/application"
-	"github.com/Naenier/opsdoctor/internal/buildinfo"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
-	"github.com/Naenier/opsdoctor/internal/privacy"
-	"github.com/Naenier/opsdoctor/internal/report"
-	"github.com/Naenier/opsdoctor/internal/secureio"
+	"github.com/Naenier/orynelo/internal/application"
+	"github.com/Naenier/orynelo/internal/buildinfo"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/privacy"
+	"github.com/Naenier/orynelo/internal/report"
+	"github.com/Naenier/orynelo/internal/secureio"
 )
 
 const (
@@ -63,7 +63,7 @@ func (e *ExitError) Error() string {
 // Unwrap returns the underlying application error.
 func (e *ExitError) Unwrap() error { return e.Err }
 
-// NewRoot builds the complete opsdoctor command tree.
+// NewRoot builds the complete orynelo command tree.
 func NewRoot(options Options) *cobra.Command {
 	if options.Stdout == nil {
 		options.Stdout = io.Discard
@@ -72,7 +72,7 @@ func NewRoot(options Options) *cobra.Command {
 		options.Stderr = io.Discard
 	}
 	root := &cobra.Command{
-		Use:           "opsdoctor",
+		Use:           "orynelo",
 		Short:         "Evidence-based network reachability diagnostics",
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -572,7 +572,7 @@ func newVersion(info buildinfo.Info) *cobra.Command {
 			}
 			_, err := fmt.Fprintf(
 				command.OutOrStdout(),
-				"OpsDoctor %s\ncommit: %s\nbuilt: %s\ndirty: %t\ngo: %s\nplatform: %s/%s\n",
+				"Orynelo %s\ncommit: %s\nbuilt: %s\ndirty: %t\ngo: %s\nplatform: %s/%s\n",
 				info.Version,
 				info.Commit,
 				info.BuildDate,

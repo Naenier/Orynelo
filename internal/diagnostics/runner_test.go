@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	httpcheck "github.com/Naenier/opsdoctor/internal/diagnostics/checks/http"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/engine"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
+	httpcheck "github.com/Naenier/orynelo/internal/diagnostics/checks/http"
+	"github.com/Naenier/orynelo/internal/diagnostics/engine"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
 )
 
 type passingCheck struct{}
@@ -664,7 +664,7 @@ func TestRunnerRejectsUnsafeUserAgentAndThreshold(t *testing.T) {
 		{
 			name: "header injection",
 			mutate: func(options *model.DiagnoseOptions) {
-				options.UserAgent = "OpsDoctor\r\nX-Evil: true"
+				options.UserAgent = "Orynelo\r\nX-Evil: true"
 			},
 			code: "INVALID_USER_AGENT",
 		},

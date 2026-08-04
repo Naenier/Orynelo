@@ -6,7 +6,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
 )
 
 type fakeDiscoverer struct {

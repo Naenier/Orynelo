@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
 )
 
 // Check confirms the canonical target passed into the pipeline.

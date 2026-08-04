@@ -14,8 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	environmentcheck "github.com/Naenier/opsdoctor/internal/diagnostics/checks/environment"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
+	environmentcheck "github.com/Naenier/orynelo/internal/diagnostics/checks/environment"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
 )
 
 type roundTripFunc func(*stdhttp.Request) (*stdhttp.Response, error)
@@ -108,7 +108,7 @@ func TestCheckKeepsHTTPErrorAsApplicationWarning(t *testing.T) {
 		})
 	}
 	options := model.DefaultDiagnoseOptions("http://example.com")
-	options.UserAgent = "OpsDoctor-test/1"
+	options.UserAgent = "Orynelo-test/1"
 	state := model.NewState(model.Target{
 		Kind:       model.TargetHTTP,
 		Host:       "example.com",
@@ -247,7 +247,7 @@ func TestCheckDetectsRedirectLoop(t *testing.T) {
 			if request.URL.Path == "/b" {
 				location = "/a"
 			}
-			if got := request.Header.Get("User-Agent"); got != "OpsDoctor-test/1" {
+			if got := request.Header.Get("User-Agent"); got != "Orynelo-test/1" {
 				t.Errorf("User-Agent = %q", got)
 			}
 			return &stdhttp.Response{
@@ -261,7 +261,7 @@ func TestCheckDetectsRedirectLoop(t *testing.T) {
 		})
 	}
 	options := model.DefaultDiagnoseOptions("http://example.com/a")
-	options.UserAgent = "OpsDoctor-test/1"
+	options.UserAgent = "Orynelo-test/1"
 	state := model.NewState(model.Target{
 		Kind:       model.TargetHTTP,
 		Host:       "example.com",

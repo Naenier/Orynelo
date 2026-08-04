@@ -254,7 +254,7 @@ func DefaultDiagnoseOptions(target string) DiagnoseOptions {
 		MaxRedirectLocationBytes:    8 << 10,
 		Method:                      "GET",
 		ReportVerbosity:             ReportVerbosityNormal,
-		UserAgent:                   "OpsDoctor/diagnostic",
+		UserAgent:                   "Orynelo/diagnostic",
 		CertificateWarningThreshold: 30 * 24 * time.Hour,
 		MaxConcurrency:              4,
 		BodyLimit:                   64 << 10,

@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Naenier/opsdoctor/internal/application"
-	"github.com/Naenier/opsdoctor/internal/buildinfo"
-	"github.com/Naenier/opsdoctor/internal/config"
-	"github.com/Naenier/opsdoctor/internal/platform"
+	"github.com/Naenier/orynelo/internal/application"
+	"github.com/Naenier/orynelo/internal/buildinfo"
+	"github.com/Naenier/orynelo/internal/config"
+	"github.com/Naenier/orynelo/internal/platform"
 )
 
 type runtimeTestConfigStore struct {
@@ -41,8 +41,8 @@ func successfulRuntimeOpeners() runtimeOpeners {
 		DataDir:      "/data",
 		StateDir:     "/state",
 		ConfigFile:   "/config/config.yaml",
-		DatabaseFile: "/data/opsdoctor.db",
-		LogFile:      "/state/opsdoctor.log",
+		DatabaseFile: "/data/orynelo.db",
+		LogFile:      "/state/orynelo.log",
 	}
 	return runtimeOpeners{
 		resolvePaths: func() (platform.Paths, error) { return paths, nil },

@@ -1,5 +1,5 @@
 // Package components contains reusable, accessible Fyne widgets used across
-// OpsDoctor screens.
+// Orynelo screens.
 package components
 
 import (
@@ -12,7 +12,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/Naenier/opsdoctor/internal/gui/localization"
+	"github.com/Naenier/orynelo/internal/gui/localization"
 )
 
 var (

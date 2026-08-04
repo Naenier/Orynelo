@@ -1,6 +1,6 @@
 # Security design
 
-OpsDoctor processes untrusted targets, environment values, configuration,
+Orynelo processes untrusted targets, environment values, configuration,
 network responses, certificates, and report paths. Its security posture is to
 collect the minimum evidence needed for diagnosis while bounding work and
 keeping data local.
@@ -12,7 +12,7 @@ For confidential vulnerability reports, follow
 
 ```mermaid
 flowchart LR
-    USER["User input and report path"] --> APP["OpsDoctor process"]
+    USER["User input and report path"] --> APP["Orynelo process"]
     ENV["Proxy environment"] --> APP
     CONFIG["Local config and database"] <--> APP
     APP --> NET["DNS and remote services"]
@@ -31,7 +31,7 @@ The process does not assume that:
 
 ## Privacy properties
 
-OpsDoctor has:
+Orynelo has:
 
 - no telemetry or analytics;
 - no cloud account integration;
@@ -144,7 +144,7 @@ runtime failures do not panic the process.
 ## Command execution and privileges
 
 The base diagnostic path uses Go network APIs and does not require root.
-OpsDoctor does not accept or execute arbitrary user commands, invoke a shell,
+Orynelo does not accept or execute arbitrary user commands, invoke a shell,
 escalate privileges, or modify firewall, DNS, route, proxy, or certificate
 settings.
 
@@ -170,7 +170,7 @@ contents remain untouched.
 
 Desktop `file://` export uses the same helper and asks for confirmation before
 replacing an existing file. If the picker observed no file, a no-replace atomic
-install prevents a file created before commit from being overwritten. For other URI providers, OpsDoctor verifies a full
+install prevents a file created before commit from being overwritten. For other URI providers, Orynelo verifies a full
 write and close, reports the exact URI, and explicitly states that the provider
 does not guarantee atomic replacement.
 

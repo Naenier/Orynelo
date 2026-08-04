@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	targetcheck "github.com/Naenier/opsdoctor/internal/diagnostics/checks/target"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
-	"github.com/Naenier/opsdoctor/internal/privacy"
+	targetcheck "github.com/Naenier/orynelo/internal/diagnostics/checks/target"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/privacy"
 )
 
 const (

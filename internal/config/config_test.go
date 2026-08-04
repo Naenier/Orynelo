@@ -59,7 +59,7 @@ func TestValidate(t *testing.T) {
 		},
 		{
 			name:   "user agent injection",
-			mutate: func(c *Config) { c.Network.UserAgent = "OpsDoctor\r\nX-Evil: yes" },
+			mutate: func(c *Config) { c.Network.UserAgent = "Orynelo\r\nX-Evil: yes" },
 			want:   "userAgent",
 		},
 		{
@@ -99,7 +99,7 @@ func TestSaveLoadRoundTripAndPermissions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "config.yaml")
 	cfg := Default()
 	cfg.Diagnostics.DefaultTimeout = 42 * time.Second
-	cfg.Network.UserAgent = "OpsDoctor test"
+	cfg.Network.UserAgent = "Orynelo test"
 	if err := Save(path, cfg); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}

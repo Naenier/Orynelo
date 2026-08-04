@@ -11,9 +11,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Naenier/opsdoctor/internal/diagnostics"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
-	"github.com/Naenier/opsdoctor/internal/privacy"
+	"github.com/Naenier/orynelo/internal/diagnostics"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/privacy"
 )
 
 // DiagnosticRunner is implemented by the shared diagnostic core.

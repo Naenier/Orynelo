@@ -1,4 +1,4 @@
-# Contributing to OpsDoctor
+# Contributing to Orynelo
 
 Thank you for helping make network diagnosis safer and more useful. This guide
 covers changes to code, tests, documentation, and build tooling.
@@ -19,8 +19,8 @@ The module requires Go 1.26.5 or newer. Clone the existing repository and
 download verified module dependencies:
 
 ```bash
-git clone https://github.com/Naenier/opsdoctor.git
-cd opsdoctor
+git clone https://github.com/Naenier/orynelo.git
+cd orynelo
 go mod download
 go mod verify
 ```
@@ -92,7 +92,7 @@ push an annotated `v<SemVer>` tag:
 
 ```bash
 git fetch origin
-git tag -a vX.Y.Z <release-commit-sha> -m "OpsDoctor vX.Y.Z"
+git tag -a vX.Y.Z <release-commit-sha> -m "Orynelo vX.Y.Z"
 git push origin vX.Y.Z
 ```
 
@@ -102,9 +102,9 @@ are chosen manually:
 
 ```bash
 gh release create vX.Y.Z \
-  --repo Naenier/opsdoctor \
+  --repo Naenier/orynelo \
   --verify-tag \
-  --title "OpsDoctor vX.Y.Z" \
+  --title "Orynelo vX.Y.Z" \
   --notes-file /path/to/release-notes.md \
   --prerelease
 ```

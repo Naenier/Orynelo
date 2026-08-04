@@ -12,11 +12,11 @@ import (
 )
 
 const (
-	appDirUnix = "opsdoctor"
-	appDirGUI  = "OpsDoctor"
+	appDirUnix = "orynelo"
+	appDirGUI  = "Orynelo"
 )
 
-// Paths contains every persistent file location used by OpsDoctor.
+// Paths contains every persistent file location used by Orynelo.
 type Paths struct {
 	ConfigDir    string
 	DataDir      string
@@ -92,8 +92,8 @@ func PathsFor(goos, home string, lookup LookupEnv) (Paths, error) {
 		DataDir:      dataDir,
 		StateDir:     stateDir,
 		ConfigFile:   filepath.Join(configDir, "config.yaml"),
-		DatabaseFile: filepath.Join(dataDir, "opsdoctor.db"),
-		LogFile:      filepath.Join(stateDir, "opsdoctor.log"),
+		DatabaseFile: filepath.Join(dataDir, "orynelo.db"),
+		LogFile:      filepath.Join(stateDir, "orynelo.log"),
 	}, nil
 }
 

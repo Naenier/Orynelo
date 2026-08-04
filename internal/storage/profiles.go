@@ -9,7 +9,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
 )
 
 // CreateProfile stores reusable, redacted diagnostic settings.

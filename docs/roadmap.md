@@ -1,6 +1,6 @@
 # Roadmap
 
-OpsDoctor is organized around usable phases rather than inactive screens or
+Orynelo is organized around usable phases rather than inactive screens or
 commands. A feature appears in the CLI or desktop application only when its
 diagnostic path, evidence, cancellation, redaction, tests, and documentation
 work end to end.
@@ -41,7 +41,7 @@ Kubernetes service diagnosis is a future, separately delivered phase. The
 planned CLI starts with:
 
 ```bash
-opsdoctor kube service \
+orynelo kube service \
   --context my-cluster \
   --namespace default \
   --service api

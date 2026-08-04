@@ -1,4 +1,4 @@
-// Binary opsdoctor provides the command-line interface to the shared
+// Binary orynelo provides the command-line interface to the shared
 // diagnostic application service.
 package main
 
@@ -9,13 +9,13 @@ import (
 	"os/signal"
 	"sync"
 
-	"github.com/Naenier/opsdoctor/internal/application"
-	"github.com/Naenier/opsdoctor/internal/bootstrap"
-	"github.com/Naenier/opsdoctor/internal/buildinfo"
-	"github.com/Naenier/opsdoctor/internal/cli"
-	"github.com/Naenier/opsdoctor/internal/config"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
-	"github.com/Naenier/opsdoctor/internal/privacy"
+	"github.com/Naenier/orynelo/internal/application"
+	"github.com/Naenier/orynelo/internal/bootstrap"
+	"github.com/Naenier/orynelo/internal/buildinfo"
+	"github.com/Naenier/orynelo/internal/cli"
+	"github.com/Naenier/orynelo/internal/config"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/privacy"
 )
 
 // main translates the process context and command result into an exit status.
@@ -29,7 +29,7 @@ func run() int {
 	lazy := &lazyApplication{info: info}
 	defer func() {
 		if err := lazy.Close(); err != nil {
-			_, _ = fmt.Fprintln(os.Stderr, "Error closing OpsDoctor:", err)
+			_, _ = fmt.Fprintln(os.Stderr, "Error closing Orynelo:", err)
 		}
 	}()
 
