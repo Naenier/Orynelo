@@ -159,7 +159,7 @@ func createTemporary(root *os.Root) (*os.File, string, error) {
 	if _, err := rand.Read(suffix[:]); err != nil {
 		return nil, "", err
 	}
-	name := fmt.Sprintf(".opsdoctor-export-%x", suffix)
+	name := fmt.Sprintf(".orynelo-export-%x", suffix)
 	file, err := root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, "", err

@@ -4,12 +4,12 @@ GO ?= go
 GOLANGCI_LINT ?= golangci-lint
 DOCKER ?= docker
 
-MODULE := github.com/Naenier/opsdoctor
+MODULE := github.com/Naenier/orynelo
 VERSION ?= 0.2.0
 COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || printf '%s' unknown)
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 MODIFIED ?= $(shell if test -n "$$(git status --porcelain --untracked-files=normal 2>/dev/null)"; then printf '%s' true; else printf '%s' false; fi)
-IMAGE ?= opsdoctor:dev
+IMAGE ?= orynelo:dev
 GUI_TAGS ?= migrated_fynedo
 
 LDFLAGS := -s -w -buildid= \
@@ -52,17 +52,17 @@ build: build-cli build-gui ## Build both application entry points.
 
 build-cli: ## Build the command-line application.
 	mkdir -p bin
-	CGO_ENABLED=0 $(GO) build $(BUILD_FLAGS) -o bin/opsdoctor ./cmd/opsdoctor
+	CGO_ENABLED=0 $(GO) build $(BUILD_FLAGS) -o bin/orynelo ./cmd/orynelo
 
 build-gui: ## Build the desktop application for the current platform.
 	mkdir -p bin
-	$(GO) build -tags "$(GUI_TAGS)" $(BUILD_FLAGS) -o bin/opsdoctor-desktop ./cmd/opsdoctor-desktop
+	$(GO) build -tags "$(GUI_TAGS)" $(BUILD_FLAGS) -o bin/orynelo-desktop ./cmd/orynelo-desktop
 
 run-cli: ## Run the CLI; pass arguments with ARGS.
-	$(GO) run -ldflags "$(LDFLAGS)" ./cmd/opsdoctor $(ARGS)
+	$(GO) run -ldflags "$(LDFLAGS)" ./cmd/orynelo $(ARGS)
 
 run-gui: ## Run the desktop application.
-	$(GO) run -tags "$(GUI_TAGS)" -ldflags "$(LDFLAGS)" ./cmd/opsdoctor-desktop
+	$(GO) run -tags "$(GUI_TAGS)" -ldflags "$(LDFLAGS)" ./cmd/orynelo-desktop
 
 docker-build: ## Build the non-root CLI container image.
 	$(DOCKER) build \

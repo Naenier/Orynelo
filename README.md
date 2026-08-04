@@ -1,22 +1,22 @@
-# OpsDoctor
+# Orynelo
 
-OpsDoctor is an evidence-based network reachability diagnostic tool for
+Orynelo is an evidence-based network reachability diagnostic tool for
 DevOps engineers. It follows a connection from target parsing through proxy,
 DNS, route, TCP, TLS, and HTTP checks, then explains where the connection
 stopped and which observations support that conclusion.
 
 The project provides two interfaces over the same Go application layer:
 
-- `opsdoctor`, a scriptable CLI with text, JSON, and Markdown reports.
-- `opsdoctor-desktop`, a Fyne desktop application for interactive diagnosis,
+- `orynelo`, a scriptable CLI with text, JSON, and Markdown reports.
+- `orynelo-desktop`, a Fyne desktop application for interactive diagnosis,
   saved profiles, and local history.
 
-OpsDoctor does not capture packets, scan port ranges, change firewall or DNS
+Orynelo does not capture packets, scan port ranges, change firewall or DNS
 settings, elevate privileges, or upload diagnostic data.
 
 ## Project status
 
-OpsDoctor is under active development. The report schema is versioned, but
+Orynelo is under active development. The report schema is versioned, but
 commands and storage migrations may still change. Linux
 as the primary target, is the development platform. CI checks formatting,
 static analysis, tests, and CLI/desktop builds on Linux. macOS and Windows
@@ -64,11 +64,11 @@ See [architecture](docs/architecture.md) and the
 Go 1.26.5 or newer is required by the module.
 
 ```bash
-git clone https://github.com/Naenier/opsdoctor.git
-cd opsdoctor
+git clone https://github.com/Naenier/orynelo.git
+cd orynelo
 mkdir -p bin
-go build -o bin/opsdoctor ./cmd/opsdoctor
-./bin/opsdoctor diagnose https://example.com
+go build -o bin/orynelo ./cmd/orynelo
+./bin/orynelo diagnose https://example.com
 ```
 
 The diagnostic target above is an example for interactive use. Unit tests use
@@ -77,17 +77,17 @@ local test servers and do not require the public Internet.
 Useful CLI invocations:
 
 ```bash
-./bin/opsdoctor diagnose https://example.com
-./bin/opsdoctor diagnose git.example.internal:22
-./bin/opsdoctor diagnose https://example.com --ip-version 4
-./bin/opsdoctor diagnose https://example.com --format json
-./bin/opsdoctor diagnose https://example.com --format markdown --output report.md
-./bin/opsdoctor diagnose https://example.com --anonymize strict --output report.json
-./bin/opsdoctor diagnose https://example.com --allow-insecure-redirects
-./bin/opsdoctor diagnose https://example.com --allow-private-redirects
-./bin/opsdoctor version
-./bin/opsdoctor version --json
-./bin/opsdoctor completion bash
+./bin/orynelo diagnose https://example.com
+./bin/orynelo diagnose git.example.internal:22
+./bin/orynelo diagnose https://example.com --ip-version 4
+./bin/orynelo diagnose https://example.com --format json
+./bin/orynelo diagnose https://example.com --format markdown --output report.md
+./bin/orynelo diagnose https://example.com --anonymize strict --output report.json
+./bin/orynelo diagnose https://example.com --allow-insecure-redirects
+./bin/orynelo diagnose https://example.com --allow-private-redirects
+./bin/orynelo version
+./bin/orynelo version --json
+./bin/orynelo completion bash
 ```
 
 The CLI exit codes are:
@@ -121,7 +121,7 @@ the wrapped technical cause is never included in the JSON envelope.
 
 ## Desktop application
 
-![OpsDoctor desktop application](docs/images/opsdoctor-desktop.png)
+![Orynelo desktop application](docs/images/orynelo-desktop.png)
 
 Install the native libraries required to compile Fyne for your distribution.
 Go 1.26.5 or newer must also be available.
@@ -173,7 +173,7 @@ Then build or run the desktop entry point:
 
 ```bash
 make build-gui
-./bin/opsdoctor-desktop
+./bin/orynelo-desktop
 
 # or
 make run-gui
@@ -231,8 +231,8 @@ go fmt ./...
 go vet ./...
 go test ./...
 go test -race ./...
-go build -o bin\opsdoctor.exe .\cmd\opsdoctor
-go build -tags migrated_fynedo -o bin\opsdoctor-desktop.exe .\cmd\opsdoctor-desktop
+go build -o bin\orynelo.exe .\cmd\orynelo
+go build -tags migrated_fynedo -o bin\orynelo-desktop.exe .\cmd\orynelo-desktop
 ```
 
 Native Fyne build dependencies are still required for the desktop binary.
@@ -248,8 +248,8 @@ and the GitHub Release title, notes, and prerelease/latest state. The tag
 workflow only builds and attaches these Linux x86_64 assets to that existing
 release:
 
-- `opsdoctor_<version>_Linux_x86_64.tar.gz`;
-- `opsdoctor-desktop_<version>_Linux_x86_64.tar.gz`;
+- `orynelo_<version>_Linux_x86_64.tar.gz`;
+- `orynelo-desktop_<version>_Linux_x86_64.tar.gz`;
 - `SHA256SUMS.txt`.
 
 The workflow never creates a release or changes its title or description.
@@ -266,8 +266,8 @@ The container contains only the CLI, CA certificates, and the minimal
 distroless runtime. It runs as a non-root user.
 
 ```bash
-docker build -t opsdoctor:dev .
-docker run --rm opsdoctor:dev diagnose https://example.com
+docker build -t orynelo:dev .
+docker run --rm orynelo:dev diagnose https://example.com
 ```
 
 Important: a container has its own network namespace, resolver configuration,
@@ -280,7 +280,7 @@ Container history is ephemeral by default. Mount a named volume at
 removal:
 
 ```bash
-docker run --rm -v opsdoctor-home:/home/nonroot opsdoctor:dev \
+docker run --rm -v orynelo-home:/home/nonroot orynelo:dev \
   diagnose https://example.com
 ```
 
@@ -302,9 +302,9 @@ Linux paths follow the XDG base-directory conventions:
 
 | Data | Default path |
 | --- | --- |
-| Configuration | `~/.config/opsdoctor/config.yaml` |
-| History and profiles | `~/.local/share/opsdoctor/opsdoctor.db` |
-| Log | `~/.local/state/opsdoctor/opsdoctor.log` |
+| Configuration | `~/.config/orynelo/config.yaml` |
+| History and profiles | `~/.local/share/orynelo/orynelo.db` |
+| Log | `~/.local/state/orynelo/orynelo.log` |
 
 `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` are honored. Native
 application-data locations are used on macOS and Windows. Configuration,
@@ -313,7 +313,7 @@ platform supports POSIX modes.
 
 ## Privacy and security
 
-OpsDoctor has no telemetry, analytics, cloud account integration, automatic
+Orynelo has no telemetry, analytics, cloud account integration, automatic
 uploads, or secret storage. Diagnostic data remains on the computer unless a
 user explicitly exports or shares it.
 
@@ -340,4 +340,4 @@ targets or reporting a security issue.
 
 ## License
 
-OpsDoctor is available under the [MIT License](LICENSE).
+Orynelo is available under the [MIT License](LICENSE).

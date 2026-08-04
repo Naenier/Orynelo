@@ -82,7 +82,7 @@ func TestWriteFileRenameFailurePreservesDestinationAndRemovesTemporary(t *testin
 		t.Fatal(readDirErr)
 	}
 	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), ".opsdoctor-export-") {
+		if strings.HasPrefix(entry.Name(), ".orynelo-export-") {
 			t.Fatalf("temporary export was not removed: %q", entry.Name())
 		}
 	}

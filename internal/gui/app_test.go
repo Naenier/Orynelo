@@ -14,14 +14,14 @@ import (
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/Naenier/opsdoctor/internal/application"
-	"github.com/Naenier/opsdoctor/internal/buildinfo"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
-	"github.com/Naenier/opsdoctor/internal/gui/components"
-	"github.com/Naenier/opsdoctor/internal/gui/localization"
-	"github.com/Naenier/opsdoctor/internal/gui/presenter"
-	"github.com/Naenier/opsdoctor/internal/gui/screens"
-	"github.com/Naenier/opsdoctor/internal/gui/taskrunner"
+	"github.com/Naenier/orynelo/internal/application"
+	"github.com/Naenier/orynelo/internal/buildinfo"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/gui/components"
+	"github.com/Naenier/orynelo/internal/gui/localization"
+	"github.com/Naenier/orynelo/internal/gui/presenter"
+	"github.com/Naenier/orynelo/internal/gui/screens"
+	"github.com/Naenier/orynelo/internal/gui/taskrunner"
 )
 
 func TestDiagnoseRequestCarriesExplicitOverridesToApplicationResolver(t *testing.T) {

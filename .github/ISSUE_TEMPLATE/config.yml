@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Report a security vulnerability
-    url: https://github.com/Naenier/opsdoctor/security/advisories/new
+    url: https://github.com/Naenier/orynelo/security/advisories/new
     about: Report vulnerabilities and sensitive diagnostic-data exposure privately.
   - name: Ask a usage question
-    url: https://github.com/Naenier/opsdoctor/discussions
-    about: Ask non-sensitive questions about using or developing OpsDoctor.
+    url: https://github.com/Naenier/orynelo/discussions
+    about: Ask non-sensitive questions about using or developing Orynelo.

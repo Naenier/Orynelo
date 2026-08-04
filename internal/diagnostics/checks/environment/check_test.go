@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
 )
 
 func TestCheckProxySelectionAndSanitization(t *testing.T) {

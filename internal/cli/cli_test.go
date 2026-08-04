@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Naenier/opsdoctor/internal/application"
-	"github.com/Naenier/opsdoctor/internal/buildinfo"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
-	"github.com/Naenier/opsdoctor/internal/privacy"
+	"github.com/Naenier/orynelo/internal/application"
+	"github.com/Naenier/orynelo/internal/buildinfo"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/privacy"
 )
 
 type fakeApplication struct {

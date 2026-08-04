@@ -9,7 +9,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
 )
 
 func TestIntegrationLoopbackHTTPPipeline(t *testing.T) {
@@ -17,7 +17,7 @@ func TestIntegrationLoopbackHTTPPipeline(t *testing.T) {
 		if request.UserAgent() == "" {
 			t.Error("request did not include a user agent")
 		}
-		writer.Header().Set("X-OpsDoctor-Test", "loopback")
+		writer.Header().Set("X-Orynelo-Test", "loopback")
 		writer.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()

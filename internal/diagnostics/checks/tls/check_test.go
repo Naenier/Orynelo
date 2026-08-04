@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
 )
 
 func TestClassifyVerificationError(t *testing.T) {

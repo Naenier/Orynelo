@@ -7,8 +7,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Naenier/opsdoctor/internal/platform"
-	"github.com/Naenier/opsdoctor/internal/redaction"
+	"github.com/Naenier/orynelo/internal/platform"
+	"github.com/Naenier/orynelo/internal/redaction"
 )
 
 // Logging owns the application logger, dynamic level, and optional log file.

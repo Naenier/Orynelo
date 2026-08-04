@@ -11,8 +11,8 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
-	"github.com/Naenier/opsdoctor/internal/redaction"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/redaction"
 	"golang.org/x/net/idna"
 )
 

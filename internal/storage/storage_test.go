@@ -11,13 +11,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
 )
 
 func TestMigrationsAndDatabasePermissions(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "private", "opsdoctor.db")
+	path := filepath.Join(t.TempDir(), "private", "orynelo.db")
 	store, err := Open(path)
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
@@ -84,7 +84,7 @@ func TestMigrationsAndDatabasePermissions(t *testing.T) {
 func TestMigrationFromVersionOne(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "opsdoctor.db")
+	path := filepath.Join(t.TempDir(), "orynelo.db")
 	if err := prepareDatabaseFile(path); err != nil {
 		t.Fatalf("prepareDatabaseFile() error = %v", err)
 	}
@@ -138,7 +138,7 @@ func TestMigrationFromVersionOne(t *testing.T) {
 func TestRejectsNewerDatabase(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "opsdoctor.db")
+	path := filepath.Join(t.TempDir(), "orynelo.db")
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
@@ -468,7 +468,7 @@ func TestProfileValidation(t *testing.T) {
 func TestCloseIsIdempotentAndDataPersists(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "opsdoctor.db")
+	path := filepath.Join(t.TempDir(), "orynelo.db")
 	store, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -527,7 +527,7 @@ func testDiagnosis(id string, started time.Time) model.Diagnosis {
 		},
 		Options: model.DiagnoseOptions{
 			Target:       "https://example.test/?access_token=option-secret",
-			UserAgent:    "OpsDoctor token=user-agent-secret",
+			UserAgent:    "Orynelo token=user-agent-secret",
 			Timeout:      15 * time.Second,
 			CheckTimeout: 5 * time.Second,
 			IPVersion:    model.IPVersionAuto,

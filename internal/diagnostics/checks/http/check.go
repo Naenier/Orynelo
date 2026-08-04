@@ -19,9 +19,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Naenier/opsdoctor/internal/diagnostics/checks/environment"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
-	"github.com/Naenier/opsdoctor/internal/redaction"
+	"github.com/Naenier/orynelo/internal/diagnostics/checks/environment"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/redaction"
 )
 
 const (
@@ -73,7 +73,7 @@ type Check struct {
 	Resolver         Resolver
 	DialContext      DialContextFunc
 	// RequestHeaders is an internal test seam. Production constructors leave
-	// it nil because OpsDoctor never accepts arbitrary outbound headers.
+	// it nil because Orynelo never accepts arbitrary outbound headers.
 	RequestHeaders stdhttp.Header
 	Now            func() time.Time
 }

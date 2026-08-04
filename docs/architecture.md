@@ -1,6 +1,6 @@
 # Architecture
 
-OpsDoctor separates network diagnosis from delivery mechanisms and
+Orynelo separates network diagnosis from delivery mechanisms and
 infrastructure. The CLI and desktop application are adapters over one
 application layer and one diagnostic core.
 
@@ -8,8 +8,8 @@ application layer and one diagnostic core.
 
 ```mermaid
 flowchart TD
-    CLI["cmd/opsdoctor + internal/cli"]
-    GUI["cmd/opsdoctor-desktop + internal/gui"]
+    CLI["cmd/orynelo + internal/cli"]
+    GUI["cmd/orynelo-desktop + internal/gui"]
     TASKS["internal/gui/taskrunner"]
     BOOT["internal/bootstrap"]
     APP["internal/application"]

@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
-	"github.com/Naenier/opsdoctor/internal/privacy"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/privacy"
 )
 
 // Format is a supported report encoding.
@@ -102,7 +102,7 @@ func writeJSON(writer io.Writer, diagnosis model.Diagnosis) error {
 }
 
 func writeText(writer io.Writer, diagnosis model.Diagnosis) error {
-	if _, err := fmt.Fprintln(writer, "OpsDoctor diagnostic report"); err != nil {
+	if _, err := fmt.Fprintln(writer, "Orynelo diagnostic report"); err != nil {
 		return err
 	}
 	lines := []string{
@@ -199,7 +199,7 @@ func writeText(writer io.Writer, diagnosis model.Diagnosis) error {
 }
 
 func writeMarkdown(writer io.Writer, diagnosis model.Diagnosis) error {
-	if _, err := fmt.Fprintln(writer, "# OpsDoctor diagnostic report"); err != nil {
+	if _, err := fmt.Fprintln(writer, "# Orynelo diagnostic report"); err != nil {
 		return err
 	}
 	header := fmt.Sprintf(

@@ -1,4 +1,4 @@
-module github.com/Naenier/opsdoctor
+module github.com/Naenier/orynelo
 
 go 1.26.5
 

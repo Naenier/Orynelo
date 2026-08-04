@@ -25,7 +25,7 @@ body:
       label: Reproduction
       description: Provide the smallest deterministic steps using a local or redacted target.
       placeholder: |
-        1. Run `opsdoctor diagnose ...`
+        1. Run `orynelo diagnose ...`
         2. Select ...
         3. Observe ...
     validations:
@@ -34,8 +34,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: OpsDoctor version
-      description: Paste the version from `opsdoctor version`; remove nothing except local paths.
+      label: Orynelo version
+      description: Paste the version from `orynelo version`; remove nothing except local paths.
       placeholder: "dev"
     validations:
       required: true

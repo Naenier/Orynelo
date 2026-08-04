@@ -7,7 +7,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/Naenier/opsdoctor/internal/gui/localization"
+	"github.com/Naenier/orynelo/internal/gui/localization"
 )
 
 // TimingSegment is one measured stage in a diagnostic request.

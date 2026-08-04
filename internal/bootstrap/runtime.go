@@ -6,15 +6,15 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/Naenier/opsdoctor/internal/application"
-	"github.com/Naenier/opsdoctor/internal/buildinfo"
-	"github.com/Naenier/opsdoctor/internal/config"
-	"github.com/Naenier/opsdoctor/internal/diagnostics"
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
-	"github.com/Naenier/opsdoctor/internal/platform"
-	"github.com/Naenier/opsdoctor/internal/privacy"
-	"github.com/Naenier/opsdoctor/internal/report"
-	"github.com/Naenier/opsdoctor/internal/storage"
+	"github.com/Naenier/orynelo/internal/application"
+	"github.com/Naenier/orynelo/internal/buildinfo"
+	"github.com/Naenier/orynelo/internal/config"
+	"github.com/Naenier/orynelo/internal/diagnostics"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/platform"
+	"github.com/Naenier/orynelo/internal/privacy"
+	"github.com/Naenier/orynelo/internal/report"
+	"github.com/Naenier/orynelo/internal/storage"
 )
 
 // Runtime owns the common application service and local resources.

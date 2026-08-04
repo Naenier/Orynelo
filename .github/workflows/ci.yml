@@ -57,4 +57,4 @@ jobs:
       - name: Build applications
         run: |
           make build
-          ./bin/opsdoctor version --json
+          ./bin/orynelo version --json

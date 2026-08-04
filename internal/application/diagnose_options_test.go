@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
-	"github.com/Naenier/opsdoctor/internal/privacy"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/privacy"
 )
 
 func TestResolveDiagnoseOptionsAppliesConfigOverDefaults(t *testing.T) {
@@ -22,7 +22,7 @@ func TestResolveDiagnoseOptionsAppliesConfigOverDefaults(t *testing.T) {
 	config.Diagnostics.PreferredIPVersion = "6"
 	config.Diagnostics.CertificateWarningThreshold = 14 * 24 * time.Hour
 	config.Network.UseSystemProxy = false
-	config.Network.UserAgent = "OpsDoctor/config-test"
+	config.Network.UserAgent = "Orynelo/config-test"
 
 	got, err := ResolveDiagnoseOptions(config, nil, DiagnoseOverrides{
 		Target: optionPointer("https://config.example/status"),
@@ -37,7 +37,7 @@ func TestResolveDiagnoseOptionsAppliesConfigOverDefaults(t *testing.T) {
 		got.IPVersion != model.IPVersion6 ||
 		!got.NoProxy ||
 		got.MaxRedirects != 7 ||
-		got.UserAgent != "OpsDoctor/config-test" ||
+		got.UserAgent != "Orynelo/config-test" ||
 		got.CertificateWarningThreshold != 14*24*time.Hour {
 		t.Fatalf("config-backed options = %+v", got)
 	}
@@ -131,7 +131,7 @@ func TestResolveDiagnoseOptionsAppliesExplicitOverridesLast(t *testing.T) {
 		ActualHTTPReserve:           optionPointer(time.Second),
 		Method:                      optionPointer(" options "),
 		ReportVerbosity:             optionPointer(model.ReportVerbosityVerbose),
-		UserAgent:                   optionPointer("OpsDoctor/override"),
+		UserAgent:                   optionPointer("Orynelo/override"),
 		CertificateWarningThreshold: optionPointer(48 * time.Hour),
 		MaxConcurrency:              optionPointer(8),
 		BodyLimit:                   optionPointer(int64(2048)),
@@ -155,7 +155,7 @@ func TestResolveDiagnoseOptionsAppliesExplicitOverridesLast(t *testing.T) {
 		ActualHTTPReserve:           time.Second,
 		Method:                      "OPTIONS",
 		ReportVerbosity:             model.ReportVerbosityVerbose,
-		UserAgent:                   "OpsDoctor/override",
+		UserAgent:                   "Orynelo/override",
 		CertificateWarningThreshold: 48 * time.Hour,
 		MaxConcurrency:              8,
 		BodyLimit:                   2048,

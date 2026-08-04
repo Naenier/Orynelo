@@ -1,4 +1,4 @@
-// Binary opsdoctor-desktop provides the graphical interface to the shared
+// Binary orynelo-desktop provides the graphical interface to the shared
 // diagnostic application service.
 package main
 
@@ -8,9 +8,9 @@ import (
 	"os"
 	"os/signal"
 
-	"github.com/Naenier/opsdoctor/internal/bootstrap"
-	"github.com/Naenier/opsdoctor/internal/buildinfo"
-	"github.com/Naenier/opsdoctor/internal/gui"
+	"github.com/Naenier/orynelo/internal/bootstrap"
+	"github.com/Naenier/orynelo/internal/buildinfo"
+	"github.com/Naenier/orynelo/internal/gui"
 )
 
 // main exits the process with the desktop runtime result.
@@ -23,12 +23,12 @@ func run() int {
 	info := buildinfo.Current()
 	runtime, err := bootstrap.OpenRuntime(info)
 	if err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, "Could not start OpsDoctor Desktop:", err)
+		_, _ = fmt.Fprintln(os.Stderr, "Could not start Orynelo Desktop:", err)
 		return 1
 	}
 	defer func() {
 		if err := runtime.Close(); err != nil {
-			_, _ = fmt.Fprintln(os.Stderr, "Error closing OpsDoctor Desktop:", err)
+			_, _ = fmt.Fprintln(os.Stderr, "Error closing Orynelo Desktop:", err)
 		}
 	}()
 

@@ -85,9 +85,9 @@ jobs:
             printf 'commit=%s\n' "$commit"
             printf 'build_date=%s\n' "$build_date"
             printf 'source_date_epoch=%s\n' "$source_date_epoch"
-            printf 'cli_dir=opsdoctor_%s_Linux_x86_64\n' "$version"
-            printf 'cli_asset=opsdoctor_%s_Linux_x86_64.tar.gz\n' "$version"
-            printf 'desktop_asset=opsdoctor-desktop_%s_Linux_x86_64.tar.gz\n' "$version"
+            printf 'cli_dir=orynelo_%s_Linux_x86_64\n' "$version"
+            printf 'cli_asset=orynelo_%s_Linux_x86_64.tar.gz\n' "$version"
+            printf 'desktop_asset=orynelo-desktop_%s_Linux_x86_64.tar.gz\n' "$version"
           } >> "$GITHUB_OUTPUT"
 
       - name: Install Linux desktop packaging dependencies
@@ -122,7 +122,7 @@ jobs:
             COMMIT="$COMMIT" \
             BUILD_DATE="$BUILD_DATE" \
             MODIFIED=false
-          ./bin/opsdoctor version --json
+          ./bin/orynelo version --json
 
       - name: Package release assets
         env:
@@ -137,7 +137,7 @@ jobs:
           mkdir -p dist
           cli_stage="$RUNNER_TEMP/$CLI_DIR"
           mkdir -p "$cli_stage"
-          install -m 0755 bin/opsdoctor "$cli_stage/opsdoctor"
+          install -m 0755 bin/orynelo "$cli_stage/orynelo"
           install -m 0644 LICENSE README.md "$cli_stage/"
           tar \
             --sort=name \
@@ -152,7 +152,7 @@ jobs:
 
           ./scripts/package-desktop.sh \
             linux \
-            bin/opsdoctor-desktop \
+            bin/orynelo-desktop \
             "dist/$DESKTOP_ASSET"
 
           desktop_stage="$RUNNER_TEMP/desktop-stage"

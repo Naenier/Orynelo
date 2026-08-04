@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/Naenier/opsdoctor/internal/redaction"
+	"github.com/Naenier/orynelo/internal/redaction"
 )
 
 // ErrorCategory describes the recovery boundary for an application error.

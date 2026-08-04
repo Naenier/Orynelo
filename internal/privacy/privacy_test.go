@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Naenier/opsdoctor/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/diagnostics/model"
 )
 
 func TestStandardDiagnosisProjectsEveryPersistentField(t *testing.T) {
@@ -25,7 +25,7 @@ func TestStandardDiagnosisProjectsEveryPersistentField(t *testing.T) {
 		},
 		Options: model.DiagnoseOptions{
 			Target:    "https://option-user:option-pass@api.example.test/?api_key=option-secret",
-			UserAgent: "OpsDoctor/1 token=user-agent-secret",
+			UserAgent: "Orynelo/1 token=user-agent-secret",
 		},
 		StartedAt:  started,
 		FinishedAt: started.Add(time.Second),
@@ -113,11 +113,11 @@ func TestStrictProjectionHidesAdditionalIdentifyingContext(t *testing.T) {
 		},
 		Options: model.DiagnoseOptions{Target: "https://10.1.2.3/admin?mode=debug"},
 		Summary: model.Summary{
-			Description: "lookup backend01: no such host; dial tcp backend02:443 failed; connected to 192.168.1.20 and fd00::beef; logs are /home/alice/.local/share/opsdoctor/app.log, /usr/local/private/file, /data/customer/export, and /workspace/team/result",
+			Description: "lookup backend01: no such host; dial tcp backend02:443 failed; connected to 192.168.1.20 and fd00::beef; logs are /home/alice/.local/share/orynelo/app.log, /usr/local/private/file, /data/customer/export, and /workspace/team/result",
 		},
 		Checks: []model.CheckResult{{Evidence: []model.Evidence{{Details: map[string]string{
 			"remoteIp": "fd00::1234",
-			"path":     `C:\Users\Alice\AppData\Local\OpsDoctor\opsdoctor.db`,
+			"path":     `C:\Users\Alice\AppData\Local\Orynelo\orynelo.db`,
 		}}}}},
 	}
 

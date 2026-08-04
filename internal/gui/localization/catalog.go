@@ -355,7 +355,7 @@ func (English) Text(key Key) string {
 
 // english contains the complete built-in text catalog.
 var english = map[Key]string{
-	AppName: "OpsDoctor",
+	AppName: "Orynelo",
 
 	NavigationDiagnose: "Diagnose",
 	NavigationHistory:  "History",
@@ -572,7 +572,7 @@ var english = map[Key]string{
 	SettingsNetworkSubtitle:       "Connection defaults for HTTP requests",
 	SettingsHistorySubtitle:       "Local diagnostic run retention",
 	SettingsAppearanceSubtitle:    "Applied immediately; save to keep it",
-	SettingsLoggingSubtitle:       "Tools for troubleshooting OpsDoctor",
+	SettingsLoggingSubtitle:       "Tools for troubleshooting Orynelo",
 	SettingsPrivacySubtitle:       "No accounts, cloud sync, or analytics",
 	SettingsDurationHint:          "Durations accept values such as 15s, 5m, 2h, or 30d.",
 	SettingsClearHistoryHint:      "Permanently delete every locally stored diagnostic run.",
@@ -584,7 +584,7 @@ var english = map[Key]string{
 	SettingsInvalidRedirects:      "maximum redirects: %w",
 	SettingsInvalidCertificate:    "certificate warning threshold: %w",
 	SettingsInvalidHistoryLimit:   "history limit: %w",
-	PrivacyNoTelemetry:            "OpsDoctor does not send telemetry.",
+	PrivacyNoTelemetry:            "Orynelo does not send telemetry.",
 	PrivacyDataRemainsOnDevice:    "Diagnostic data remains on this computer.",
 
 	AboutVersion:                  "Version",
@@ -596,7 +596,7 @@ var english = map[Key]string{
 	AboutPlatformFormat:           "%s/%s",
 	AboutLicense:                  "License",
 	AboutLicenseMIT:               "MIT",
-	AboutAcknowledgementsMarkdown: "OpsDoctor is built with [Go](https://go.dev/), [Fyne](https://fyne.io/), [Cobra](https://cobra.dev/), and [modernc SQLite](https://pkg.go.dev/modernc.org/sqlite).",
+	AboutAcknowledgementsMarkdown: "Orynelo is built with [Go](https://go.dev/), [Fyne](https://fyne.io/), [Cobra](https://cobra.dev/), and [modernc SQLite](https://pkg.go.dev/modernc.org/sqlite).",
 	AboutSubtitle:                 "Evidence-based network reachability diagnostics.",
 	AboutBuildInformation:         "Build information",
 	AboutSourceRepository:         "Source repository",
@@ -615,7 +615,7 @@ var english = map[Key]string{
 	DialogNoCompletedDiagnosis:    "No completed diagnosis",
 	DialogRunBeforeExporting:      "Run or open a diagnosis before exporting.",
 	DialogRunBeforeSavingProfile:  "Run a diagnosis before saving a profile.",
-	DialogReportFilenameBase:      "opsdoctor-report",
+	DialogReportFilenameBase:      "orynelo-report",
 	DialogRawStructuredData:       "Raw structured data",
 	DialogLogDirectoryUnavailable: "log directory is unavailable",
 	DialogExportPrivacyTitle:      "Export privacy",
