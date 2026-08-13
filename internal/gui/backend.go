@@ -23,7 +23,7 @@ type Backend interface {
 	// Configuration returns the active settings snapshot.
 	Configuration() application.Config
 	// SaveConfiguration validates, persists, and activates settings.
-	SaveConfiguration(application.Config) error
+	SaveConfigurationContext(context.Context, application.Config) error
 	// LogDirectory returns the platform directory containing application logs.
 	LogDirectory() string
 
@@ -44,5 +44,5 @@ type Backend interface {
 	DeleteProfile(context.Context, int64) error
 
 	// RenderReport creates a privacy-projected report in the requested format.
-	RenderReport(string, model.Diagnosis, privacy.Mode) ([]byte, error)
+	RenderReportContext(context.Context, string, model.Diagnosis, privacy.Mode) ([]byte, error)
 }

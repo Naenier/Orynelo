@@ -122,11 +122,15 @@ var migrations = []migration{
 	},
 }
 
-func migrate(ctx context.Context, db *sql.DB) error {
+func schemaVersion(ctx context.Context, db *sql.DB) (int, error) {
 	var version int
 	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
-		return fmt.Errorf("read SQLite schema version: %w", err)
+		return 0, fmt.Errorf("read SQLite schema version: %w", err)
 	}
+	return version, nil
+}
+
+func migrateFrom(ctx context.Context, db *sql.DB, version int) error {
 	if version > CurrentSchemaVersion {
 		return fmt.Errorf(
 			"database schema version %d is newer than supported version %d",
@@ -135,6 +139,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		)
 	}
 
+	pending := make([]migration, 0, CurrentSchemaVersion-version)
 	for _, item := range migrations {
 		if item.version <= version {
 			continue
@@ -142,10 +147,24 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		if item.version != version+1 {
 			return fmt.Errorf("missing SQLite migration from version %d", version)
 		}
-		if err := applyMigration(ctx, db, item); err != nil {
+		pending = append(pending, item)
+		version = item.version
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin SQLite migration chain: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, item := range pending {
+		if err := applyMigrationTx(ctx, tx, item); err != nil {
 			return err
 		}
-		version = item.version
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit SQLite migration chain: %w", err)
 	}
 	return nil
 }
@@ -159,6 +178,16 @@ func applyMigration(ctx context.Context, db *sql.DB, item migration) error {
 		_ = tx.Rollback()
 	}()
 
+	if err := applyMigrationTx(ctx, tx, item); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit SQLite migration %d: %w", item.version, err)
+	}
+	return nil
+}
+
+func applyMigrationTx(ctx context.Context, tx *sql.Tx, item migration) error {
 	for _, statement := range item.statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("apply SQLite migration %d: %w", item.version, err)
@@ -177,9 +206,6 @@ func applyMigration(ctx context.Context, db *sql.DB, item migration) error {
 		fmt.Sprintf("PRAGMA user_version = %d", item.version),
 	); err != nil {
 		return fmt.Errorf("set SQLite schema version %d: %w", item.version, err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit SQLite migration %d: %w", item.version, err)
 	}
 	return nil
 }

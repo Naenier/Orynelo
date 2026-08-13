@@ -37,6 +37,13 @@ type HistorySort = model.HistorySort
 type HistoryQuery = model.HistoryQuery
 
 const (
+	// HistoryListSource documents that normalized rows are authoritative for
+	// filtering, ordering, retention, and selective deletion.
+	HistoryListSource = "normalized-tables"
+	// HistoryDetailSource documents that the explicitly versioned snapshot is
+	// authoritative for reconstructing the complete diagnosis.
+	HistoryDetailSource = "versioned-snapshot"
+
 	HistorySortDate     = model.HistorySortDate
 	HistorySortTarget   = model.HistorySortTarget
 	HistorySortStatus   = model.HistorySortStatus
