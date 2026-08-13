@@ -623,6 +623,47 @@ func TestNonBlockingEventSink(t *testing.T) {
 	}
 }
 
+func TestRunnerDoesNotBlockOnStalledEventConsumer(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	options := model.DefaultDiagnoseOptions("example.test:80")
+	started := time.Now()
+	diagnosis, err := NewRunner(WithPlan(engine.Plan{{
+		identifiedPassingCheck("only"),
+	}})).Diagnose(context.Background(), options, func(model.CheckEvent) {
+		<-release
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("blocked sink delayed diagnosis for %s", elapsed)
+	}
+	if diagnosis.EventDelivery == nil ||
+		!diagnosis.EventDelivery.DrainTimedOut ||
+		diagnosis.EventDelivery.Dropped == 0 {
+		t.Fatalf("event delivery stats = %#v", diagnosis.EventDelivery)
+	}
+}
+
+func TestRunnerRecoversEventConsumerPanic(t *testing.T) {
+	t.Parallel()
+	options := model.DefaultDiagnoseOptions("example.test:80")
+	diagnosis, err := NewRunner(WithPlan(engine.Plan{{
+		identifiedPassingCheck("only"),
+	}})).Diagnose(context.Background(), options, func(model.CheckEvent) {
+		panic("consumer failure")
+	})
+	var deliveryErr *EventDeliveryError
+	if !errors.As(err, &deliveryErr) {
+		t.Fatalf("Diagnose() error = %T %v", err, err)
+	}
+	if diagnosis.EventDelivery == nil || diagnosis.EventDelivery.ConsumerPanics == 0 {
+		t.Fatalf("event delivery stats = %#v", diagnosis.EventDelivery)
+	}
+}
+
 func TestRunnerRejectsUnsafeUserAgentAndThreshold(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

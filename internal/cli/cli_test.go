@@ -72,6 +72,7 @@ func (f *fakeApplication) DiagnoseRequest(
 }
 
 func (f *fakeApplication) RenderReport(
+	_ context.Context,
 	format string,
 	_ model.Diagnosis,
 	mode privacy.Mode,

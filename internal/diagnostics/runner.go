@@ -94,7 +94,8 @@ func (r *Runner) Diagnose(ctx context.Context, options model.DiagnoseOptions, si
 	if err != nil {
 		return model.Diagnosis{}, err
 	}
-	sink = privacyEventSink(sink)
+	delivery := newEventDispatcher(privacyEventSink(sink), r.now)
+	sink = delivery.Sink()
 	started := r.now()
 	diagnosis := model.Diagnosis{
 		ID:        newDiagnosisID(started),
@@ -151,11 +152,11 @@ func (r *Runner) Diagnose(ctx context.Context, options model.DiagnoseOptions, si
 			Status: diagnosis.Summary.Status,
 			At:     diagnosis.FinishedAt,
 		})
-		return diagnosis, &InputError{
+		return finishEventDelivery(delivery, diagnosis, &InputError{
 			Code:    target.ErrorCode(parseErr),
 			Message: "invalid target",
 			Err:     parseErr,
-		}
+		})
 	}
 
 	diagnosis.Target = parsed
@@ -235,7 +236,7 @@ func (r *Runner) Diagnose(ctx context.Context, options model.DiagnoseOptions, si
 		Status: diagnosis.Summary.Status,
 		At:     diagnosis.FinishedAt,
 	})
-	return diagnosis, nil
+	return finishEventDelivery(delivery, diagnosis, nil)
 }
 
 // Stream runs asynchronously and closes both returned channels on completion.
@@ -245,7 +246,9 @@ func (r *Runner) Stream(ctx context.Context, options model.DiagnoseOptions) (<-c
 	go func() {
 		defer close(events)
 		defer close(outcomes)
-		diagnosis, err := r.Diagnose(ctx, options, model.NonBlockingEventSink(events))
+		diagnosis, err := r.Diagnose(ctx, options, func(event model.CheckEvent) {
+			events <- event
+		})
 		outcomes <- Outcome{Diagnosis: diagnosis, Err: err}
 	}()
 	return events, outcomes

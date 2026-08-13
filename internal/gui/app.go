@@ -130,6 +130,7 @@ func Run(ctx context.Context, backend Backend, info buildinfo.Info) {
 	c.registerShortcuts()
 	window.SetCloseIntercept(c.closeWindow)
 	c.showScreen("diagnose")
+	c.showStartupWarnings()
 	c.loadConfiguration()
 	stopped := make(chan struct{})
 	go func() {
@@ -144,7 +145,32 @@ func Run(ctx context.Context, backend Backend, info buildinfo.Info) {
 	window.ShowAndRun()
 	close(stopped)
 	c.tasks.Close()
-	c.tasks.Wait()
+	waitContext, cancelWait := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelWait()
+	c.tasks.WaitContext(waitContext)
+}
+
+type startupWarningBackend interface {
+	StartupWarnings() []application.StartupWarning
+}
+
+// showStartupWarnings makes degraded persistence visible without preventing
+// access to the diagnostic screen.
+func (c *controller) showStartupWarnings() {
+	reporter, ok := c.backend.(startupWarningBackend)
+	if !ok {
+		return
+	}
+	warnings := reporter.StartupWarnings()
+	if len(warnings) == 0 {
+		return
+	}
+	lines := make([]string, 0, len(warnings)+1)
+	lines = append(lines, "Diagnostics are available, but some local features are disabled:")
+	for _, warning := range warnings {
+		lines = append(lines, fmt.Sprintf("• %s (%s)", warning.Code, warning.Message))
+	}
+	dialog.ShowInformation("Limited local state", strings.Join(lines, "\n"), c.window)
 }
 
 // buildScreens constructs every top-level screen and wires user actions back
@@ -424,6 +450,11 @@ func (c *controller) handleEvent(
 // closeWindow marks shutdown, cancels background work, and closes the window.
 func (c *controller) closeWindow() {
 	c.mu.Lock()
+	if c.closing {
+		c.mu.Unlock()
+		c.app.Quit()
+		return
+	}
 	c.closing = true
 	c.mu.Unlock()
 	if c.tasks != nil {

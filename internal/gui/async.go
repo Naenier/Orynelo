@@ -352,8 +352,8 @@ func (c *controller) prepareReport(
 	filename string,
 ) {
 	session := c.beginReportSession()
-	_, err := c.reportPrepareTask.StartRead(func(context.Context) (reportPrepareResult, error) {
-		content, renderErr := c.backend.RenderReport(format, diagnosis, mode)
+	_, err := c.reportPrepareTask.StartRead(func(ctx context.Context) (reportPrepareResult, error) {
+		content, renderErr := c.backend.RenderReportContext(ctx, format, diagnosis, mode)
 		return reportPrepareResult{Session: session, Filename: filename, Content: content}, renderErr
 	})
 	if err != nil {

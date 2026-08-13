@@ -6,11 +6,11 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/signal"
 
 	"github.com/Naenier/orynelo/internal/bootstrap"
 	"github.com/Naenier/orynelo/internal/buildinfo"
 	"github.com/Naenier/orynelo/internal/gui"
+	"github.com/Naenier/orynelo/internal/platform"
 )
 
 // main exits the process with the desktop runtime result.
@@ -21,19 +21,38 @@ func main() {
 // run initializes the runtime, starts the GUI, and coordinates cancellation.
 func run() int {
 	info := buildinfo.Current()
-	runtime, err := bootstrap.OpenRuntime(info)
-	if err != nil {
+	ctx, stop := platform.NotifyShutdownContext(
+		context.Background(),
+		func() { os.Exit(130) },
+		terminationSignals()...,
+	)
+	defer stop()
+	policy := bootstrap.PersistenceDefault
+	var runtime *bootstrap.Runtime
+	for {
+		var err error
+		runtime, err = bootstrap.OpenRuntimeWithOptions(
+			info,
+			bootstrap.RuntimeOptions{Persistence: policy},
+		)
+		if err == nil {
+			break
+		}
 		_, _ = fmt.Fprintln(os.Stderr, "Could not start Orynelo Desktop:", err)
-		return 1
+		switch gui.RunStartupRecovery(ctx, info, err) {
+		case gui.StartupRecoveryRetry:
+			policy = bootstrap.PersistenceDefault
+		case gui.StartupRecoveryEphemeral:
+			policy = bootstrap.PersistenceEphemeral
+		default:
+			return 1
+		}
 	}
 	defer func() {
 		if err := runtime.Close(); err != nil {
 			_, _ = fmt.Fprintln(os.Stderr, "Error closing Orynelo Desktop:", err)
 		}
 	}()
-
-	ctx, stop := signal.NotifyContext(context.Background(), terminationSignals()...)
-	defer stop()
 	gui.Run(ctx, runtime.Service, info)
 	return 0
 }

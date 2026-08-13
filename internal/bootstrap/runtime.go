@@ -3,8 +3,10 @@
 package bootstrap
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/Naenier/orynelo/internal/application"
 	"github.com/Naenier/orynelo/internal/buildinfo"
@@ -41,7 +43,14 @@ type runtimeOpeners struct {
 // OpenRuntime initializes platform directories, configuration, logging,
 // SQLite migrations, and the shared diagnostic core.
 func OpenRuntime(info buildinfo.Info) (*Runtime, error) {
-	return openRuntime(info, defaultRuntimeOpeners())
+	return OpenRuntimeWithOptions(info, RuntimeOptions{})
+}
+
+// OpenRuntimeWithOptions initializes the diagnostic core and the optional
+// adapters selected by options. Optional adapter failures are reported as
+// startup warnings and do not prevent diagnostics.
+func OpenRuntimeWithOptions(info buildinfo.Info, options RuntimeOptions) (*Runtime, error) {
+	return openRuntimeWithOptions(info, options, defaultRuntimeOpeners())
 }
 
 func defaultRuntimeOpeners() runtimeOpeners {
@@ -62,59 +71,135 @@ func defaultRuntimeOpeners() runtimeOpeners {
 }
 
 func openRuntime(info buildinfo.Info, openers runtimeOpeners) (*Runtime, error) {
-	paths, err := openers.resolvePaths()
+	return openRuntimeWithOptions(info, RuntimeOptions{}, openers)
+}
+
+func openRuntimeWithOptions(
+	info buildinfo.Info,
+	options RuntimeOptions,
+	openers runtimeOpeners,
+) (*Runtime, error) {
+	policy, err := ParsePersistencePolicy(string(options.Persistence))
 	if err != nil {
 		return nil, bootstrapBoundaryError(
 			err,
 			application.ErrorCategoryConfiguration,
-			"APP_PATHS_RESOLVE_FAILED",
-			"error.paths_resolve_failed",
+			"APP_PERSISTENCE_POLICY_INVALID",
+			"error.persistence_policy_invalid",
 		)
 	}
-	if err := openers.ensurePaths(paths); err != nil {
-		return nil, bootstrapBoundaryError(
-			err,
-			application.ErrorCategoryStorage,
-			"APP_PATHS_PREPARE_FAILED",
-			"error.paths_prepare_failed",
-		)
-	}
-	configStore := openers.newConfigStore(paths.ConfigFile)
-	cfg, err := configStore.Load()
-	if err != nil {
-		if config.IsInvalid(err) {
-			return nil, bootstrapBoundaryError(
-				err,
-				application.ErrorCategoryConfiguration,
-				"APP_CONFIGURATION_INVALID",
-				"error.configuration_invalid",
-			)
-		}
-		return nil, bootstrapBoundaryError(
-			err,
-			application.ErrorCategoryStorage,
-			"APP_CONFIGURATION_LOAD_FAILED",
-			"error.configuration_load_failed",
-		)
-	}
-	logging, err := openers.openLogging(paths.LogFile, cfg.Logging.Level)
+
+	var paths platform.Paths
+	var configStore runtimeConfigStore
+	var database application.Persistence
+	warnings := make([]application.StartupWarning, 0, 3)
+	cfg := application.DefaultConfig()
+	logFile := ""
+	logging, err := newLogging(io.Discard, cfg.Logging.Level)
 	if err != nil {
 		return nil, bootstrapBoundaryError(
 			err,
-			application.ErrorCategoryStorage,
-			"APP_LOGGING_INITIALIZATION_FAILED",
+			application.ErrorCategoryInternal,
+			"APP_FALLBACK_LOGGING_FAILED",
 			"error.logging_initialization_failed",
 		)
 	}
-	database, err := openers.openStorage(paths.DatabaseFile)
-	if err != nil {
-		_ = logging.Close()
-		return nil, bootstrapBoundaryError(
-			err,
-			application.ErrorCategoryStorage,
-			"APP_STORAGE_INITIALIZATION_FAILED",
-			"error.storage_initialization_failed",
-		)
+
+	if policy != PersistenceEphemeral {
+		resolved, resolveErr := openers.resolvePaths()
+		if resolveErr != nil {
+			warnings = append(warnings, startupWarningForError(
+				resolveErr,
+				application.ErrorCategoryConfiguration,
+				"APP_PATHS_RESOLVE_FAILED",
+				"error.paths_resolve_failed",
+				application.RecoveryRetry,
+				application.RecoveryRunEphemeral,
+			))
+		} else {
+			paths = resolved
+			if ensureErr := openers.ensurePaths(paths); ensureErr != nil {
+				warnings = append(warnings, startupWarningForError(
+					ensureErr,
+					application.ErrorCategoryStorage,
+					"APP_PATHS_PREPARE_FAILED",
+					"error.paths_prepare_failed",
+					application.RecoveryRetry,
+					application.RecoveryRunEphemeral,
+				))
+			}
+
+			candidateStore := openers.newConfigStore(paths.ConfigFile)
+			loaded, loadErr := candidateStore.Load()
+			if loadErr != nil {
+				category := application.ErrorCategoryStorage
+				code := application.ErrorCode("APP_CONFIGURATION_LOAD_FAILED")
+				message := application.MessageID("error.configuration_load_failed")
+				if config.IsInvalid(loadErr) {
+					category = application.ErrorCategoryConfiguration
+					code = "APP_CONFIGURATION_INVALID"
+					message = "error.configuration_invalid"
+				}
+				warnings = append(warnings, startupWarningForError(
+					loadErr,
+					category,
+					code,
+					message,
+					application.RecoveryRetry,
+					application.RecoveryRunEphemeral,
+				))
+			} else {
+				cfg = loaded
+				configStore = candidateStore
+			}
+
+			persistentLogging, loggingErr := openers.openLogging(paths.LogFile, cfg.Logging.Level)
+			if loggingErr != nil {
+				warnings = append(warnings, startupWarningForError(
+					loggingErr,
+					application.ErrorCategoryStorage,
+					"APP_LOGGING_INITIALIZATION_FAILED",
+					"error.logging_initialization_failed",
+					application.RecoveryRetry,
+					application.RecoveryRunEphemeral,
+				))
+			} else {
+				logging = persistentLogging
+				logFile = paths.LogFile
+				if loadErr != nil && logging.Logger != nil {
+					logging.Logger.Warn(
+						"configuration unavailable; using in-memory defaults",
+						"error",
+						loadErr,
+					)
+				}
+			}
+
+			if policy == PersistenceDefault {
+				opened, storageErr := openers.openStorage(paths.DatabaseFile)
+				if storageErr != nil {
+					if logging.Logger != nil {
+						logging.Logger.Warn(
+							"history storage unavailable; diagnostics remain enabled",
+							"error",
+							storageErr,
+						)
+					}
+					warnings = append(warnings, startupWarningForError(
+						storageErr,
+						application.ErrorCategoryStorage,
+						"APP_STORAGE_INITIALIZATION_FAILED",
+						"error.storage_initialization_failed",
+						application.RecoveryRetry,
+						application.RecoveryOpenReadOnly,
+						application.RecoveryUseQuarantine,
+						application.RecoveryRunNoHistory,
+					))
+				} else {
+					database = opened
+				}
+			}
+		}
 	}
 	domainBuild := model.BuildInfo{
 		Version:   info.Version,
@@ -132,14 +217,19 @@ func openRuntime(info buildinfo.Info, openers runtimeOpeners) (*Runtime, error) 
 		ConfigStore: configStore,
 		Config:      cfg,
 		Build:       domainBuild,
-		LogFile:     paths.LogFile,
+		LogFile:     logFile,
 		Logger:      logging.Logger,
 		SetLogLevel: logging.SetLevel,
+		Warnings:    warnings,
 		RenderReport: func(
+			ctx context.Context,
 			format string,
 			diagnosis model.Diagnosis,
 			mode privacy.Mode,
 		) ([]byte, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			parsed, err := report.ParseFormat(format)
 			if err != nil {
 				return nil, err
@@ -160,6 +250,39 @@ func openRuntime(info buildinfo.Info, openers runtimeOpeners) (*Runtime, error) 
 		)
 	}
 	return &Runtime{Service: service, Logging: logging, Paths: paths}, nil
+}
+
+func startupWarning(
+	category application.ErrorCategory,
+	code application.ErrorCode,
+	message application.MessageID,
+	actions ...application.RecoveryAction,
+) application.StartupWarning {
+	return application.StartupWarning{
+		Category: category,
+		Code:     code,
+		Message:  message,
+		Actions:  actions,
+	}
+}
+
+func startupWarningForError(
+	err error,
+	category application.ErrorCategory,
+	code application.ErrorCode,
+	message application.MessageID,
+	actions ...application.RecoveryAction,
+) application.StartupWarning {
+	classified := application.ClassifyError(err)
+	if classified.Category() != application.ErrorCategoryInternal {
+		return startupWarning(
+			classified.Category(),
+			classified.Code(),
+			classified.MessageID(),
+			actions...,
+		)
+	}
+	return startupWarning(category, code, message, actions...)
 }
 
 // Close releases SQLite and the log file.

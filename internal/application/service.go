@@ -39,11 +39,12 @@ type Persistence interface {
 
 // ConfigurationStore persists user settings.
 type ConfigurationStore interface {
-	Save(Config) error
+	Save(context.Context, Config) error
 }
 
 // ReportRenderer produces one of the stable report formats.
 type ReportRenderer func(
+	ctx context.Context,
 	format string,
 	diagnosis model.Diagnosis,
 	mode privacy.Mode,
@@ -60,6 +61,7 @@ type Dependencies struct {
 	Logger       *slog.Logger
 	RenderReport ReportRenderer
 	SetLogLevel  func(string) error
+	Warnings     []StartupWarning
 }
 
 // Service is the common application layer used by both interfaces.
@@ -72,6 +74,7 @@ type Service struct {
 	logger       *slog.Logger
 	renderReport ReportRenderer
 	setLogLevel  func(string) error
+	warnings     []StartupWarning
 
 	mu       sync.RWMutex
 	config   Config
@@ -103,7 +106,7 @@ func New(dependencies Dependencies) (*Service, error) {
 	}
 	return &Service{
 		runner:       dependencies.Runner,
-		persistence:  dependencies.Persistence,
+		persistence:  guardPersistence(dependencies.Persistence),
 		configStore:  dependencies.ConfigStore,
 		config:       dependencies.Config,
 		build:        dependencies.Build,
@@ -111,7 +114,17 @@ func New(dependencies Dependencies) (*Service, error) {
 		logger:       logger,
 		renderReport: dependencies.RenderReport,
 		setLogLevel:  dependencies.SetLogLevel,
+		warnings:     cloneStartupWarnings(dependencies.Warnings),
 	}, nil
+}
+
+// StartupWarnings returns privacy-safe degraded-mode notices produced while
+// optional runtime adapters were initialized.
+func (s *Service) StartupWarnings() []StartupWarning {
+	if s == nil {
+		return nil
+	}
+	return cloneStartupWarnings(s.warnings)
 }
 
 // ResolveDiagnoseOptions returns the canonical effective options for preview,
@@ -185,7 +198,12 @@ func (s *Service) diagnoseEffective(
 		category := ErrorCategoryInternal
 		code := ErrorCode("APP_DIAGNOSE_FAILED")
 		messageID := MessageID("error.diagnose_failed")
-		if diagnostics.IsInputError(err) {
+		var deliveryError *diagnostics.EventDeliveryError
+		if errors.As(err, &deliveryError) {
+			category = ErrorCategoryInternal
+			code = "APP_EVENT_DELIVERY_FAILED"
+			messageID = "error.event_delivery_failed"
+		} else if diagnostics.IsInputError(err) {
 			category = ErrorCategoryValidation
 			code = "APP_DIAGNOSE_OPTIONS_INVALID"
 			messageID = "error.diagnose_options_invalid"
@@ -218,6 +236,12 @@ func (s *Service) Configuration() Config {
 
 // SaveConfiguration validates and persists settings before activating them.
 func (s *Service) SaveConfiguration(value Config) error {
+	return s.SaveConfigurationContext(context.Background(), value)
+}
+
+// SaveConfigurationContext validates and persists settings within the shared
+// adapter timeout and the caller's earlier deadline.
+func (s *Service) SaveConfigurationContext(ctx context.Context, value Config) error {
 	if err := value.Validate(); err != nil {
 		return operationError(
 			err,
@@ -241,7 +265,9 @@ func (s *Service) SaveConfiguration(value Config) error {
 	previous := s.Configuration()
 	levelChanged := previous.Logging.Level != value.Logging.Level && s.setLogLevel != nil
 	if levelChanged {
-		if err := s.setLogLevel(value.Logging.Level); err != nil {
+		if err := callAdapterError(ctx, "logging", "set-level", func(context.Context) error {
+			return s.setLogLevel(value.Logging.Level)
+		}); err != nil {
 			return operationError(
 				fmt.Errorf("apply log level: %w", err),
 				ErrorCategoryConfiguration,
@@ -251,9 +277,13 @@ func (s *Service) SaveConfiguration(value Config) error {
 			)
 		}
 	}
-	if err := s.configStore.Save(value); err != nil {
+	if err := callAdapterError(ctx, "configuration", "save", func(ctx context.Context) error {
+		return s.configStore.Save(ctx, value)
+	}); err != nil {
 		if levelChanged {
-			if rollbackErr := s.setLogLevel(previous.Logging.Level); rollbackErr != nil {
+			if rollbackErr := callAdapterError(ctx, "logging", "restore-level", func(context.Context) error {
+				return s.setLogLevel(previous.Logging.Level)
+			}); rollbackErr != nil {
 				err = errors.Join(err, fmt.Errorf("restore previous log level: %w", rollbackErr))
 			}
 		}
@@ -526,6 +556,16 @@ func (s *Service) RenderReport(
 	diagnosis model.Diagnosis,
 	mode privacy.Mode,
 ) ([]byte, error) {
+	return s.RenderReportContext(context.Background(), format, diagnosis, mode)
+}
+
+// RenderReportContext renders a report under the common adapter timeout.
+func (s *Service) RenderReportContext(
+	ctx context.Context,
+	format string,
+	diagnosis model.Diagnosis,
+	mode privacy.Mode,
+) ([]byte, error) {
 	format = strings.ToLower(strings.TrimSpace(format))
 	switch format {
 	case "text", "json", "markdown", "md":
@@ -554,7 +594,9 @@ func (s *Service) RenderReport(
 			nil,
 		)
 	}
-	content, err := s.renderReport(format, diagnosis, mode)
+	content, err := callAdapter(ctx, "report", "render", func(ctx context.Context) ([]byte, error) {
+		return s.renderReport(ctx, format, diagnosis, mode)
+	})
 	if err != nil {
 		return nil, operationError(
 			err,

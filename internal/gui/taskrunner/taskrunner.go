@@ -224,6 +224,26 @@ func (runner *Runner) Wait() {
 	runner.tasks.Wait()
 }
 
+// WaitContext waits for accepted work or returns false when ctx expires.
+// The underlying tasks are not forcefully terminated because Go cannot safely
+// interrupt a goroutine blocked in a non-cooperative platform call.
+func (runner *Runner) WaitContext(ctx context.Context) bool {
+	if runner == nil {
+		return true
+	}
+	done := make(chan struct{})
+	go func() {
+		runner.tasks.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 // register adds a scope to runner-owned shutdown handling.
 func (runner *Runner) register(scope scopeLifecycle) error {
 	runner.mu.Lock()

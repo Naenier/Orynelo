@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -33,7 +34,7 @@ func (store *runtimeTestConfigStore) Load() (application.Config, error) {
 	return store.config, store.err
 }
 
-func (*runtimeTestConfigStore) Save(application.Config) error { return nil }
+func (*runtimeTestConfigStore) Save(context.Context, application.Config) error { return nil }
 
 func successfulRuntimeOpeners() runtimeOpeners {
 	paths := platform.Paths{
@@ -52,8 +53,8 @@ func successfulRuntimeOpeners() runtimeOpeners {
 		},
 		openLogging: func(string, string) (*Logging, error) { return &Logging{}, nil },
 		openStorage: func(string) (application.Persistence, error) { return nil, nil },
-		newService: func(application.Dependencies) (*application.Service, error) {
-			return &application.Service{}, nil
+		newService: func(dependencies application.Dependencies) (*application.Service, error) {
+			return application.New(dependencies)
 		},
 	}
 }
@@ -156,17 +157,34 @@ func TestOpenRuntimeTypesCompositionFailures(t *testing.T) {
 			cause := errors.New("private composition detail")
 			openers := successfulRuntimeOpeners()
 			test.configure(&openers, cause)
-			_, err := openRuntime(buildinfo.Info{Version: "test"}, openers)
+			runtime, err := openRuntime(buildinfo.Info{Version: "test"}, openers)
+			if test.name != "service initialization" {
+				if err != nil {
+					t.Fatalf("openRuntime() error = %#v, want degraded success", err)
+				}
+				warnings := runtime.Service.StartupWarnings()
+				if len(warnings) == 0 {
+					t.Fatal("degraded runtime has no startup warning")
+				}
+				found := false
+				for _, warning := range warnings {
+					if warning.Category == test.category && warning.Code == test.code {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("startup warnings = %#v", warnings)
+				}
+				return
+			}
 			applicationError, ok := application.AsError(err)
 			if !ok || applicationError.Category() != test.category ||
 				applicationError.Code() != test.code {
 				t.Fatalf("openRuntime() error = %#v", err)
 			}
-			if test.name != "path permission" && !errors.Is(err, cause) {
+			if !errors.Is(err, cause) {
 				t.Fatal("typed boundary lost its infrastructure cause")
-			}
-			if test.name == "path permission" && !errors.Is(err, os.ErrPermission) {
-				t.Fatal("permission boundary lost os.ErrPermission")
 			}
 		})
 	}
@@ -254,5 +272,59 @@ func TestOpenRuntimeSuccessRetainsResolvedPaths(t *testing.T) {
 	}
 	if err := runtime.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+func TestEphemeralRuntimeDoesNotTouchFilesystemAdapters(t *testing.T) {
+	t.Parallel()
+
+	openers := successfulRuntimeOpeners()
+	openers.resolvePaths = func() (platform.Paths, error) {
+		t.Fatal("ephemeral runtime resolved filesystem paths")
+		return platform.Paths{}, nil
+	}
+	openers.ensurePaths = func(platform.Paths) error {
+		t.Fatal("ephemeral runtime created directories")
+		return nil
+	}
+	openers.newConfigStore = func(string) runtimeConfigStore {
+		t.Fatal("ephemeral runtime opened configuration")
+		return nil
+	}
+	openers.openLogging = func(string, string) (*Logging, error) {
+		t.Fatal("ephemeral runtime opened a log")
+		return nil, nil
+	}
+	openers.openStorage = func(string) (application.Persistence, error) {
+		t.Fatal("ephemeral runtime opened SQLite")
+		return nil, nil
+	}
+	runtime, err := openRuntimeWithOptions(
+		buildinfo.Info{Version: "test"},
+		RuntimeOptions{Persistence: PersistenceEphemeral},
+		openers,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.Paths != (platform.Paths{}) || len(runtime.Service.StartupWarnings()) != 0 {
+		t.Fatalf("ephemeral runtime = %#v", runtime)
+	}
+}
+
+func TestNoHistoryRuntimeNeverOpensSQLite(t *testing.T) {
+	t.Parallel()
+
+	openers := successfulRuntimeOpeners()
+	openers.openStorage = func(string) (application.Persistence, error) {
+		t.Fatal("no-history runtime opened SQLite")
+		return nil, nil
+	}
+	if _, err := openRuntimeWithOptions(
+		buildinfo.Info{Version: "test"},
+		RuntimeOptions{Persistence: PersistenceNoHistory},
+		openers,
+	); err != nil {
+		t.Fatal(err)
 	}
 }
