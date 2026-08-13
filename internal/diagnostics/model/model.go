@@ -115,31 +115,45 @@ type Check interface {
 type CheckEventType string
 
 const (
-	EventRunStarted     CheckEventType = "run_started"
-	EventCheckStarted   CheckEventType = "check_started"
-	EventCheckCompleted CheckEventType = "check_completed"
-	EventRunCompleted   CheckEventType = "run_completed"
+	EventRunStarted       CheckEventType = "run_started"
+	EventCheckStarted     CheckEventType = "check_started"
+	EventCheckCompleted   CheckEventType = "check_completed"
+	EventRunCompleted     CheckEventType = "run_completed"
+	EventDeliveryOverflow CheckEventType = "delivery_overflow"
 )
 
 // CheckEvent can be consumed by a CLI or GUI while a diagnosis is running.
 type CheckEvent struct {
-	Type      CheckEventType `json:"type"`
-	CheckID   string         `json:"checkId,omitempty"`
-	CheckName string         `json:"checkName,omitempty"`
-	Status    Status         `json:"status,omitempty"`
-	At        time.Time      `json:"at"`
-	Index     int            `json:"index,omitempty"`
-	Result    *CheckResult   `json:"result,omitempty"`
+	Type          CheckEventType `json:"type"`
+	CheckID       string         `json:"checkId,omitempty"`
+	CheckName     string         `json:"checkName,omitempty"`
+	Status        Status         `json:"status,omitempty"`
+	At            time.Time      `json:"at"`
+	Index         int            `json:"index,omitempty"`
+	Result        *CheckResult   `json:"result,omitempty"`
+	DroppedEvents uint64         `json:"droppedEvents,omitempty"`
 }
 
-// EventSink receives progress notifications. The engine invokes it
-// synchronously so implementations must return promptly. GUI consumers should
-// use NonBlockingEventSink or Runner.Stream.
+// EventSink receives progress notifications. Runner isolates external sinks
+// behind a bounded queue; lower-level engine users must still return promptly.
 type EventSink func(CheckEvent)
 
-// NonBlockingEventSink adapts a channel to a best-effort bounded sink. Events
-// are dropped when the consumer has not kept up, so diagnostics never block on
-// UI delivery.
+// EventDeliveryStats makes backpressure and faulty event adapters observable
+// without allowing them to stop diagnostic execution.
+type EventDeliveryStats struct {
+	Dropped        uint64 `json:"dropped,omitempty"`
+	ConsumerPanics uint64 `json:"consumerPanics,omitempty"`
+	DrainTimedOut  bool   `json:"drainTimedOut,omitempty"`
+}
+
+// Empty reports whether event delivery completed without degradation.
+func (stats EventDeliveryStats) Empty() bool {
+	return stats.Dropped == 0 && stats.ConsumerPanics == 0 && !stats.DrainTimedOut
+}
+
+// NonBlockingEventSink is a low-level best-effort channel adapter. It drops
+// silently when full; application consumers should prefer Runner, whose queue
+// exposes overflow through EventDeliveryStats.
 func NonBlockingEventSink(events chan<- CheckEvent) EventSink {
 	if events == nil {
 		return nil
@@ -283,15 +297,16 @@ type BuildInfo struct {
 
 // Diagnosis is a complete run in deterministic check order.
 type Diagnosis struct {
-	ID         string          `json:"id"`
-	Target     Target          `json:"target"`
-	Options    DiagnoseOptions `json:"options"`
-	StartedAt  time.Time       `json:"startedAt"`
-	FinishedAt time.Time       `json:"finishedAt"`
-	Duration   time.Duration   `json:"duration"`
-	Checks     []CheckResult   `json:"checks"`
-	Summary    Summary         `json:"summary"`
-	Build      BuildInfo       `json:"build"`
+	ID            string              `json:"id"`
+	Target        Target              `json:"target"`
+	Options       DiagnoseOptions     `json:"options"`
+	StartedAt     time.Time           `json:"startedAt"`
+	FinishedAt    time.Time           `json:"finishedAt"`
+	Duration      time.Duration       `json:"duration"`
+	Checks        []CheckResult       `json:"checks"`
+	Summary       Summary             `json:"summary"`
+	Build         BuildInfo           `json:"build"`
+	EventDelivery *EventDeliveryStats `json:"eventDelivery,omitempty"`
 }
 
 // DiagnosticMode describes how the desktop application interprets a target.

@@ -1,0 +1,42 @@
+{
+  "schemaVersion": "1",
+  "diagnosis": {
+    "id": "fixture-v1",
+    "target": {
+      "original": "https://example.test:443",
+      "normalized": "https://example.test:443",
+      "scheme": "https",
+      "host": "example.test",
+      "port": 443,
+      "kind": "http",
+      "useTLS": true
+    },
+    "options": {
+      "target": "https://example.test:443",
+      "mode": "auto",
+      "timeout": 15000000000,
+      "checkTimeout": 5000000000,
+      "ipVersion": "auto",
+      "maxRedirects": 10,
+      "method": "GET"
+    },
+    "startedAt": "2026-01-01T00:00:00Z",
+    "finishedAt": "2026-01-01T00:00:01Z",
+    "duration": 1000000000,
+    "checks": [],
+    "summary": {
+      "status": "passed",
+      "title": "Compatibility fixture",
+      "description": "Snapshot schema v1 remains readable."
+    },
+    "build": {
+      "version": "0.1.0",
+      "commit": "fixture",
+      "buildDate": "2026-01-01T00:00:00Z",
+      "dirty": false,
+      "goVersion": "go1.25",
+      "os": "linux",
+      "arch": "amd64"
+    }
+  }
+}

@@ -47,6 +47,14 @@ type fakePersistence struct {
 	closed        bool
 }
 
+type panickingPersistence struct {
+	Persistence
+}
+
+func (*panickingPersistence) ListHistory(context.Context, model.HistoryQuery) ([]model.HistoryEntry, error) {
+	panic("private adapter panic")
+}
+
 func (f *fakePersistence) SaveDiagnosis(_ context.Context, diagnosis model.Diagnosis, limit int) error {
 	f.saved = diagnosis
 	f.saveLimit = limit
@@ -88,7 +96,7 @@ type fakeConfigStore struct {
 	err   error
 }
 
-func (f *fakeConfigStore) Save(value Config) error {
+func (f *fakeConfigStore) Save(_ context.Context, value Config) error {
 	f.saved = value
 	return f.err
 }
@@ -112,7 +120,7 @@ func TestServiceDiagnoseAddsBuildAndPersists(t *testing.T) {
 		ConfigStore: &fakeConfigStore{},
 		Config:      cfg,
 		Build:       model.BuildInfo{Version: "1.2.3", Commit: "abc"},
-		RenderReport: func(string, model.Diagnosis, privacy.Mode) ([]byte, error) {
+		RenderReport: func(context.Context, string, model.Diagnosis, privacy.Mode) ([]byte, error) {
 			return []byte("report"), nil
 		},
 	})
@@ -140,6 +148,27 @@ func TestServiceDiagnoseAddsBuildAndPersists(t *testing.T) {
 	if strings.Contains(got.Options.UserAgent, "persisted-user-agent-secret") ||
 		strings.Contains(persistence.saved.Options.UserAgent, "persisted-user-agent-secret") {
 		t.Fatalf("user agent crossed the privacy boundary: got=%q saved=%q", got.Options.UserAgent, persistence.saved.Options.UserAgent)
+	}
+}
+
+func TestServiceRecoversPersistenceAdapterPanic(t *testing.T) {
+	t.Parallel()
+	service, err := New(Dependencies{
+		Runner:      &fakeRunner{},
+		Persistence: &panickingPersistence{},
+		Config:      DefaultConfig(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.ListHistory(context.Background(), "", "")
+	var panicErr *AdapterPanicError
+	if !errors.As(err, &panicErr) {
+		t.Fatalf("ListHistory() error = %T %v", err, err)
+	}
+	applicationError, ok := AsError(err)
+	if !ok || applicationError.Category() != ErrorCategoryStorage {
+		t.Fatalf("application error = %#v", applicationError)
 	}
 }
 
@@ -449,7 +478,7 @@ func TestServiceClassifiesUserControlledAdapterValuesAsValidation(t *testing.T) 
 		Runner:      &fakeRunner{},
 		Persistence: &fakePersistence{},
 		Config:      DefaultConfig(),
-		RenderReport: func(string, model.Diagnosis, privacy.Mode) ([]byte, error) {
+		RenderReport: func(context.Context, string, model.Diagnosis, privacy.Mode) ([]byte, error) {
 			return []byte("report"), nil
 		},
 	})

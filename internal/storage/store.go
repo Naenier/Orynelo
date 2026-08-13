@@ -36,6 +36,7 @@ type Store struct {
 	close    sync.Once
 	closeErr error
 	now      func() time.Time
+	backup   BackupInfo
 }
 
 // Open opens, configures, and migrates a store.
@@ -48,7 +49,16 @@ func OpenContext(ctx context.Context, path string) (*Store, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("database path is empty")
 	}
+	existed := false
 	if !isMemoryDatabase(path) {
+		info, statErr := os.Lstat(path)
+		switch {
+		case statErr == nil:
+			existed = info.Mode().IsRegular() && info.Size() > 0
+		case errors.Is(statErr, os.ErrNotExist):
+		default:
+			return nil, fmt.Errorf("inspect database path %q: %w", path, statErr)
+		}
 		if err := prepareDatabaseFile(path); err != nil {
 			return nil, err
 		}
@@ -76,8 +86,29 @@ func OpenContext(ctx context.Context, path string) (*Store, error) {
 	if err := configure(ctx, db); err != nil {
 		return nil, err
 	}
-	if err := migrate(ctx, db); err != nil {
+	version, err := schemaVersion(ctx, db)
+	if err != nil {
 		return nil, err
+	}
+	if version < CurrentSchemaVersion && existed && !isMemoryDatabase(path) {
+		if err := quickCheck(ctx, db); err != nil {
+			return nil, err
+		}
+		store.backup, err = createMigrationBackup(ctx, db, path, version)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if version > CurrentSchemaVersion {
+		return nil, migrateFrom(ctx, db, version)
+	}
+	if err := migrateFrom(ctx, db, version); err != nil {
+		return nil, &MigrationError{
+			FromVersion: version,
+			ToVersion:   CurrentSchemaVersion,
+			Backup:      store.backup,
+			Err:         err,
+		}
 	}
 	if _, err := db.ExecContext(
 		ctx,
@@ -95,6 +126,15 @@ func OpenContext(ctx context.Context, path string) (*Store, error) {
 
 	ok = true
 	return store, nil
+}
+
+// MigrationBackup reports the verified copy created before this store was
+// upgraded. A zero value means no migration backup was necessary.
+func (s *Store) MigrationBackup() BackupInfo {
+	if s == nil {
+		return BackupInfo{}
+	}
+	return s.backup
 }
 
 // OpenDefault opens the database in the current platform data directory.

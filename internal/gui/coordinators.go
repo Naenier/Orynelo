@@ -658,8 +658,8 @@ func (coordinator *SettingsCoordinator) Load() error {
 
 // Save serializes configuration persistence.
 func (coordinator *SettingsCoordinator) Save(config application.Config) error {
-	_, err := coordinator.save.StartMutation(func(context.Context) (application.Config, error) {
-		return config, coordinator.backend.SaveConfiguration(config)
+	_, err := coordinator.save.StartMutation(func(ctx context.Context) (application.Config, error) {
+		return config, coordinator.backend.SaveConfigurationContext(ctx, config)
 	})
 	return err
 }

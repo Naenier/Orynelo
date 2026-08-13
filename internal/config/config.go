@@ -2,6 +2,7 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -247,6 +248,12 @@ func (s *Store) Load() (Config, error) {
 }
 
 // Save writes this store.
-func (s *Store) Save(cfg Config) error {
-	return Save(s.path, cfg)
+func (s *Store) Save(ctx context.Context, cfg Config) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := Save(s.path, cfg); err != nil {
+		return err
+	}
+	return ctx.Err()
 }

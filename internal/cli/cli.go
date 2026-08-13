@@ -34,7 +34,7 @@ const (
 // Application is the CLI-facing application contract.
 type Application interface {
 	DiagnoseRequest(context.Context, application.DiagnoseRequest, model.EventSink) (model.Diagnosis, error)
-	RenderReport(string, model.Diagnosis, privacy.Mode) ([]byte, error)
+	RenderReport(context.Context, string, model.Diagnosis, privacy.Mode) ([]byte, error)
 }
 
 // Options configures a root command without process-global output state.
@@ -44,6 +44,9 @@ type Options struct {
 	Stdout      io.Writer
 	Stderr      io.Writer
 	SetLogLevel func(string) error
+	// SetPersistencePolicy selects default, no-history, or ephemeral startup
+	// before the lazy application runtime is initialized.
+	SetPersistencePolicy func(string) error
 }
 
 // ExitError carries a stable process code without forcing a duplicate message.
@@ -146,6 +149,7 @@ type diagnoseFlags struct {
 	method                 string
 	logLevel               string
 	verbose                bool
+	persistence            string
 }
 
 func newDiagnose(options Options) *cobra.Command {
@@ -172,6 +176,17 @@ func newDiagnose(options Options) *cobra.Command {
 					"error.application_unavailable",
 					nil,
 				))
+			}
+			if options.SetPersistencePolicy != nil {
+				if err := options.SetPersistencePolicy(flags.persistence); err != nil {
+					return diagnoseExitError(command, typedBoundaryError(
+						err,
+						application.ErrorCategoryValidation,
+						"APP_PERSISTENCE_POLICY_INVALID",
+						"error.persistence_policy_invalid",
+						map[string]string{"field": "persistence"},
+					))
+				}
 			}
 			if command.Flags().Changed("log-level") {
 				if !validLogLevel(flags.logLevel) {
@@ -234,7 +249,12 @@ func newDiagnose(options Options) *cobra.Command {
 			if err != nil {
 				return diagnoseExitError(command, err)
 			}
-			content, err := options.Application.RenderReport(format, diagnosis, anonymization)
+			content, err := options.Application.RenderReport(
+				command.Context(),
+				format,
+				diagnosis,
+				anonymization,
+			)
 			if err != nil {
 				return diagnoseExitError(command, typedBoundaryError(
 					err,
@@ -324,6 +344,12 @@ func newDiagnose(options Options) *cobra.Command {
 	command.Flags().StringVar(&flags.method, "method", "GET", "Safe HTTP method: GET, HEAD, or OPTIONS")
 	command.Flags().StringVar(&flags.logLevel, "log-level", "info", "Log level: debug, info, warn, or error")
 	command.Flags().BoolVarP(&flags.verbose, "verbose", "v", false, "Write progress events to stderr")
+	command.Flags().StringVar(
+		&flags.persistence,
+		"persistence",
+		"default",
+		"Local state policy: default, no-history, or ephemeral",
+	)
 	return command
 }
 

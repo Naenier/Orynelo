@@ -3,7 +3,9 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -151,6 +153,126 @@ func TestRejectsNewerDatabase(t *testing.T) {
 	}
 	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "newer") {
 		t.Fatalf("Open(newer database) error = %v, want newer-version error", err)
+	}
+}
+
+func TestDatabaseAndSnapshotCompatibilityFixtures(t *testing.T) {
+	for fixtureVersion := 1; fixtureVersion <= CurrentSchemaVersion; fixtureVersion++ {
+		fixtureVersion := fixtureVersion
+		t.Run(fmt.Sprintf("schema-v%d", fixtureVersion), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "orynelo.db")
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for version := 1; version <= fixtureVersion; version++ {
+				content, err := os.ReadFile(filepath.Join(
+					"testdata",
+					fmt.Sprintf("schema_v%d.sql", version),
+				))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(string(content)); err != nil {
+					t.Fatalf("apply fixture v%d: %v", version, err)
+				}
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			store, err := Open(path)
+			if err != nil {
+				t.Fatalf("Open(schema v%d fixture) error = %v", fixtureVersion, err)
+			}
+			defer store.Close()
+			version, err := store.SchemaVersion(context.Background())
+			if err != nil || version != CurrentSchemaVersion {
+				t.Fatalf("migrated schema = %d, %v", version, err)
+			}
+			backup := store.MigrationBackup()
+			if fixtureVersion < CurrentSchemaVersion {
+				if backup.Path == "" || len(backup.Checksum) != 64 {
+					t.Fatalf("migration backup = %#v", backup)
+				}
+				checksum, err := fileSHA256(backup.Path)
+				if err != nil || checksum != backup.Checksum {
+					t.Fatalf("backup checksum = %q, %v", checksum, err)
+				}
+				if _, err := os.Stat(backup.Path + ".sha256"); err != nil {
+					t.Fatalf("checksum manifest: %v", err)
+				}
+			} else if backup != (BackupInfo{}) {
+				t.Fatalf("current schema unexpectedly backed up: %#v", backup)
+			}
+		})
+	}
+
+	content, err := os.ReadFile(filepath.Join("testdata", "snapshot_v1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot DiagnosisSnapshot
+	if err := json.Unmarshal(content, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.SchemaVersion != SnapshotSchemaVersion ||
+		snapshot.Diagnosis.ID != "fixture-v1" {
+		t.Fatalf("snapshot fixture = %#v", snapshot)
+	}
+}
+
+func TestFailedMigrationRollsBackOriginalAndKeepsBackup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "orynelo.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for version := 1; version <= 2; version++ {
+		content, err := os.ReadFile(filepath.Join("testdata", fmt.Sprintf("schema_v%d.sql", version)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	original := append([]string(nil), migrations[2].statements...)
+	migrations[2].statements = append(migrations[2].statements, "INVALID MIGRATION SQL")
+	t.Cleanup(func() { migrations[2].statements = original })
+	_, err = Open(path)
+	var migrationErr *MigrationError
+	if !errors.As(err, &migrationErr) {
+		t.Fatalf("Open() error = %T %v", err, err)
+	}
+	if migrationErr.Backup.Path == "" || migrationErr.Backup.Checksum == "" {
+		t.Fatalf("migration error backup = %#v", migrationErr.Backup)
+	}
+
+	db, err = sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var version int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 2 {
+		t.Fatalf("original schema advanced to %d after rollback", version)
+	}
+	var modeColumns int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('profiles') WHERE name = 'mode'`,
+	).Scan(&modeColumns); err != nil {
+		t.Fatal(err)
+	}
+	if modeColumns != 0 {
+		t.Fatal("rolled-back migration left the mode column behind")
 	}
 }
 

@@ -36,7 +36,10 @@ func (backend *coordinatorTestBackend) Configuration() application.Config {
 	return backend.configuration
 }
 
-func (backend *coordinatorTestBackend) SaveConfiguration(config application.Config) error {
+func (backend *coordinatorTestBackend) SaveConfigurationContext(
+	_ context.Context,
+	config application.Config,
+) error {
 	backend.configuration = config
 	return nil
 }
@@ -74,7 +77,8 @@ func (backend *coordinatorTestBackend) SaveProfile(
 
 func (*coordinatorTestBackend) DeleteProfile(context.Context, int64) error { return nil }
 
-func (*coordinatorTestBackend) RenderReport(
+func (*coordinatorTestBackend) RenderReportContext(
+	context.Context,
 	string,
 	model.Diagnosis,
 	privacy.Mode,

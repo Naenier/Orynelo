@@ -4,9 +4,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
-	"os/signal"
 	"sync"
 
 	"github.com/Naenier/orynelo/internal/application"
@@ -15,6 +16,7 @@ import (
 	"github.com/Naenier/orynelo/internal/cli"
 	"github.com/Naenier/orynelo/internal/config"
 	"github.com/Naenier/orynelo/internal/diagnostics/model"
+	"github.com/Naenier/orynelo/internal/platform"
 	"github.com/Naenier/orynelo/internal/privacy"
 )
 
@@ -27,20 +29,26 @@ func main() {
 func run() int {
 	info := buildinfo.Current()
 	lazy := &lazyApplication{info: info}
+	lazy.warningWriter = os.Stderr
 	defer func() {
 		if err := lazy.Close(); err != nil {
 			_, _ = fmt.Fprintln(os.Stderr, "Error closing Orynelo:", err)
 		}
 	}()
 
-	ctx, stop := signal.NotifyContext(context.Background(), terminationSignals()...)
+	ctx, stop := platform.NotifyShutdownContext(
+		context.Background(),
+		func() { os.Exit(cli.ExitCancel) },
+		terminationSignals()...,
+	)
 	defer stop()
 	root := cli.NewRoot(cli.Options{
-		Application: lazy,
-		Build:       info,
-		Stdout:      os.Stdout,
-		Stderr:      os.Stderr,
-		SetLogLevel: lazy.SetLogLevel,
+		Application:          lazy,
+		Build:                info,
+		Stdout:               os.Stdout,
+		Stderr:               os.Stderr,
+		SetLogLevel:          lazy.SetLogLevel,
+		SetPersistencePolicy: lazy.SetPersistencePolicy,
 	})
 	return cli.Execute(ctx, root, os.Stderr)
 }
@@ -49,11 +57,14 @@ func run() int {
 // services, allowing lightweight commands such as help and version to run
 // without opening configuration, logs, or storage.
 type lazyApplication struct {
-	info        buildinfo.Info
-	openRuntime func(buildinfo.Info) (*bootstrap.Runtime, error)
-	once        sync.Once
-	run         *bootstrap.Runtime
-	err         error
+	info                   buildinfo.Info
+	openRuntime            func(buildinfo.Info) (*bootstrap.Runtime, error)
+	openRuntimeWithOptions func(buildinfo.Info, bootstrap.RuntimeOptions) (*bootstrap.Runtime, error)
+	policy                 bootstrap.PersistencePolicy
+	warningWriter          io.Writer
+	once                   sync.Once
+	run                    *bootstrap.Runtime
+	err                    error
 }
 
 var _ cli.Application = (*lazyApplication)(nil)
@@ -62,13 +73,50 @@ var _ cli.Application = (*lazyApplication)(nil)
 func (l *lazyApplication) runtime() (*bootstrap.Runtime, error) {
 	l.once.Do(func() {
 		openRuntime := l.openRuntime
-		if openRuntime == nil {
-			openRuntime = bootstrap.OpenRuntime
+		if openRuntime != nil {
+			l.run, l.err = openRuntime(l.info)
+		} else {
+			openRuntimeWithOptions := l.openRuntimeWithOptions
+			if openRuntimeWithOptions == nil {
+				openRuntimeWithOptions = bootstrap.OpenRuntimeWithOptions
+			}
+			l.run, l.err = openRuntimeWithOptions(l.info, bootstrap.RuntimeOptions{
+				Persistence: l.policy,
+			})
 		}
-		l.run, l.err = openRuntime(l.info)
 		l.err = runtimeApplicationError(l.err)
+		if l.err == nil {
+			l.writeStartupWarnings()
+		}
 	})
 	return l.run, l.err
+}
+
+// SetPersistencePolicy validates a safe local-state mode before lazy startup.
+func (l *lazyApplication) SetPersistencePolicy(value string) error {
+	policy, err := bootstrap.ParsePersistencePolicy(value)
+	if err != nil {
+		return err
+	}
+	if l.run != nil {
+		return errors.New("persistence policy cannot change after runtime startup")
+	}
+	l.policy = policy
+	return nil
+}
+
+func (l *lazyApplication) writeStartupWarnings() {
+	if l.run == nil || l.run.Service == nil || l.warningWriter == nil {
+		return
+	}
+	for _, warning := range l.run.Service.StartupWarnings() {
+		_, _ = fmt.Fprintf(
+			l.warningWriter,
+			"Warning: %s (%s); diagnostics continue with limited local state.\n",
+			warning.Code,
+			warning.Message,
+		)
+	}
 }
 
 // runtimeApplicationError maps bootstrap failures to the stable application
@@ -117,6 +165,7 @@ func (l *lazyApplication) DiagnoseRequest(
 
 // RenderReport initializes the runtime and renders a privacy-projected report.
 func (l *lazyApplication) RenderReport(
+	ctx context.Context,
 	format string,
 	diagnosis model.Diagnosis,
 	mode privacy.Mode,
@@ -125,7 +174,7 @@ func (l *lazyApplication) RenderReport(
 	if err != nil {
 		return nil, err
 	}
-	return runtime.Service.RenderReport(format, diagnosis, mode)
+	return runtime.Service.RenderReportContext(ctx, format, diagnosis, mode)
 }
 
 // SetLogLevel updates the runtime logger after lazy initialization.
