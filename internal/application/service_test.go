@@ -151,6 +151,69 @@ func TestServiceDiagnoseAddsBuildAndPersists(t *testing.T) {
 	}
 }
 
+func TestServiceNeverReturnsOrPersistsTransientHeaderValues(t *testing.T) {
+	t.Parallel()
+	const (
+		headerSecret = "Bearer one-time-persistence-secret"
+		caPath       = "/runtime/private/incident-ca.pem"
+	)
+	runner := &fakeRunner{diagnosis: model.Diagnosis{
+		ID: "diagnosis-transient",
+		Options: model.DiagnoseOptions{
+			RequestHeaders:     map[string]string{"authorization": headerSecret},
+			RequestHeaderNames: []string{"authorization"},
+			CustomCABundlePath: caPath,
+			CustomCAPEM:        []byte("runtime-ca-secret"),
+			CustomCAConfigured: true,
+		},
+		Summary: model.Summary{Status: model.StatusPassed},
+	}}
+	persistence := &fakePersistence{}
+	service, err := New(Dependencies{
+		Runner:      runner,
+		Persistence: persistence,
+		ConfigStore: &fakeConfigStore{},
+		Config:      DefaultConfig(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := "https://example.test/health"
+	result, err := service.DiagnoseRequest(context.Background(), DiagnoseRequest{
+		Overrides: DiagnoseOverrides{
+			Target:             &target,
+			CustomCABundlePath: optionPointer(caPath),
+			RequestHeaders: map[string]string{
+				"Authorization": headerSecret,
+			},
+		},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runner.options.RequestHeaders["authorization"] != headerSecret ||
+		runner.options.CustomCABundlePath != caPath {
+		t.Fatalf("execution did not receive transient values: %+v", runner.options)
+	}
+	for label, diagnosis := range map[string]model.Diagnosis{
+		"returned":  result,
+		"persisted": persistence.saved,
+	} {
+		if diagnosis.Options.RequestHeaders != nil ||
+			diagnosis.Options.CustomCABundlePath != "" ||
+			diagnosis.Options.CustomCAPEM != nil ||
+			strings.Join(diagnosis.Options.RequestHeaderNames, ",") != "authorization" {
+			t.Fatalf("%s diagnosis retained unsafe runtime options: %+v", label, diagnosis.Options)
+		}
+		serialized := fmt.Sprintf("%#v", diagnosis)
+		for _, secret := range []string{headerSecret, caPath, "runtime-ca-secret"} {
+			if strings.Contains(serialized, secret) {
+				t.Fatalf("%s diagnosis exposed %q: %s", label, secret, serialized)
+			}
+		}
+	}
+}
+
 func TestServiceRecoversPersistenceAdapterPanic(t *testing.T) {
 	t.Parallel()
 	service, err := New(Dependencies{
@@ -201,7 +264,7 @@ func TestServiceDiagnoseRequestResolvesEffectiveOptionsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	target := " https://override.example/status "
+	target := " tls://override.example:443 "
 	timeout := 25 * time.Second
 	noProxy := false
 	diagnosis, err := service.DiagnoseRequest(context.Background(), DiagnoseRequest{
@@ -216,7 +279,7 @@ func TestServiceDiagnoseRequestResolvesEffectiveOptionsOnce(t *testing.T) {
 		t.Fatalf("DiagnoseRequest() error = %v", err)
 	}
 
-	if runner.options.Target != "https://override.example/status" ||
+	if runner.options.Target != "tls://override.example:443" ||
 		runner.options.Timeout != 25*time.Second ||
 		runner.options.CheckTimeout != 4*time.Second ||
 		runner.options.IPVersion != model.IPVersion4 ||

@@ -105,6 +105,7 @@ func (p Projection) Diagnosis(input model.Diagnosis) model.Diagnosis {
 	for index := range input.Checks {
 		result.Checks[index] = p.CheckResult(input.Checks[index])
 	}
+	result.NetworkPaths = p.networkPaths(input.NetworkPaths)
 	return result
 }
 
@@ -127,6 +128,13 @@ func (p Projection) Options(input model.DiagnoseOptions) model.DiagnoseOptions {
 	result := input
 	result.Target = p.url(input.Target)
 	result.UserAgent = p.value("userAgent", input.UserAgent)
+	result.ConnectIP = p.value("connectIp", input.ConnectIP)
+	result.ServerName = p.host(input.ServerName)
+	result.HTTPHost = p.value("httpHost", input.HTTPHost)
+	result.RequestHeaderNames = append([]string(nil), input.RequestHeaderNames...)
+	result.CustomCABundlePath = ""
+	result.CustomCAPEM = nil
+	result.RequestHeaders = nil
 	return result
 }
 
@@ -137,14 +145,68 @@ func (p Projection) CheckResult(input model.CheckResult) model.CheckResult {
 	result.Summary = p.value("summary", input.Summary)
 	result.StartedAt = utc(input.StartedAt)
 	result.FinishedAt = utc(input.FinishedAt)
+	result.NetworkRefs = append([]model.NetworkRef(nil), input.NetworkRefs...)
 	result.Evidence = make([]model.Evidence, len(input.Evidence))
 	for index, evidence := range input.Evidence {
 		evidence.Message = p.value("message", evidence.Message)
 		evidence.Details = p.details(evidence.Details)
+		if evidence.NetworkRef != nil {
+			ref := *evidence.NetworkRef
+			evidence.NetworkRef = &ref
+		}
 		result.Evidence[index] = evidence
 	}
 	result.Recommendations = p.recommendations(input.Recommendations)
 	return result
+}
+
+func (p Projection) networkPaths(input []model.NetworkPath) []model.NetworkPath {
+	if input == nil {
+		return nil
+	}
+	result := append([]model.NetworkPath(nil), input...)
+	for pathIndex := range result {
+		result[pathIndex].Hops = append([]model.NetworkHop(nil), input[pathIndex].Hops...)
+		for hopIndex := range result[pathIndex].Hops {
+			source := input[pathIndex].Hops[hopIndex]
+			hop := &result[pathIndex].Hops[hopIndex]
+			hop.URL = p.url(source.URL)
+			hop.Host = p.host(source.Host)
+			hop.RemoteIP = p.ip(source.RemoteIP)
+			hop.RemoteAddr = p.value("remoteAddress", source.RemoteAddr)
+			hop.LocalAddr = p.value("localAddress", source.LocalAddr)
+			if p.Mode() == ModeStrict && source.Zone != "" {
+				hop.Zone = redaction.Replacement
+			}
+			hop.Attempts = append([]model.NetworkAttempt(nil), source.Attempts...)
+			for attemptIndex := range hop.Attempts {
+				attempt := &hop.Attempts[attemptIndex]
+				attempt.RemoteIP = p.ip(source.Attempts[attemptIndex].RemoteIP)
+				attempt.RemoteAddr = p.value("remoteAddress", source.Attempts[attemptIndex].RemoteAddr)
+				attempt.LocalAddr = p.value("localAddress", source.Attempts[attemptIndex].LocalAddr)
+				attempt.InterfaceName = p.value("interfaceName", source.Attempts[attemptIndex].InterfaceName)
+				attempt.Error = p.value("error", source.Attempts[attemptIndex].Error)
+				attempt.StartedAt = utc(source.Attempts[attemptIndex].StartedAt)
+				attempt.FinishedAt = utc(source.Attempts[attemptIndex].FinishedAt)
+			}
+			hop.Timings = append([]model.PhaseTiming(nil), source.Timings...)
+			for timingIndex := range hop.Timings {
+				hop.Timings[timingIndex].StartedAt = utc(source.Timings[timingIndex].StartedAt)
+				hop.Timings[timingIndex].FinishedAt = utc(source.Timings[timingIndex].FinishedAt)
+			}
+		}
+	}
+	return result
+}
+
+func (p Projection) ip(input net.IP) net.IP {
+	if input == nil {
+		return nil
+	}
+	if p.Mode() == ModeStrict && isInternalHost(input.String()) {
+		return nil
+	}
+	return append(net.IP(nil), input...)
 }
 
 // Event returns a privacy-safe event for external consumers. Result is copied
@@ -347,7 +409,7 @@ func networkKey(key string) bool {
 
 func strictIdentityKey(key string) bool {
 	switch strings.ToLower(strings.TrimSpace(key)) {
-	case "sni", "dnssans", "ipsans", "subject", "issuer", "verificationerror":
+	case "sni", "dnssans", "ipsans", "subject", "issuer", "verificationerror", "interfacename":
 		return true
 	default:
 		return false

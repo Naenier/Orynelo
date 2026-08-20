@@ -160,6 +160,69 @@ The HTTP transport performs its own bounded resolution intentionally: its
 selection and redirects, which can differ from the direct-origin preflight.
 The transport still enforces the selected IPv4/IPv6 mode.
 
+## Network paths and probe scopes
+
+The run-local state builds a correlated graph instead of treating every
+network observation as if it described one endpoint:
+
+```mermaid
+flowchart TD
+    D["Diagnosis"] --> P["NetworkPath"]
+    P --> PD["direct"]
+    P --> PP["HTTP proxy"]
+    P --> PC["HTTPS CONNECT"]
+    PD --> O["origin hop"]
+    PP --> PX["proxy-peer hop"]
+    PP --> O2["origin hop"]
+    PC --> PX2["proxy-peer hop"]
+    PC --> O3["origin hop"]
+    O --> A["DNS / route / TCP / TLS / HTTP attempts"]
+    O2 --> R["redirect hops"]
+    O3 --> R
+```
+
+`NetworkRef` joins a fact to one path, hop, and attempt. Check results expose
+all refs they cover, while evidence, route/TCP results, TLS attempts, HTTP
+hops, redirect edges, and phase timings retain the precise ref. Proxy socket
+addresses belong to `proxy_peer`; the logical upstream remains an `origin`.
+When a redirect changes route, the new path links to the preceding path rather
+than rewriting it. The graph is copied into `Diagnosis.NetworkPaths` before
+summary construction and privacy projection.
+
+Paths carry one of three roles. `client_effective` is the actual client route;
+`address_matrix` is an explicitly requested backend comparison; and
+`auxiliary_direct` is a direct-origin observation that must not be confused
+with a selected proxy route. Older flat result fields remain selected
+compatibility projections for schema-v1 readers.
+
+The default `client_effective` probe uses a bounded Happy Eyeballs-style TCP
+selection and follows the selected successful attempt through TLS. The
+`address_matrix` probe uses stable address order, an explicit address limit,
+bounded workers, and independent deadlines derived by dividing the matrix
+budget. Addresses omitted by the limit are visible in evidence. This prevents
+one slow backend from consuming the whole run while making heterogeneous DNS,
+TCP, or certificate behavior observable.
+
+Target parsing has explicit `tcp`, `tls`, `http`, and `https` effective modes.
+Interface-level `auto`, `tcp`, and `tls` controls resolve only ambiguous input;
+they cannot silently contradict an explicit URI. A link-local IPv6 literal may
+retain a validated interface zone. The normalized target is report-safe, while
+the request-capable URL remains runtime-only.
+
+TLS matrix attempts separate TCP dial, handshake, and total durations and
+retain the complete report-safe peer chain and negotiated parameters. Custom
+CA data extends the system trust pool through `internal/trust`; CA bytes and
+paths never cross the persistence boundary. Connect IP, TLS SNI/verification
+identity, and HTTP Host are independent execution inputs.
+
+DNS records typed per-family outcomes and optionally enriches them with CNAME,
+TTL, resolver-source, and search-domain evidence. HTTP tracing creates one
+redacted hop per redirect and one record per connect callback, including reuse,
+selected endpoints, proxy choice, and DNS/connect/TLS/TTFB/total phases.
+Expected status and latency are explicit assertions. Request-header values and
+body content remain outside persisted state; bounded body metadata collection
+is opt-in.
+
 ## State and events
 
 A run-local `State` carries the parsed target and results required by later
@@ -244,8 +307,8 @@ non-atomic.
 
 `internal/buildinfo` is the single source of runtime build metadata for the CLI
 version command, GUI About screen, and stored history. The current release is
-version `0.3.0`. Make builds inject the version, commit, build date, and source-tree
-modification state, while
+version `0.4.0`. Make builds inject the version, commit, build date, and
+source-tree modification state, while
 `runtime/debug.ReadBuildInfo` supplies VCS and module fallbacks for local or
 `go install` builds. When no injected or module version is available, the
 displayed build version is the current stage version. Nothing rewrites a

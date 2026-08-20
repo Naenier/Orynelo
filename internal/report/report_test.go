@@ -2,6 +2,7 @@ package report
 
 import (
 	"encoding/json"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -196,6 +197,85 @@ func TestHumanReportsKeepMixedHTTPRouteTruthful(t *testing.T) {
 		}
 		if strings.Contains(text, "Target reachable through selected proxy") {
 			t.Fatalf("%s report made a proxy-only claim:\n%s", format, text)
+		}
+	}
+}
+
+func TestHumanReportsIncludeCorrelatedNetworkPathsWithoutTransientSecrets(t *testing.T) {
+	t.Parallel()
+
+	diagnosis := sampleDiagnosis()
+	diagnosis.Target.Mode = model.TargetModeHTTPS
+	diagnosis.Options.ProbeMode = model.ProbeModeClientEffective
+	diagnosis.Options.AddressLimit = 4
+	diagnosis.Options.AddressMatrixBudget = 2 * time.Second
+	diagnosis.Options.CustomCAConfigured = true
+	diagnosis.Options.CustomCABundlePath = "/home/alice/private-ca.pem"
+	diagnosis.Options.CustomCAPEM = []byte("private-ca-material")
+	diagnosis.Options.RequestHeaderNames = []string{"Authorization", "X-Incident"}
+	diagnosis.Options.RequestHeaders = map[string]string{
+		"Authorization": "Bearer report-request-secret",
+	}
+	diagnosis.NetworkPaths = []model.NetworkPath{{
+		ID:   "path-http-001",
+		Role: model.NetworkPathRoleClientEffective,
+		Kind: model.NetworkPathHTTPSConnect,
+		Hops: []model.NetworkHop{{
+			ID:         "hop-proxy-001",
+			PathID:     "path-http-001",
+			Kind:       model.NetworkHopProxyPeer,
+			Host:       "proxy.example.test",
+			Port:       3128,
+			RemoteAddr: "203.0.113.10:3128",
+			LocalAddr:  "192.0.2.10:54000",
+			Attempts: []model.NetworkAttempt{{
+				ID:            "attempt-connect-001",
+				PathID:        "path-http-001",
+				HopID:         "hop-proxy-001",
+				Kind:          model.NetworkAttemptTCP,
+				State:         model.AttemptStateCompleted,
+				RemoteIP:      net.ParseIP("203.0.113.10"),
+				RemoteAddr:    "203.0.113.10:3128",
+				LocalAddr:     "192.0.2.10:54000",
+				InterfaceName: "eth0",
+				MTU:           1500,
+				Duration:      15 * time.Millisecond,
+				Selected:      true,
+			}},
+			Timings: []model.PhaseTiming{{
+				NetworkRef: model.NetworkRef{
+					PathID:    "path-http-001",
+					HopID:     "hop-proxy-001",
+					AttemptID: "attempt-connect-001",
+				},
+				Phase:    "connect",
+				Duration: 15 * time.Millisecond,
+			}},
+		}},
+	}}
+
+	for _, format := range []Format{FormatText, FormatMarkdown} {
+		output, err := Render(diagnosis, format)
+		if err != nil {
+			t.Fatalf("Render(%s) error = %v", format, err)
+		}
+		text := string(output)
+		for _, expected := range []string{
+			"path-http-001", "hop-proxy-001", "attempt-connect-001",
+			"client_effective", "https_connect", "proxy_peer", "203.0.113.10:3128",
+			"192.0.2.10:54000", "eth0", "1500", "connect", "custom-ca=configured",
+			"Authorization,X-Incident",
+		} {
+			if !strings.Contains(text, expected) {
+				t.Fatalf("%s report missing %q:\n%s", format, expected, text)
+			}
+		}
+		for _, secret := range []string{
+			"report-request-secret", "private-ca-material", "/home/alice/private-ca.pem",
+		} {
+			if strings.Contains(text, secret) {
+				t.Fatalf("%s report leaked %q:\n%s", format, secret, text)
+			}
 		}
 	}
 }

@@ -349,6 +349,149 @@ func TestDiagnoseSendsOnlyExplicitOverridesToApplicationResolver(t *testing.T) {
 	}
 }
 
+func TestDiagnoseStageThreeFlagsBecomeExplicitRuntimeOverrides(t *testing.T) {
+	t.Parallel()
+	const headerSecret = "Bearer cli-one-time-secret"
+	app := &fakeApplication{
+		diagnosis: model.Diagnosis{Summary: model.Summary{Status: model.StatusPassed}},
+		content:   []byte("report\n"),
+	}
+	var stdout, stderr bytes.Buffer
+	root := NewRoot(Options{Application: app, Stdout: &stdout, Stderr: &stderr})
+	root.SetArgs([]string{
+		"diagnose", "example.test:8443",
+		"--mode", "tls",
+		"--probe-mode", "address-matrix",
+		"--address-limit", "6",
+		"--matrix-budget", "3s",
+		"--expect-status", "201-204",
+		"--latency-threshold", "750ms",
+		"--connect-ip", "192.0.2.44",
+		"--sni", "node.example.test",
+		"--http-host", "service.example.test:8443",
+		"--ca-bundle", "/runtime/private/ca.pem",
+		"--header", "Authorization: " + headerSecret,
+		"--header", "X-Incident: INC-42",
+		"--dns-details",
+		"--inspect-body",
+	})
+
+	if code := Execute(context.Background(), root, &stderr); code != ExitOK {
+		t.Fatalf("Execute() = %d; stderr=%q", code, stderr.String())
+	}
+	got := app.options
+	if got.Target != "tls://example.test:8443" || !got.EnableTLS ||
+		got.ProbeMode != model.ProbeModeAddressMatrix || got.AddressLimit != 6 ||
+		got.AddressMatrixBudget != 3*time.Second || !got.ExpectedStatusConfigured ||
+		got.ExpectedStatusMin != 201 || got.ExpectedStatusMax != 204 ||
+		got.LatencyThreshold != 750*time.Millisecond || got.ConnectIP != "192.0.2.44" ||
+		got.ServerName != "node.example.test" || got.HTTPHost != "service.example.test:8443" ||
+		got.CustomCABundlePath != "/runtime/private/ca.pem" || !got.CustomCAConfigured ||
+		got.RequestHeaders["authorization"] != headerSecret ||
+		strings.Join(got.RequestHeaderNames, ",") != "authorization,x-incident" ||
+		!got.CollectDNSDetails || !got.InspectBody {
+		t.Fatalf("effective Stage 3 options = %+v", got)
+	}
+	overrides := app.request.Overrides
+	if overrides.Mode == nil || overrides.ProbeMode == nil ||
+		overrides.AddressLimit == nil || overrides.AddressMatrixBudget == nil ||
+		overrides.ExpectedStatusMin == nil || overrides.ExpectedStatusMax == nil ||
+		overrides.LatencyThreshold == nil || overrides.ConnectIP == nil ||
+		overrides.ServerName == nil || overrides.HTTPHost == nil ||
+		overrides.CustomCABundlePath == nil || overrides.RequestHeaders == nil ||
+		overrides.CollectDNSDetails == nil || overrides.InspectBody == nil {
+		t.Fatalf("explicit Stage 3 overrides were omitted: %+v", overrides)
+	}
+	for stream, output := range map[string]string{
+		"stdout": stdout.String(),
+		"stderr": stderr.String(),
+	} {
+		for _, secret := range []string{headerSecret, "INC-42"} {
+			if strings.Contains(output, secret) {
+				t.Fatalf("%s exposed transient header value %q: %q", stream, secret, output)
+			}
+		}
+	}
+}
+
+func TestDiagnoseInvalidStageThreeFlagsStayTypedAndDoNotEchoHeaderValues(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		arguments []string
+		forbidden string
+	}{
+		{name: "probe mode", arguments: []string{"--probe-mode", "scan"}},
+		{name: "address limit", arguments: []string{"--address-limit", "many"}},
+		{name: "matrix budget", arguments: []string{"--matrix-budget", "later"}},
+		{name: "status", arguments: []string{"--expect-status", "700"}},
+		{name: "latency", arguments: []string{"--latency-threshold", "slow"}},
+		{name: "connect IP", arguments: []string{"--connect-ip", "not-an-ip"}},
+		{
+			name:      "header injection",
+			arguments: []string{"--header", "X-Debug: cli-header-secret\r\nInjected: true"},
+			forbidden: "cli-header-secret",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var stdout, stderr bytes.Buffer
+			root := NewRoot(Options{
+				Application: &fakeApplication{
+					diagnosis: model.Diagnosis{Summary: model.Summary{Status: model.StatusPassed}},
+				},
+				Stdout: &stdout,
+				Stderr: &stderr,
+			})
+			args := []string{"diagnose", "example.test"}
+			root.SetArgs(append(args, test.arguments...))
+			if code := Execute(context.Background(), root, &stderr); code != ExitInput {
+				t.Fatalf("Execute() = %d; stderr=%q", code, stderr.String())
+			}
+			if test.forbidden != "" && strings.Contains(stderr.String(), test.forbidden) {
+				t.Fatalf("stderr exposed transient value %q: %q", test.forbidden, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "Error [APP_") {
+				t.Fatalf("stderr did not contain a typed boundary code: %q", stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q, want empty", stdout.String())
+			}
+		})
+	}
+}
+
+func TestDiagnoseExplicitTransportModeRejectsSchemeLessURLComponentsSafely(t *testing.T) {
+	t.Parallel()
+	const secret = "mode-target-secret"
+	var stdout, stderr bytes.Buffer
+	root := NewRoot(Options{
+		Application: &fakeApplication{
+			diagnosis: model.Diagnosis{Summary: model.Summary{Status: model.StatusPassed}},
+		},
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+	root.SetArgs([]string{
+		"diagnose",
+		"example.test:443/private?token=" + secret,
+		"--mode",
+		"tls",
+	})
+
+	if code := Execute(context.Background(), root, &stderr); code != ExitInput {
+		t.Fatalf("Execute() = %d; stderr=%q", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), secret) || strings.Contains(stderr.String(), "/private") {
+		t.Fatalf("stderr exposed rejected target details: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "Error [APP_DIAGNOSE_OPTIONS_INVALID]") {
+		t.Fatalf("stderr did not contain typed validation code: %q", stderr.String())
+	}
+}
+
 func TestDiagnosePreservesExplicitFalseOverrides(t *testing.T) {
 	t.Parallel()
 

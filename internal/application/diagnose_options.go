@@ -3,12 +3,14 @@ package application
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"strings"
 	"time"
 
 	targetcheck "github.com/Naenier/orynelo/internal/diagnostics/checks/target"
 	"github.com/Naenier/orynelo/internal/diagnostics/model"
 	"github.com/Naenier/orynelo/internal/privacy"
+	"github.com/Naenier/orynelo/internal/trust"
 )
 
 const (
@@ -47,6 +49,9 @@ type DiagnoseOverrides struct {
 	Timeout                     *time.Duration
 	CheckTimeout                *time.Duration
 	IPVersion                   *model.IPVersion
+	ProbeMode                   *model.ProbeMode
+	AddressLimit                *int
+	AddressMatrixBudget         *time.Duration
 	NoProxy                     *bool
 	Insecure                    *bool
 	EnableTLS                   *bool
@@ -61,6 +66,17 @@ type DiagnoseOverrides struct {
 	CertificateWarningThreshold *time.Duration
 	MaxConcurrency              *int
 	BodyLimit                   *int64
+	ExpectedStatusMin           *int
+	ExpectedStatusMax           *int
+	LatencyThreshold            *time.Duration
+	ConnectIP                   *string
+	ServerName                  *string
+	HTTPHost                    *string
+	CollectDNSDetails           *bool
+	InspectBody                 *bool
+	CustomCABundlePath          *string
+	CustomCAPEM                 []byte
+	RequestHeaders              map[string]string
 }
 
 // DiagnoseRequest carries only an optional saved profile and explicit
@@ -171,6 +187,17 @@ func PreviewDiagnoseOptions(
 	if err != nil {
 		return model.DiagnoseOptions{}, err
 	}
+	parsed, err := targetcheck.Parse(options.Target)
+	if err != nil {
+		return model.DiagnoseOptions{}, operationError(
+			err,
+			ErrorCategoryValidation,
+			"APP_DIAGNOSE_OPTIONS_INVALID",
+			"error.diagnose_options_invalid",
+			map[string]string{"field": "target"},
+		)
+	}
+	options.Target = parsed.Normalized
 	projection, err := privacy.New(mode)
 	if err != nil {
 		return model.DiagnoseOptions{}, operationError(
@@ -203,6 +230,15 @@ func applyDiagnoseOverrides(
 	}
 	if overrides.IPVersion != nil {
 		options.IPVersion = *overrides.IPVersion
+	}
+	if overrides.ProbeMode != nil {
+		options.ProbeMode = *overrides.ProbeMode
+	}
+	if overrides.AddressLimit != nil {
+		options.AddressLimit = *overrides.AddressLimit
+	}
+	if overrides.AddressMatrixBudget != nil {
+		options.AddressMatrixBudget = *overrides.AddressMatrixBudget
 	}
 	if overrides.NoProxy != nil {
 		options.NoProxy = *overrides.NoProxy
@@ -243,6 +279,41 @@ func applyDiagnoseOverrides(
 	if overrides.BodyLimit != nil {
 		options.BodyLimit = *overrides.BodyLimit
 	}
+	if overrides.ExpectedStatusMin != nil {
+		options.ExpectedStatusMin = *overrides.ExpectedStatusMin
+		options.ExpectedStatusConfigured = true
+	}
+	if overrides.ExpectedStatusMax != nil {
+		options.ExpectedStatusMax = *overrides.ExpectedStatusMax
+		options.ExpectedStatusConfigured = true
+	}
+	if overrides.LatencyThreshold != nil {
+		options.LatencyThreshold = *overrides.LatencyThreshold
+	}
+	if overrides.ConnectIP != nil {
+		options.ConnectIP = *overrides.ConnectIP
+	}
+	if overrides.ServerName != nil {
+		options.ServerName = *overrides.ServerName
+	}
+	if overrides.HTTPHost != nil {
+		options.HTTPHost = *overrides.HTTPHost
+	}
+	if overrides.CollectDNSDetails != nil {
+		options.CollectDNSDetails = *overrides.CollectDNSDetails
+	}
+	if overrides.InspectBody != nil {
+		options.InspectBody = *overrides.InspectBody
+	}
+	if overrides.CustomCABundlePath != nil {
+		options.CustomCABundlePath = *overrides.CustomCABundlePath
+	}
+	if overrides.CustomCAPEM != nil {
+		options.CustomCAPEM = append([]byte(nil), overrides.CustomCAPEM...)
+	}
+	if overrides.RequestHeaders != nil {
+		options.RequestHeaders = cloneRequestHeaders(overrides.RequestHeaders)
+	}
 }
 
 func normalizeAndValidateDiagnoseOptions(
@@ -260,8 +331,24 @@ func normalizeAndValidateDiagnoseOptions(
 	if err != nil {
 		return wrapInvalidDiagnoseOption("target", "invalid target", err)
 	}
-	if mode == model.DiagnosticModeTCP {
-		options.Target = parsed.Address()
+	if mode != model.DiagnosticModeAuto {
+		wanted := model.TargetModeTCP
+		if mode == model.DiagnosticModeTLS {
+			wanted = model.TargetModeTLS
+		}
+		if strings.Contains(options.Target, "://") && parsed.Mode != wanted {
+			return invalidDiagnoseOption(
+				"mode",
+				fmt.Sprintf("explicit %s target conflicts with %s mode", parsed.Mode, mode),
+			)
+		}
+		if !strings.Contains(options.Target, "://") && strings.ContainsAny(options.Target, "/?#") {
+			return invalidDiagnoseOption(
+				"target",
+				"explicit TCP or TLS mode does not accept URL paths, queries, or fragments",
+			)
+		}
+		options.Target = string(wanted) + "://" + parsed.Address()
 	}
 
 	if options.Timeout <= 0 || options.Timeout > maximumDiagnoseTimeout {
@@ -285,6 +372,24 @@ func normalizeAndValidateDiagnoseOptions(
 	}
 	if !options.IPVersion.Valid() {
 		return invalidDiagnoseOption("ipVersion", `IP version must be "auto", "4", or "6"`)
+	}
+	options.ProbeMode = model.ProbeMode(
+		strings.ReplaceAll(strings.ToLower(strings.TrimSpace(string(options.ProbeMode))), "-", "_"),
+	)
+	if options.ProbeMode == "matrix" {
+		options.ProbeMode = model.ProbeModeAddressMatrix
+	}
+	if !options.ProbeMode.Valid() {
+		return invalidDiagnoseOption("probeMode", "probe mode must be client_effective or address_matrix")
+	}
+	if options.AddressLimit < 1 || options.AddressLimit > 16 {
+		return invalidDiagnoseOption("addressLimit", "address limit must be between 1 and 16")
+	}
+	if options.AddressMatrixBudget <= 0 || options.AddressMatrixBudget > maximumDiagnoseTimeout {
+		return invalidDiagnoseOption("addressMatrixBudget", "address matrix budget must be greater than zero and at most 24h")
+	}
+	if options.AddressMatrixBudget > options.Timeout {
+		options.AddressMatrixBudget = options.Timeout
 	}
 	if options.MaxRedirects < 0 || options.MaxRedirects > 50 {
 		return invalidDiagnoseOption("maxRedirects", "maximum redirects must be between 0 and 50")
@@ -330,5 +435,77 @@ func normalizeAndValidateDiagnoseOptions(
 	if options.BodyLimit < 1 || options.BodyLimit > 4<<20 {
 		return invalidDiagnoseOption("bodyLimit", "body limit must be between 1 byte and 4 MiB")
 	}
+	if options.ExpectedStatusMin < 100 || options.ExpectedStatusMin > 599 ||
+		options.ExpectedStatusMax < 100 || options.ExpectedStatusMax > 599 ||
+		options.ExpectedStatusMin > options.ExpectedStatusMax {
+		return invalidDiagnoseOption("expectedStatus", "expected HTTP status must be a valid ascending range between 100 and 599")
+	}
+	if options.LatencyThreshold < 0 || options.LatencyThreshold > maximumDiagnoseTimeout {
+		return invalidDiagnoseOption("latencyThreshold", "latency threshold must be between zero and 24h")
+	}
+	options.ConnectIP = strings.TrimSpace(options.ConnectIP)
+	if options.ConnectIP != "" {
+		address, parseErr := netip.ParseAddr(options.ConnectIP)
+		if parseErr != nil {
+			return invalidDiagnoseOption("connectIP", "connect IP must be an IPv4 or IPv6 literal")
+		}
+		if address.Zone() != "" && (!address.Is6() || !address.IsLinkLocalUnicast()) {
+			return invalidDiagnoseOption("connectIP", "an IPv6 zone is allowed only for a link-local address")
+		}
+		if options.IPVersion == model.IPVersion4 && !address.Is4() ||
+			options.IPVersion == model.IPVersion6 && !address.Is6() {
+			return invalidDiagnoseOption("connectIP", "connect IP does not match the selected IP version")
+		}
+		options.ConnectIP = address.String()
+	}
+	options.ServerName = strings.TrimSuffix(strings.TrimSpace(options.ServerName), ".")
+	if err := validateEndpointIdentity(options.ServerName, "serverName", false); err != nil {
+		return err
+	}
+	options.HTTPHost = strings.TrimSpace(options.HTTPHost)
+	if err := validateEndpointIdentity(options.HTTPHost, "httpHost", true); err != nil {
+		return err
+	}
+	options.CustomCABundlePath = strings.TrimSpace(options.CustomCABundlePath)
+	if options.Insecure && (options.CustomCABundlePath != "" || len(options.CustomCAPEM) > 0) {
+		return invalidDiagnoseOption("customCA", "custom CA and insecure TLS mode are mutually exclusive")
+	}
+	if len(options.CustomCAPEM) > 0 {
+		if err := trust.ValidateBundle(options.CustomCAPEM); err != nil {
+			return wrapInvalidDiagnoseOption("customCA", "custom CA bundle is invalid", err)
+		}
+		options.CustomCAPEM = append([]byte(nil), options.CustomCAPEM...)
+	}
+	options.CustomCAConfigured = options.CustomCABundlePath != "" || len(options.CustomCAPEM) > 0
+	headers, names, err := validateTransientHeaders(options.RequestHeaders)
+	if err != nil {
+		return wrapInvalidDiagnoseOption("requestHeaders", "one-time request headers are invalid", err)
+	}
+	options.RequestHeaders = headers
+	options.RequestHeaderNames = names
 	return nil
+}
+
+func validateEndpointIdentity(value, field string, allowPort bool) error {
+	if value == "" {
+		return nil
+	}
+	if len(value) > 512 || containsControl(value) || strings.ContainsAny(value, " /\\?#@") {
+		return invalidDiagnoseOption(field, field+" contains invalid characters")
+	}
+	if !allowPort && strings.Contains(value, ":") {
+		return invalidDiagnoseOption(field, field+" must be a DNS name without a port")
+	}
+	return nil
+}
+
+func cloneRequestHeaders(input map[string]string) map[string]string {
+	if input == nil {
+		return nil
+	}
+	result := make(map[string]string, len(input))
+	for key, value := range input {
+		result[key] = value
+	}
+	return result
 }

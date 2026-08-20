@@ -37,14 +37,130 @@ func (s Status) Valid() bool {
 	}
 }
 
+// NetworkRef correlates an observation with one concrete network path, hop,
+// and attempt. All fields are optional so snapshots written before path
+// correlation was introduced remain valid.
+type NetworkRef struct {
+	PathID    string `json:"pathId,omitempty"`
+	HopID     string `json:"hopId,omitempty"`
+	AttemptID string `json:"attemptId,omitempty"`
+}
+
+// NetworkPathRole distinguishes the client-observed route from explicitly
+// requested comparison probes.
+type NetworkPathRole string
+
+const (
+	NetworkPathRoleClientEffective NetworkPathRole = "client_effective"
+	NetworkPathRoleAddressMatrix   NetworkPathRole = "address_matrix"
+	NetworkPathRoleAuxiliaryDirect NetworkPathRole = "auxiliary_direct"
+)
+
+// NetworkPathKind describes how an origin is reached.
+type NetworkPathKind string
+
+const (
+	NetworkPathDirect       NetworkPathKind = "direct"
+	NetworkPathHTTPProxy    NetworkPathKind = "http_proxy"
+	NetworkPathHTTPSConnect NetworkPathKind = "https_connect"
+)
+
+// NetworkHopKind identifies the endpoint role within a concrete path.
+type NetworkHopKind string
+
+const (
+	NetworkHopOrigin    NetworkHopKind = "origin"
+	NetworkHopProxyPeer NetworkHopKind = "proxy_peer"
+	NetworkHopRedirect  NetworkHopKind = "redirect"
+)
+
+// NetworkAttemptKind identifies the operation represented by one attempt.
+type NetworkAttemptKind string
+
+const (
+	NetworkAttemptDNS   NetworkAttemptKind = "dns"
+	NetworkAttemptRoute NetworkAttemptKind = "route"
+	NetworkAttemptTCP   NetworkAttemptKind = "tcp"
+	NetworkAttemptTLS   NetworkAttemptKind = "tls"
+	NetworkAttemptHTTP  NetworkAttemptKind = "http"
+)
+
+// NetworkPath is one concrete direct or proxy route. Redirects that change
+// the route create a new path linked through RedirectFromPathID.
+type NetworkPath struct {
+	ID                 string          `json:"id"`
+	Role               NetworkPathRole `json:"role"`
+	Kind               NetworkPathKind `json:"kind"`
+	Sequence           int             `json:"sequence"`
+	RedirectFromPathID string          `json:"redirectFromPathId,omitempty"`
+	Hops               []NetworkHop    `json:"hops,omitempty"`
+}
+
+// NetworkHop is a report-safe endpoint within a path. A CONNECT route uses
+// distinct proxy-peer and origin hops so peer addresses cannot be conflated.
+type NetworkHop struct {
+	ID                string           `json:"id"`
+	PathID            string           `json:"pathId"`
+	Sequence          int              `json:"sequence"`
+	Kind              NetworkHopKind   `json:"kind"`
+	URL               string           `json:"url,omitempty"`
+	Scheme            string           `json:"scheme,omitempty"`
+	Host              string           `json:"host,omitempty"`
+	Port              uint16           `json:"port,omitempty"`
+	Zone              string           `json:"zone,omitempty"`
+	RemoteIP          net.IP           `json:"remoteIp,omitempty"`
+	RemoteAddr        string           `json:"remoteAddr,omitempty"`
+	LocalAddr         string           `json:"localAddr,omitempty"`
+	Reused            bool             `json:"reused,omitempty"`
+	SelectedAttemptID string           `json:"selectedAttemptId,omitempty"`
+	Attempts          []NetworkAttempt `json:"attempts,omitempty"`
+	Timings           []PhaseTiming    `json:"timings,omitempty"`
+}
+
+// NetworkAttempt records one independently attributable network operation.
+// IDs are opaque within one diagnosis and must not contain addresses or other
+// potentially identifying values.
+type NetworkAttempt struct {
+	ID            string             `json:"id"`
+	PathID        string             `json:"pathId"`
+	HopID         string             `json:"hopId"`
+	Kind          NetworkAttemptKind `json:"kind"`
+	State         AttemptState       `json:"state,omitempty"`
+	Network       string             `json:"network,omitempty"`
+	RemoteIP      net.IP             `json:"remoteIp,omitempty"`
+	RemoteAddr    string             `json:"remoteAddr,omitempty"`
+	LocalAddr     string             `json:"localAddr,omitempty"`
+	InterfaceName string             `json:"interfaceName,omitempty"`
+	InterfaceUp   bool               `json:"interfaceUp,omitempty"`
+	MTU           int                `json:"mtu,omitempty"`
+	StartedAt     time.Time          `json:"startedAt,omitempty"`
+	FinishedAt    time.Time          `json:"finishedAt,omitempty"`
+	Duration      time.Duration      `json:"duration"`
+	Selected      bool               `json:"selected,omitempty"`
+	Reused        bool               `json:"reused,omitempty"`
+	ErrorCode     string             `json:"errorCode,omitempty"`
+	Error         string             `json:"error,omitempty"`
+}
+
+// PhaseTiming records an individual DNS, connect, TLS, TTFB, or total phase
+// without merging overlapping attempts.
+type PhaseTiming struct {
+	NetworkRef
+	Phase      string        `json:"phase"`
+	StartedAt  time.Time     `json:"startedAt,omitempty"`
+	FinishedAt time.Time     `json:"finishedAt,omitempty"`
+	Duration   time.Duration `json:"duration"`
+}
+
 // Evidence is a factual observation produced by a check. Values are intended
 // to be safe for reports; secrets must be removed before evidence is created.
 type Evidence struct {
-	ID      string            `json:"id,omitempty"`
-	CheckID string            `json:"checkId,omitempty"`
-	Code    string            `json:"code,omitempty"`
-	Message string            `json:"message"`
-	Details map[string]string `json:"details,omitempty"`
+	ID         string            `json:"id,omitempty"`
+	CheckID    string            `json:"checkId,omitempty"`
+	NetworkRef *NetworkRef       `json:"networkRef,omitempty"`
+	Code       string            `json:"code,omitempty"`
+	Message    string            `json:"message"`
+	Details    map[string]string `json:"details,omitempty"`
 }
 
 // Recommendation is an actionable follow-up tied to observed evidence.
@@ -61,6 +177,7 @@ type CheckResult struct {
 	Name            string           `json:"name"`
 	Status          Status           `json:"status"`
 	Role            CheckRole        `json:"role,omitempty"`
+	NetworkRefs     []NetworkRef     `json:"networkRefs,omitempty"`
 	StartedAt       time.Time        `json:"startedAt"`
 	FinishedAt      time.Time        `json:"finishedAt"`
 	Duration        time.Duration    `json:"duration"`
@@ -174,6 +291,28 @@ const (
 	TargetTCP  TargetKind = "tcp"
 )
 
+// TargetMode is the explicit effective protocol selected for a target. It is
+// additive to the legacy Kind and UseTLS fields, which remain populated for
+// older readers.
+type TargetMode string
+
+const (
+	TargetModeTCP   TargetMode = "tcp"
+	TargetModeTLS   TargetMode = "tls"
+	TargetModeHTTP  TargetMode = "http"
+	TargetModeHTTPS TargetMode = "https"
+)
+
+// Valid reports whether the target mode has defined transport semantics.
+func (m TargetMode) Valid() bool {
+	switch m {
+	case TargetModeTCP, TargetModeTLS, TargetModeHTTP, TargetModeHTTPS:
+		return true
+	default:
+		return false
+	}
+}
+
 // Target is the parsed, privacy-safe representation of user input.
 // RequestURL is excluded from serialization because it can contain query
 // secrets. Original and Normalized are always redacted.
@@ -187,6 +326,8 @@ type Target struct {
 	Path        string     `json:"path,omitempty"`
 	Kind        TargetKind `json:"kind"`
 	UseTLS      bool       `json:"useTLS"`
+	Mode        TargetMode `json:"mode,omitempty"`
+	Zone        string     `json:"zone,omitempty"`
 	// PrivacyRedacted records that parsing removed credentials or a secret-like
 	// query value. It lets profile-save UI warn even when userinfo was removed
 	// without leaving a replacement marker in the display URL.
@@ -196,7 +337,11 @@ type Target struct {
 
 // Address returns a dialable host:port pair with correct IPv6 brackets.
 func (t Target) Address() string {
-	return net.JoinHostPort(t.Host, fmt.Sprintf("%d", t.Port))
+	host := t.Host
+	if t.Zone != "" {
+		host += "%" + t.Zone
+	}
+	return net.JoinHostPort(host, fmt.Sprintf("%d", t.Port))
 }
 
 // ServerName returns a certificate SNI name, or an empty string for IP targets.
@@ -234,6 +379,20 @@ func (v ReportVerbosity) Valid() bool {
 	return v == ReportVerbosityNormal || v == ReportVerbosityVerbose
 }
 
+// ProbeMode selects either the bounded client-like route or an explicit
+// multi-address comparison.
+type ProbeMode string
+
+const (
+	ProbeModeClientEffective ProbeMode = "client_effective"
+	ProbeModeAddressMatrix   ProbeMode = "address_matrix"
+)
+
+// Valid reports whether the probe mode is supported.
+func (m ProbeMode) Valid() bool {
+	return m == ProbeModeClientEffective || m == ProbeModeAddressMatrix
+}
+
 // DiagnoseOptions configures one run. Callers should start with
 // DefaultDiagnoseOptions and override the desired fields.
 type DiagnoseOptions struct {
@@ -241,6 +400,9 @@ type DiagnoseOptions struct {
 	Timeout                     time.Duration   `json:"timeout"`
 	CheckTimeout                time.Duration   `json:"checkTimeout"`
 	IPVersion                   IPVersion       `json:"ipVersion"`
+	ProbeMode                   ProbeMode       `json:"probeMode,omitempty"`
+	AddressLimit                int             `json:"addressLimit,omitempty"`
+	AddressMatrixBudget         time.Duration   `json:"addressMatrixBudget,omitempty"`
 	NoProxy                     bool            `json:"noProxy"`
 	Insecure                    bool            `json:"insecure"`
 	EnableTLS                   bool            `json:"enableTLS"`
@@ -255,6 +417,22 @@ type DiagnoseOptions struct {
 	CertificateWarningThreshold time.Duration   `json:"certificateWarningThreshold"`
 	MaxConcurrency              int             `json:"maxConcurrency"`
 	BodyLimit                   int64           `json:"bodyLimit"`
+	ExpectedStatusMin           int             `json:"expectedStatusMin,omitempty"`
+	ExpectedStatusMax           int             `json:"expectedStatusMax,omitempty"`
+	ExpectedStatusConfigured    bool            `json:"expectedStatusConfigured,omitempty"`
+	LatencyThreshold            time.Duration   `json:"latencyThreshold,omitempty"`
+	ConnectIP                   string          `json:"connectIp,omitempty"`
+	ServerName                  string          `json:"serverName,omitempty"`
+	HTTPHost                    string          `json:"httpHost,omitempty"`
+	CollectDNSDetails           bool            `json:"collectDnsDetails,omitempty"`
+	InspectBody                 bool            `json:"inspectBody,omitempty"`
+	CustomCAConfigured          bool            `json:"customCaConfigured,omitempty"`
+	RequestHeaderNames          []string        `json:"requestHeaderNames,omitempty"`
+	// CustomCABundlePath, CustomCAPEM, and RequestHeaders are request-capable
+	// transient inputs. They must never be persisted, exported, or logged.
+	CustomCABundlePath string            `json:"-"`
+	CustomCAPEM        []byte            `json:"-"`
+	RequestHeaders     map[string]string `json:"-"`
 }
 
 // DefaultDiagnoseOptions returns conservative production defaults.
@@ -264,6 +442,9 @@ func DefaultDiagnoseOptions(target string) DiagnoseOptions {
 		Timeout:                     15 * time.Second,
 		CheckTimeout:                5 * time.Second,
 		IPVersion:                   IPVersionAuto,
+		ProbeMode:                   ProbeModeClientEffective,
+		AddressLimit:                4,
+		AddressMatrixBudget:         5 * time.Second,
 		MaxRedirects:                10,
 		MaxRedirectLocationBytes:    8 << 10,
 		Method:                      "GET",
@@ -272,6 +453,9 @@ func DefaultDiagnoseOptions(target string) DiagnoseOptions {
 		CertificateWarningThreshold: 30 * 24 * time.Hour,
 		MaxConcurrency:              4,
 		BodyLimit:                   64 << 10,
+		ExpectedStatusMin:           200,
+		ExpectedStatusMax:           399,
+		InspectBody:                 false,
 	}
 }
 
@@ -304,6 +488,7 @@ type Diagnosis struct {
 	FinishedAt    time.Time           `json:"finishedAt"`
 	Duration      time.Duration       `json:"duration"`
 	Checks        []CheckResult       `json:"checks"`
+	NetworkPaths  []NetworkPath       `json:"networkPaths,omitempty"`
 	Summary       Summary             `json:"summary"`
 	Build         BuildInfo           `json:"build"`
 	EventDelivery *EventDeliveryStats `json:"eventDelivery,omitempty"`
@@ -419,14 +604,48 @@ type ProxyInfo struct {
 	SelectForURL func(*url.URL) ProxySelection `json:"-"`
 }
 
+// DNSFamilyStatus classifies the outcome of one address-family lookup without
+// relying on platform-specific resolver error text.
+type DNSFamilyStatus string
+
+const (
+	DNSFamilyStatusSuccess         DNSFamilyStatus = "success"
+	DNSFamilyStatusNXDOMAIN        DNSFamilyStatus = "nxdomain"
+	DNSFamilyStatusNoData          DNSFamilyStatus = "nodata"
+	DNSFamilyStatusNotFoundUnknown DNSFamilyStatus = "not_found_unknown"
+	DNSFamilyStatusSERVFAIL        DNSFamilyStatus = "servfail"
+	DNSFamilyStatusTimeout         DNSFamilyStatus = "timeout"
+	DNSFamilyStatusCancelled       DNSFamilyStatus = "cancelled"
+	DNSFamilyStatusFamilyMismatch  DNSFamilyStatus = "family_mismatch"
+	DNSFamilyStatusError           DNSFamilyStatus = "error"
+)
+
+// DNSFamilyResult contains the typed, correlated result of one A or AAAA
+// lookup. The legacy DNSResult summary fields remain populated for old readers.
+type DNSFamilyResult struct {
+	NetworkRef *NetworkRef     `json:"networkRef,omitempty"`
+	Family     string          `json:"family"`
+	RecordType string          `json:"recordType"`
+	Status     DNSFamilyStatus `json:"status"`
+	Addresses  []net.IP        `json:"addresses,omitempty"`
+	Duration   time.Duration   `json:"duration"`
+	ErrorCode  string          `json:"errorCode,omitempty"`
+	Error      string          `json:"error,omitempty"`
+}
+
 // DNSResult stores canonical, de-duplicated resolver output.
 type DNSResult struct {
-	IPv4         []net.IP      `json:"ipv4,omitempty"`
-	IPv6         []net.IP      `json:"ipv6,omitempty"`
-	AError       string        `json:"aError,omitempty"`
-	AAAAError    string        `json:"aaaaError,omitempty"`
-	ADuration    time.Duration `json:"aDuration"`
-	AAAADuration time.Duration `json:"aaaaDuration"`
+	IPv4           []net.IP          `json:"ipv4,omitempty"`
+	IPv6           []net.IP          `json:"ipv6,omitempty"`
+	AError         string            `json:"aError,omitempty"`
+	AAAAError      string            `json:"aaaaError,omitempty"`
+	ADuration      time.Duration     `json:"aDuration"`
+	AAAADuration   time.Duration     `json:"aaaaDuration"`
+	Families       []DNSFamilyResult `json:"families,omitempty"`
+	CNAMEs         []string          `json:"cnames,omitempty"`
+	TTL            time.Duration     `json:"ttl,omitempty"`
+	ResolverSource string            `json:"resolverSource,omitempty"`
+	SearchDomains  []string          `json:"searchDomains,omitempty"`
 }
 
 // AttemptState describes the lifecycle of one address-specific network
@@ -455,6 +674,7 @@ func (s AttemptState) Valid() bool {
 
 // RouteInfo describes the source-side path selected for a remote address.
 type RouteInfo struct {
+	NetworkRef    *NetworkRef  `json:"networkRef,omitempty"`
 	RemoteIP      net.IP       `json:"remoteIp"`
 	LocalIP       net.IP       `json:"localIp,omitempty"`
 	InterfaceName string       `json:"interfaceName,omitempty"`
@@ -463,46 +683,82 @@ type RouteInfo struct {
 	Family        string       `json:"family"`
 	Error         string       `json:"error,omitempty"`
 	State         AttemptState `json:"state,omitempty"`
+	Selected      bool         `json:"selected,omitempty"`
 }
 
 // TCPAttempt is a single bounded TCP connect attempt.
 type TCPAttempt struct {
-	RemoteIP  net.IP        `json:"remoteIp"`
-	LocalAddr string        `json:"localAddr,omitempty"`
-	Duration  time.Duration `json:"duration"`
-	Success   bool          `json:"success"`
-	ErrorCode string        `json:"errorCode,omitempty"`
-	Error     string        `json:"error,omitempty"`
-	State     AttemptState  `json:"state,omitempty"`
+	NetworkRef *NetworkRef   `json:"networkRef,omitempty"`
+	RemoteIP   net.IP        `json:"remoteIp"`
+	LocalAddr  string        `json:"localAddr,omitempty"`
+	Duration   time.Duration `json:"duration"`
+	Success    bool          `json:"success"`
+	ErrorCode  string        `json:"errorCode,omitempty"`
+	Error      string        `json:"error,omitempty"`
+	State      AttemptState  `json:"state,omitempty"`
+	Selected   bool          `json:"selected,omitempty"`
 }
 
 // CertificateInfo contains report-safe peer certificate metadata.
 type CertificateInfo struct {
-	Subject       string        `json:"subject,omitempty"`
-	Issuer        string        `json:"issuer,omitempty"`
-	SerialNumber  string        `json:"serialNumber,omitempty"`
-	DNSNames      []string      `json:"dnsNames,omitempty"`
-	IPAddresses   []string      `json:"ipAddresses,omitempty"`
-	NotBefore     time.Time     `json:"notBefore,omitempty"`
-	NotAfter      time.Time     `json:"notAfter,omitempty"`
-	Remaining     time.Duration `json:"remaining,omitempty"`
-	ChainLength   int           `json:"chainLength"`
-	HostnameValid bool          `json:"hostnameValid"`
-	SystemTrusted bool          `json:"systemTrusted"`
+	Subject            string        `json:"subject,omitempty"`
+	Issuer             string        `json:"issuer,omitempty"`
+	SerialNumber       string        `json:"serialNumber,omitempty"`
+	DNSNames           []string      `json:"dnsNames,omitempty"`
+	IPAddresses        []string      `json:"ipAddresses,omitempty"`
+	NotBefore          time.Time     `json:"notBefore,omitempty"`
+	NotAfter           time.Time     `json:"notAfter,omitempty"`
+	Remaining          time.Duration `json:"remaining,omitempty"`
+	ChainLength        int           `json:"chainLength"`
+	HostnameValid      bool          `json:"hostnameValid"`
+	SystemTrusted      bool          `json:"systemTrusted"`
+	PublicKeyAlgorithm string        `json:"publicKeyAlgorithm,omitempty"`
+	PublicKeyCurve     string        `json:"publicKeyCurve,omitempty"`
+	PublicKeyBits      int           `json:"publicKeyBits,omitempty"`
+	SignatureAlgorithm string        `json:"signatureAlgorithm,omitempty"`
+	IsCA               bool          `json:"isCa,omitempty"`
 }
 
 // TLSResult stores negotiated transport and certificate information.
 type TLSResult struct {
-	RemoteIP    net.IP          `json:"remoteIp,omitempty"`
-	ServerName  string          `json:"serverName,omitempty"`
-	Version     string          `json:"version,omitempty"`
-	CipherSuite string          `json:"cipherSuite,omitempty"`
-	ALPN        string          `json:"alpn,omitempty"`
-	Certificate CertificateInfo `json:"certificate"`
-	Insecure    bool            `json:"insecure"`
-	Duration    time.Duration   `json:"duration"`
-	ErrorCode   string          `json:"errorCode,omitempty"`
-	Error       string          `json:"error,omitempty"`
+	NetworkRef        *NetworkRef       `json:"networkRef,omitempty"`
+	RemoteIP          net.IP            `json:"remoteIp,omitempty"`
+	ServerName        string            `json:"serverName,omitempty"`
+	Version           string            `json:"version,omitempty"`
+	CipherSuite       string            `json:"cipherSuite,omitempty"`
+	ALPN              string            `json:"alpn,omitempty"`
+	Certificate       CertificateInfo   `json:"certificate"`
+	Chain             []CertificateInfo `json:"chain,omitempty"`
+	Insecure          bool              `json:"insecure"`
+	Duration          time.Duration     `json:"duration"`
+	TCPDuration       time.Duration     `json:"tcpDuration,omitempty"`
+	HandshakeDuration time.Duration     `json:"handshakeDuration,omitempty"`
+	ErrorCode         string            `json:"errorCode,omitempty"`
+	Error             string            `json:"error,omitempty"`
+}
+
+// TLSAttempt is one address-specific TCP connection and TLS negotiation. The
+// legacy TLSResult remains the selected-attempt projection for old readers.
+type TLSAttempt struct {
+	NetworkRef
+	State             AttemptState      `json:"state,omitempty"`
+	RemoteIP          net.IP            `json:"remoteIp,omitempty"`
+	ServerName        string            `json:"serverName,omitempty"`
+	StartedAt         time.Time         `json:"startedAt,omitempty"`
+	FinishedAt        time.Time         `json:"finishedAt,omitempty"`
+	Duration          time.Duration     `json:"duration"`
+	TCPDuration       time.Duration     `json:"tcpDuration,omitempty"`
+	HandshakeDuration time.Duration     `json:"handshakeDuration,omitempty"`
+	Success           bool              `json:"success"`
+	Selected          bool              `json:"selected,omitempty"`
+	Version           string            `json:"version,omitempty"`
+	CipherSuite       string            `json:"cipherSuite,omitempty"`
+	ALPN              string            `json:"alpn,omitempty"`
+	Certificate       CertificateInfo   `json:"certificate"`
+	Chain             []CertificateInfo `json:"chain,omitempty"`
+	Insecure          bool              `json:"insecure"`
+	ErrorCode         string            `json:"errorCode,omitempty"`
+	Error             string            `json:"error,omitempty"`
 }
 
 // Redirect records one privacy-safe HTTP redirect.
@@ -517,6 +773,8 @@ type Redirect struct {
 	ToNetworkScope          string         `json:"toNetworkScope,omitempty"`
 	Route                   string         `json:"route"`
 	ProxySelection          ProxySelection `json:"proxySelection"`
+	FromNetworkRef          *NetworkRef    `json:"fromNetworkRef,omitempty"`
+	ToNetworkRef            *NetworkRef    `json:"toNetworkRef,omitempty"`
 }
 
 // HTTPTimings exposes the major httptrace phases.
@@ -528,6 +786,35 @@ type HTTPTimings struct {
 	Total     time.Duration `json:"total"`
 }
 
+// HTTPConnectAttempt is one connect callback observed by httptrace.
+type HTTPConnectAttempt struct {
+	NetworkRef
+	Network    string        `json:"network,omitempty"`
+	Address    string        `json:"address,omitempty"`
+	StartedAt  time.Time     `json:"startedAt,omitempty"`
+	FinishedAt time.Time     `json:"finishedAt,omitempty"`
+	Duration   time.Duration `json:"duration"`
+	Selected   bool          `json:"selected,omitempty"`
+	ErrorCode  string        `json:"errorCode,omitempty"`
+	Error      string        `json:"error,omitempty"`
+}
+
+// HTTPHop records one request/response leg, including redirects, without
+// collapsing independent connect attempts into aggregate timing fields.
+type HTTPHop struct {
+	NetworkRef
+	URL             string               `json:"url,omitempty"`
+	StatusCode      int                  `json:"statusCode,omitempty"`
+	Status          string               `json:"status,omitempty"`
+	Timings         HTTPTimings          `json:"timings"`
+	RemoteIP        string               `json:"remoteIp,omitempty"`
+	LocalIP         string               `json:"localIp,omitempty"`
+	Reused          bool                 `json:"reused,omitempty"`
+	Route           string               `json:"route,omitempty"`
+	ProxySelection  ProxySelection       `json:"proxySelection"`
+	ConnectAttempts []HTTPConnectAttempt `json:"connectAttempts,omitempty"`
+}
+
 // HTTPResult stores bounded, redacted application-response metadata.
 type HTTPResult struct {
 	Method            string                 `json:"method"`
@@ -535,6 +822,7 @@ type HTTPResult struct {
 	StatusCode        int                    `json:"statusCode"`
 	Status            string                 `json:"status"`
 	Redirects         []Redirect             `json:"redirects,omitempty"`
+	Hops              []HTTPHop              `json:"hops,omitempty"`
 	Headers           map[string][]string    `json:"headers,omitempty"`
 	Timings           HTTPTimings            `json:"timings"`
 	RemoteIP          string                 `json:"remoteIp,omitempty"`
@@ -556,18 +844,20 @@ type State struct {
 	Target  Target
 	Options DiagnoseOptions
 
-	mu     sync.RWMutex
-	proxy  ProxyInfo
-	dns    DNSResult
-	routes []RouteInfo
-	tcp    []TCPAttempt
-	tls    TLSResult
-	http   HTTPResult
+	mu           sync.RWMutex
+	proxy        ProxyInfo
+	dns          DNSResult
+	routes       []RouteInfo
+	tcp          []TCPAttempt
+	tls          TLSResult
+	tlsAttempts  []TLSAttempt
+	http         HTTPResult
+	networkPaths []NetworkPath
 }
 
 // NewState constructs isolated state for one run.
 func NewState(target Target, options DiagnoseOptions) *State {
-	return &State{Target: target, Options: options}
+	return &State{Target: target, Options: cloneDiagnoseOptions(options)}
 }
 
 // SetProxy stores the privacy-safe proxy selection state.
@@ -616,11 +906,39 @@ func (s *State) SetTLS(v TLSResult) { s.mu.Lock(); s.tls = cloneTLS(v); s.mu.Unl
 // TLS returns an independent copy of the TLS result.
 func (s *State) TLS() TLSResult { s.mu.RLock(); defer s.mu.RUnlock(); return cloneTLS(s.tls) }
 
+// SetTLSAttempts stores all address-specific TLS attempts.
+func (s *State) SetTLSAttempts(v []TLSAttempt) {
+	s.mu.Lock()
+	s.tlsAttempts = cloneTLSAttempts(v)
+	s.mu.Unlock()
+}
+
+// TLSAttempts returns an independent copy of all address-specific TLS attempts.
+func (s *State) TLSAttempts() []TLSAttempt {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneTLSAttempts(s.tlsAttempts)
+}
+
 // SetHTTP stores the HTTP result for later checks and reports.
 func (s *State) SetHTTP(v HTTPResult) { s.mu.Lock(); s.http = cloneHTTP(v); s.mu.Unlock() }
 
 // HTTP returns an independent copy of the HTTP result.
 func (s *State) HTTP() HTTPResult { s.mu.RLock(); defer s.mu.RUnlock(); return cloneHTTP(s.http) }
+
+// SetNetworkPaths stores the correlated network graph for this diagnosis.
+func (s *State) SetNetworkPaths(v []NetworkPath) {
+	s.mu.Lock()
+	s.networkPaths = cloneNetworkPaths(v)
+	s.mu.Unlock()
+}
+
+// NetworkPaths returns an independent copy of the correlated network graph.
+func (s *State) NetworkPaths() []NetworkPath {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneNetworkPaths(s.networkPaths)
+}
 
 func cloneProxy(v ProxyInfo) ProxyInfo {
 	v.Environment = cloneStringMap(v.Environment)
@@ -630,6 +948,16 @@ func cloneProxy(v ProxyInfo) ProxyInfo {
 func cloneDNS(v DNSResult) DNSResult {
 	v.IPv4 = cloneIPs(v.IPv4)
 	v.IPv6 = cloneIPs(v.IPv6)
+	if v.Families != nil {
+		families := append([]DNSFamilyResult(nil), v.Families...)
+		for index := range families {
+			families[index].NetworkRef = cloneNetworkRef(v.Families[index].NetworkRef)
+			families[index].Addresses = cloneIPs(v.Families[index].Addresses)
+		}
+		v.Families = families
+	}
+	v.CNAMEs = append([]string(nil), v.CNAMEs...)
+	v.SearchDomains = append([]string(nil), v.SearchDomains...)
 	return v
 }
 
@@ -650,6 +978,7 @@ func cloneRoutes(values []RouteInfo) []RouteInfo {
 	}
 	out := append([]RouteInfo(nil), values...)
 	for index := range out {
+		out[index].NetworkRef = cloneNetworkRef(values[index].NetworkRef)
 		out[index].RemoteIP = append(net.IP(nil), values[index].RemoteIP...)
 		out[index].LocalIP = append(net.IP(nil), values[index].LocalIP...)
 	}
@@ -662,21 +991,55 @@ func cloneTCP(values []TCPAttempt) []TCPAttempt {
 	}
 	out := append([]TCPAttempt(nil), values...)
 	for index := range out {
+		out[index].NetworkRef = cloneNetworkRef(values[index].NetworkRef)
 		out[index].RemoteIP = append(net.IP(nil), values[index].RemoteIP...)
 	}
 	return out
 }
 
 func cloneTLS(value TLSResult) TLSResult {
+	value.NetworkRef = cloneNetworkRef(value.NetworkRef)
 	value.RemoteIP = append(net.IP(nil), value.RemoteIP...)
-	value.Certificate.DNSNames = append([]string(nil), value.Certificate.DNSNames...)
-	value.Certificate.IPAddresses = append([]string(nil), value.Certificate.IPAddresses...)
+	value.Certificate = cloneCertificate(value.Certificate)
+	value.Chain = cloneCertificates(value.Chain)
 	return value
+}
+
+func cloneTLSAttempts(values []TLSAttempt) []TLSAttempt {
+	if values == nil {
+		return nil
+	}
+	out := append([]TLSAttempt(nil), values...)
+	for index := range out {
+		out[index].RemoteIP = append(net.IP(nil), values[index].RemoteIP...)
+		out[index].Certificate = cloneCertificate(values[index].Certificate)
+		out[index].Chain = cloneCertificates(values[index].Chain)
+	}
+	return out
+}
+
+func cloneCertificate(value CertificateInfo) CertificateInfo {
+	value.DNSNames = append([]string(nil), value.DNSNames...)
+	value.IPAddresses = append([]string(nil), value.IPAddresses...)
+	return value
+}
+
+func cloneCertificates(values []CertificateInfo) []CertificateInfo {
+	if values == nil {
+		return nil
+	}
+	out := append([]CertificateInfo(nil), values...)
+	for index := range out {
+		out[index] = cloneCertificate(values[index])
+	}
+	return out
 }
 
 func cloneHTTP(v HTTPResult) HTTPResult {
 	v.Redirects = append([]Redirect(nil), v.Redirects...)
 	for index := range v.Redirects {
+		v.Redirects[index].FromNetworkRef = cloneNetworkRef(v.Redirects[index].FromNetworkRef)
+		v.Redirects[index].ToNetworkRef = cloneNetworkRef(v.Redirects[index].ToNetworkRef)
 		v.Redirects[index].SensitiveHeadersRemoved = append(
 			[]string(nil),
 			v.Redirects[index].SensitiveHeadersRemoved...,
@@ -689,7 +1052,60 @@ func cloneHTTP(v HTTPResult) HTTPResult {
 			v.Headers[key] = append([]string(nil), values...)
 		}
 	}
+	if v.Hops != nil {
+		v.Hops = append([]HTTPHop(nil), v.Hops...)
+		for index := range v.Hops {
+			v.Hops[index].ConnectAttempts = append(
+				[]HTTPConnectAttempt(nil),
+				v.Hops[index].ConnectAttempts...,
+			)
+		}
+	}
 	return v
+}
+
+func cloneNetworkPaths(values []NetworkPath) []NetworkPath {
+	if values == nil {
+		return nil
+	}
+	out := append([]NetworkPath(nil), values...)
+	for pathIndex := range out {
+		out[pathIndex].Hops = append([]NetworkHop(nil), values[pathIndex].Hops...)
+		for hopIndex := range out[pathIndex].Hops {
+			hop := &out[pathIndex].Hops[hopIndex]
+			hop.RemoteIP = append(net.IP(nil), values[pathIndex].Hops[hopIndex].RemoteIP...)
+			hop.Attempts = append(
+				[]NetworkAttempt(nil),
+				values[pathIndex].Hops[hopIndex].Attempts...,
+			)
+			for attemptIndex := range hop.Attempts {
+				hop.Attempts[attemptIndex].RemoteIP = append(
+					net.IP(nil),
+					values[pathIndex].Hops[hopIndex].Attempts[attemptIndex].RemoteIP...,
+				)
+			}
+			hop.Timings = append(
+				[]PhaseTiming(nil),
+				values[pathIndex].Hops[hopIndex].Timings...,
+			)
+		}
+	}
+	return out
+}
+
+func cloneNetworkRef(value *NetworkRef) *NetworkRef {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func cloneDiagnoseOptions(value DiagnoseOptions) DiagnoseOptions {
+	value.CustomCAPEM = append([]byte(nil), value.CustomCAPEM...)
+	value.RequestHeaderNames = append([]string(nil), value.RequestHeaderNames...)
+	value.RequestHeaders = cloneStringMap(value.RequestHeaders)
+	return value
 }
 
 func cloneStringMap(in map[string]string) map[string]string {

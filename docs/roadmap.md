@@ -15,10 +15,20 @@ The current scope focuses on:
 - robust URL, hostname, port, IPv4, IPv6, and IDN parsing;
 - proxy environment-variable and `NO_PROXY` interpretation;
 - separate A and AAAA results;
+- typed per-family DNS outcomes with optional CNAME, TTL, resolver, and search
+  domain enrichment;
 - source-address and interface discovery;
+- client-effective Happy Eyeballs selection and opt-in bounded address-matrix
+  probes;
+- correlated direct/proxy paths, origin/proxy/redirect hops, and individual
+  network attempts;
 - bounded TCP attempts with typed error classification;
-- verified TLS negotiation and certificate metadata;
-- bounded HTTP requests, redirects, and `httptrace` timing;
+- per-backend verified TLS negotiation, full chain metadata, custom CA support,
+  and split dial/handshake timings;
+- per-hop bounded HTTP requests, redirects, connect attempts, expectations,
+  and `httptrace` timing;
+- explicit TCP, TLS, HTTP, and HTTPS target syntax, including link-local IPv6
+  zones;
 - evidence-referenced summaries;
 - cancellation and streamed progress;
 - text, JSON, and Markdown reports;

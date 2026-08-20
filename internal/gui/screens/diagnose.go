@@ -12,6 +12,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/Naenier/orynelo/internal/application"
 	"github.com/Naenier/orynelo/internal/gui/components"
 	"github.com/Naenier/orynelo/internal/gui/localization"
 	"github.com/Naenier/orynelo/internal/gui/presenter"
@@ -46,6 +47,20 @@ type DiagnoseScreen struct {
 	allowPrivateRedirects  *widget.Check
 	maxRedirects           *widget.Entry
 	verbosity              *widget.Select
+	probeMode              *widget.Select
+	addressLimit           *widget.Entry
+	matrixBudget           *widget.Entry
+	expectedStatus         *widget.Entry
+	latencyThreshold       *widget.Entry
+	connectIP              *widget.Entry
+	serverName             *widget.Entry
+	httpHost               *widget.Entry
+	caBundle               *widget.Entry
+	requestHeaders         *widget.Entry
+	collectDNSDetails      *widget.Check
+	inspectBody            *widget.Check
+	targetPreview          *widget.Label
+	autoExplanation        *widget.Label
 	run                    *widget.Button
 	cancel                 *widget.Button
 	postActions            *fyne.Container
@@ -149,6 +164,42 @@ func (s *DiagnoseScreen) buildInputs() {
 		s.texts.Text(localization.OptionVerbose),
 	}, nil)
 	s.verbosity.SetSelected(s.texts.Text(localization.OptionNormal))
+	s.probeMode = widget.NewSelect([]string{
+		s.texts.Text(localization.OptionClientEffective),
+		s.texts.Text(localization.OptionAddressMatrix),
+	}, nil)
+	s.probeMode.SetSelected(s.texts.Text(localization.OptionClientEffective))
+	s.addressLimit = widget.NewEntry()
+	s.addressLimit.SetText("4")
+	s.matrixBudget = widget.NewEntry()
+	s.matrixBudget.SetText("5s")
+	s.expectedStatus = widget.NewEntry()
+	s.expectedStatus.SetPlaceHolder("200-299")
+	s.latencyThreshold = widget.NewEntry()
+	s.latencyThreshold.SetPlaceHolder("2s")
+	s.connectIP = widget.NewEntry()
+	s.connectIP.SetPlaceHolder("192.0.2.10 or fe80::1%eth0")
+	s.serverName = widget.NewEntry()
+	s.serverName.SetPlaceHolder("service.example")
+	s.httpHost = widget.NewEntry()
+	s.httpHost.SetPlaceHolder("service.example:443")
+	s.caBundle = widget.NewEntry()
+	s.caBundle.SetPlaceHolder("/path/to/ca-bundle.pem")
+	s.requestHeaders = widget.NewMultiLineEntry()
+	s.requestHeaders.SetPlaceHolder("X-Incident: INC-42")
+	s.requestHeaders.SetMinRowsVisible(2)
+	s.collectDNSDetails = widget.NewCheck(
+		s.texts.Text(localization.DiagnoseCollectDNSDetails), nil,
+	)
+	s.inspectBody = widget.NewCheck(s.texts.Text(localization.DiagnoseInspectBody), nil)
+	s.autoExplanation = widget.NewLabel(s.texts.Text(localization.DiagnoseAutoExplanation))
+	s.autoExplanation.Wrapping = fyne.TextWrapWord
+	s.autoExplanation.Importance = widget.LowImportance
+	s.targetPreview = widget.NewLabel("")
+	s.targetPreview.Wrapping = fyne.TextWrapWord
+	s.targetPreview.Importance = widget.LowImportance
+	s.target.OnChanged = func(string) { s.updateTargetPreview() }
+	s.mode.OnChanged = func(string) { s.updateTargetPreview() }
 	s.inputError = widget.NewLabel("")
 	s.inputError.Wrapping = fyne.TextWrapWord
 	s.inputErrorRow = container.NewBorder(
@@ -200,16 +251,29 @@ func (s *DiagnoseScreen) buildInputs() {
 		field(s.texts.Text(localization.CommonTimeout), s.timeout),
 	)
 	s.advancedFields = container.NewVBox(
+		s.autoExplanation,
 		container.NewGridWithColumns(2,
 			field(s.texts.Text(localization.CommonHTTPMethod), s.method),
 			field(s.texts.Text(localization.CommonPerCheckTimeout), s.checkTimeout),
 			field(s.texts.Text(localization.CommonMaximumRedirects), s.maxRedirects),
 			field(s.texts.Text(localization.DiagnoseReportVerbosity), s.verbosity),
+			field(s.texts.Text(localization.DiagnoseProbeMode), s.probeMode),
+			field(s.texts.Text(localization.DiagnoseAddressLimit), s.addressLimit),
+			field(s.texts.Text(localization.DiagnoseMatrixBudget), s.matrixBudget),
+			field(s.texts.Text(localization.DiagnoseExpectedStatus), s.expectedStatus),
+			field(s.texts.Text(localization.DiagnoseLatencyThreshold), s.latencyThreshold),
+			field(s.texts.Text(localization.DiagnoseConnectIP), s.connectIP),
+			field(s.texts.Text(localization.DiagnoseServerName), s.serverName),
+			field(s.texts.Text(localization.DiagnoseHTTPHost), s.httpHost),
+			field(s.texts.Text(localization.DiagnoseCABundle), s.caBundle),
 		),
+		field(s.texts.Text(localization.DiagnoseRequestHeaders), s.requestHeaders),
 		container.NewVBox(
 			container.NewHBox(s.noProxy, s.insecure),
 			s.allowInsecureRedirects,
 			s.allowPrivateRedirects,
+			s.collectDNSDetails,
+			s.inspectBody,
 		),
 	)
 	s.advancedFields.Hide()
@@ -231,6 +295,7 @@ func (s *DiagnoseScreen) buildInputs() {
 		container.NewVBox(
 			targetHeader,
 			targetLine,
+			s.targetPreview,
 			basicOptions,
 			s.advancedToggle,
 			s.advancedFields,
@@ -554,6 +619,38 @@ func (s *DiagnoseScreen) Input() (presenter.DiagnoseInput, error) {
 			s.texts.Text(localization.DiagnoseInvalidRedirects),
 		)
 	}
+	addressLimit, err := strconv.Atoi(strings.TrimSpace(s.addressLimit.Text))
+	if err != nil || addressLimit < 1 || addressLimit > 16 {
+		return presenter.DiagnoseInput{}, errors.New(
+			s.texts.Text(localization.DiagnoseInvalidAddressLimit),
+		)
+	}
+	matrixBudget, err := time.ParseDuration(strings.TrimSpace(s.matrixBudget.Text))
+	if err != nil || matrixBudget <= 0 {
+		return presenter.DiagnoseInput{}, errors.New(
+			s.texts.Text(localization.DiagnoseInvalidMatrixBudget),
+		)
+	}
+	expectedMin, expectedMax, expectedSet, err := parseExpectedStatus(s.expectedStatus.Text)
+	if err != nil {
+		return presenter.DiagnoseInput{}, errors.New(
+			s.texts.Text(localization.DiagnoseInvalidExpectedStatus),
+		)
+	}
+	latency := time.Duration(0)
+	if strings.TrimSpace(s.latencyThreshold.Text) != "" {
+		latency, err = time.ParseDuration(strings.TrimSpace(s.latencyThreshold.Text))
+		if err != nil || latency <= 0 {
+			return presenter.DiagnoseInput{}, errors.New(
+				s.texts.Text(localization.DiagnoseInvalidLatencyThreshold),
+			)
+		}
+	}
+	headerLines := strings.Split(strings.ReplaceAll(s.requestHeaders.Text, "\r\n", "\n"), "\n")
+	headers, _, err := application.ParseTransientHeaders(headerLines)
+	if err != nil {
+		return presenter.DiagnoseInput{}, err
+	}
 	target := strings.TrimSpace(s.target.Text)
 	return presenter.DiagnoseInput{
 		Target:                 target,
@@ -568,6 +665,20 @@ func (s *DiagnoseScreen) Input() (presenter.DiagnoseInput, error) {
 		AllowPrivateRedirects:  s.allowPrivateRedirects.Checked,
 		MaxRedirects:           redirects,
 		Verbosity:              s.verbosityValue(),
+		ProbeMode:              s.probeModeValue(),
+		AddressLimit:           addressLimit,
+		AddressMatrixBudget:    matrixBudget,
+		ExpectedStatusMin:      expectedMin,
+		ExpectedStatusMax:      expectedMax,
+		ExpectedStatusSet:      expectedSet,
+		LatencyThreshold:       latency,
+		ConnectIP:              strings.TrimSpace(s.connectIP.Text),
+		ServerName:             strings.TrimSpace(s.serverName.Text),
+		HTTPHost:               strings.TrimSpace(s.httpHost.Text),
+		CustomCABundlePath:     strings.TrimSpace(s.caBundle.Text),
+		RequestHeaders:         headers,
+		CollectDNSDetails:      s.collectDNSDetails.Checked,
+		InspectBody:            s.inspectBody.Checked,
 	}, nil
 }
 
@@ -632,6 +743,21 @@ func (s *DiagnoseScreen) SetProfile(profile presenter.ProfileView) {
 	default:
 		s.verbosity.SetSelected(s.texts.Text(localization.OptionNormal))
 	}
+	// Advanced probes and request-capable inputs are intentionally run-only;
+	// loading a profile always restores their conservative defaults.
+	s.probeMode.SetSelected(s.texts.Text(localization.OptionClientEffective))
+	s.addressLimit.SetText("4")
+	s.matrixBudget.SetText("5s")
+	s.expectedStatus.SetText("")
+	s.latencyThreshold.SetText("")
+	s.connectIP.SetText("")
+	s.serverName.SetText("")
+	s.httpHost.SetText("")
+	s.caBundle.SetText("")
+	s.requestHeaders.SetText("")
+	s.collectDNSDetails.SetChecked(false)
+	s.inspectBody.SetChecked(false)
+	s.updateTargetPreview()
 }
 
 // SetDefaults applies persisted diagnostic defaults on application startup.
@@ -914,6 +1040,18 @@ func (s *DiagnoseScreen) setInputsEnabled(enabled bool) {
 		s.allowPrivateRedirects.Enable()
 		s.maxRedirects.Enable()
 		s.verbosity.Enable()
+		s.probeMode.Enable()
+		s.addressLimit.Enable()
+		s.matrixBudget.Enable()
+		s.expectedStatus.Enable()
+		s.latencyThreshold.Enable()
+		s.connectIP.Enable()
+		s.serverName.Enable()
+		s.httpHost.Enable()
+		s.caBundle.Enable()
+		s.requestHeaders.Enable()
+		s.collectDNSDetails.Enable()
+		s.inspectBody.Enable()
 		return
 	}
 	s.target.Disable()
@@ -928,6 +1066,18 @@ func (s *DiagnoseScreen) setInputsEnabled(enabled bool) {
 	s.allowPrivateRedirects.Disable()
 	s.maxRedirects.Disable()
 	s.verbosity.Disable()
+	s.probeMode.Disable()
+	s.addressLimit.Disable()
+	s.matrixBudget.Disable()
+	s.expectedStatus.Disable()
+	s.latencyThreshold.Disable()
+	s.connectIP.Disable()
+	s.serverName.Disable()
+	s.httpHost.Disable()
+	s.caBundle.Disable()
+	s.requestHeaders.Disable()
+	s.collectDNSDetails.Disable()
+	s.inspectBody.Disable()
 }
 
 // clearDetails removes the currently selected check presentation.
@@ -992,7 +1142,7 @@ func (layout diagnoseRootLayout) Layout(
 	inputHeight := layout.screen.inputCollapsed
 	if layout.screen.advancedExpanded {
 		inputHeight = contentHeight
-		maxHeight := fyne.Min(float32(440), size.Height-370)
+		maxHeight := fyne.Min(float32(420), size.Height-390)
 		maxHeight = fyne.Max(maxHeight, layout.screen.inputCollapsed)
 		inputHeight = fyne.Min(inputHeight, maxHeight)
 	}
@@ -1135,4 +1285,61 @@ func (s *DiagnoseScreen) methodValue() string {
 	default:
 		return "GET"
 	}
+}
+
+func (s *DiagnoseScreen) probeModeValue() string {
+	if s.probeMode.Selected == s.texts.Text(localization.OptionAddressMatrix) {
+		return "address_matrix"
+	}
+	return "client_effective"
+}
+
+func (s *DiagnoseScreen) updateTargetPreview() {
+	if s.targetPreview == nil {
+		return
+	}
+	if s.autoExplanation != nil {
+		if s.modeValue() == "auto" {
+			s.autoExplanation.Show()
+		} else {
+			s.autoExplanation.Hide()
+		}
+	}
+	raw := strings.TrimSpace(s.target.Text)
+	if raw == "" {
+		s.targetPreview.SetText("")
+		return
+	}
+	preview, err := presenter.TargetPreview(raw, s.modeValue())
+	if err != nil {
+		s.targetPreview.SetText("")
+		return
+	}
+	s.targetPreview.SetText(fmt.Sprintf(
+		s.texts.Text(localization.DiagnoseTargetPreview),
+		preview,
+	))
+}
+
+func parseExpectedStatus(value string) (int, int, bool, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, 0, false, nil
+	}
+	left, right, ranged := strings.Cut(value, "-")
+	minimum, err := strconv.Atoi(strings.TrimSpace(left))
+	if err != nil {
+		return 0, 0, false, err
+	}
+	maximum := minimum
+	if ranged {
+		maximum, err = strconv.Atoi(strings.TrimSpace(right))
+		if err != nil {
+			return 0, 0, false, err
+		}
+	}
+	if minimum < 100 || maximum > 599 || minimum > maximum {
+		return 0, 0, false, errors.New("status range is invalid")
+	}
+	return minimum, maximum, true, nil
 }
