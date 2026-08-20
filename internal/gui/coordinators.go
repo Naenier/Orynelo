@@ -151,7 +151,58 @@ func (coordinator *DiagnoseCoordinator) request(input presenter.DiagnoseInput) a
 	allowInsecureRedirects := input.AllowInsecureRedirects
 	allowPrivateRedirects := input.AllowPrivateRedirects
 	verbosity := model.ReportVerbosity(input.Verbosity)
+	probeMode := model.ProbeMode(input.ProbeMode)
+	addressLimit := input.AddressLimit
+	addressMatrixBudget := input.AddressMatrixBudget
+	latencyThreshold := input.LatencyThreshold
+	connectIP := input.ConnectIP
+	serverName := input.ServerName
+	httpHost := input.HTTPHost
+	customCABundlePath := input.CustomCABundlePath
+	collectDNSDetails := input.CollectDNSDetails
+	inspectBody := input.InspectBody
 	request := application.DiagnoseRequest{Profile: profile}
+	applyTransient := func(overrides *application.DiagnoseOverrides) {
+		if probeMode != "" {
+			overrides.ProbeMode = &probeMode
+		}
+		if addressLimit > 0 {
+			overrides.AddressLimit = &addressLimit
+		}
+		if addressMatrixBudget > 0 {
+			overrides.AddressMatrixBudget = &addressMatrixBudget
+		}
+		if latencyThreshold > 0 {
+			overrides.LatencyThreshold = &latencyThreshold
+		}
+		if connectIP != "" {
+			overrides.ConnectIP = &connectIP
+		}
+		if serverName != "" {
+			overrides.ServerName = &serverName
+		}
+		if httpHost != "" {
+			overrides.HTTPHost = &httpHost
+		}
+		if customCABundlePath != "" {
+			overrides.CustomCABundlePath = &customCABundlePath
+		}
+		if collectDNSDetails {
+			overrides.CollectDNSDetails = &collectDNSDetails
+		}
+		if inspectBody {
+			overrides.InspectBody = &inspectBody
+		}
+		if input.ExpectedStatusSet {
+			minimum := input.ExpectedStatusMin
+			maximum := input.ExpectedStatusMax
+			overrides.ExpectedStatusMin = &minimum
+			overrides.ExpectedStatusMax = &maximum
+		}
+		if input.RequestHeaders != nil {
+			overrides.RequestHeaders = input.RequestHeaders
+		}
+	}
 	if profile != nil {
 		request.Overrides = application.DiagnoseOverrides{
 			Insecure:               &insecure,
@@ -159,6 +210,7 @@ func (coordinator *DiagnoseCoordinator) request(input presenter.DiagnoseInput) a
 			AllowPrivateRedirects:  &allowPrivateRedirects,
 			ReportVerbosity:        &verbosity,
 		}
+		applyTransient(&request.Overrides)
 		return request
 	}
 
@@ -213,6 +265,7 @@ func (coordinator *DiagnoseCoordinator) request(input presenter.DiagnoseInput) a
 	if verbosity != baseline.ReportVerbosity {
 		request.Overrides.ReportVerbosity = &verbosity
 	}
+	applyTransient(&request.Overrides)
 	return request
 }
 

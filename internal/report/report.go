@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -117,16 +118,27 @@ func writeText(writer io.Writer, diagnosis model.Diagnosis) error {
 			diagnosis.Options.MaxRedirectLocationBytes,
 			formatDuration(diagnosis.Options.ActualHTTPReserve),
 		),
+		fmt.Sprintf(
+			"Probe mode: %s; address limit: %d; matrix budget: %s",
+			diagnosis.Options.ProbeMode,
+			diagnosis.Options.AddressLimit,
+			formatDuration(diagnosis.Options.AddressMatrixBudget),
+		),
+		"Scenario: " + diagnosticScenarioText(diagnosis),
 		"",
 		"Summary: " + safePlain(diagnosis.Summary.Title),
 		safePlain(diagnosis.Summary.Description),
-		"",
-		"Checks:",
 	}
 	for _, line := range lines {
 		if _, err := fmt.Fprintln(writer, line); err != nil {
 			return err
 		}
+	}
+	if err := writeTextNetworkPaths(writer, diagnosis.NetworkPaths); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(writer, "\nChecks:"); err != nil {
+		return err
 	}
 	for index, result := range diagnosis.Checks {
 		if _, err := fmt.Fprintf(
@@ -203,11 +215,15 @@ func writeMarkdown(writer io.Writer, diagnosis model.Diagnosis) error {
 		return err
 	}
 	header := fmt.Sprintf(
-		"\n- **Target:** `%s`\n- **Status:** %s\n- **Started:** %s\n- **Duration:** %s\n- **Redirect policy:** %s\n- **Redirect limits:** %d hops, %d bytes per `Location`\n- **Actual HTTP reserve:** %s\n\n## %s\n\n%s\n\n## Checks\n",
+		"\n- **Target:** `%s`\n- **Status:** %s\n- **Started:** %s\n- **Duration:** %s\n- **Probe mode:** `%s`\n- **Address limit:** %d\n- **Matrix budget:** %s\n- **Scenario:** %s\n- **Redirect policy:** %s\n- **Redirect limits:** %d hops, %d bytes per `Location`\n- **Actual HTTP reserve:** %s\n\n## %s\n\n%s\n",
 		escapeCode(displayTarget(diagnosis.Target)),
 		escapeMarkdown(string(diagnosis.Summary.Status)),
 		formatTime(diagnosis.StartedAt),
 		formatDuration(diagnosis.Duration),
+		escapeCode(string(diagnosis.Options.ProbeMode)),
+		diagnosis.Options.AddressLimit,
+		formatDuration(diagnosis.Options.AddressMatrixBudget),
+		escapeMarkdown(diagnosticScenarioText(diagnosis)),
 		escapeMarkdown(redirectPolicyText(diagnosis.Options)),
 		diagnosis.Options.MaxRedirects,
 		diagnosis.Options.MaxRedirectLocationBytes,
@@ -216,6 +232,12 @@ func writeMarkdown(writer io.Writer, diagnosis model.Diagnosis) error {
 		escapeMarkdown(diagnosis.Summary.Description),
 	)
 	if _, err := fmt.Fprint(writer, header); err != nil {
+		return err
+	}
+	if err := writeMarkdownNetworkPaths(writer, diagnosis.NetworkPaths); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(writer, "\n## Checks"); err != nil {
 		return err
 	}
 	for _, result := range diagnosis.Checks {
@@ -312,6 +334,210 @@ func writeMarkdown(writer io.Writer, diagnosis model.Diagnosis) error {
 		}
 	}
 	return nil
+}
+
+func writeTextNetworkPaths(writer io.Writer, paths []model.NetworkPath) error {
+	if _, err := fmt.Fprintln(writer, "\nNetwork paths:"); err != nil {
+		return err
+	}
+	if len(paths) == 0 {
+		_, err := fmt.Fprintln(writer, "- No correlated network path was recorded.")
+		return err
+	}
+	for _, path := range paths {
+		if _, err := fmt.Fprintf(
+			writer,
+			"- %s: role=%s kind=%s\n",
+			safePlain(path.ID),
+			safePlain(string(path.Role)),
+			safePlain(string(path.Kind)),
+		); err != nil {
+			return err
+		}
+		for _, hop := range path.Hops {
+			selected := ""
+			if hop.SelectedAttemptID != "" {
+				selected = "; selected=" + safePlain(hop.SelectedAttemptID)
+			}
+			physical := ""
+			if hop.RemoteAddr != "" {
+				physical = "; remote=" + safePlain(hop.RemoteAddr) + "; local=" + safePlain(hop.LocalAddr) +
+					"; reused=" + strconv.FormatBool(hop.Reused)
+			}
+			if _, err := fmt.Fprintf(
+				writer,
+				"  - %s: %s %s:%d%s%s\n",
+				safePlain(hop.ID),
+				safePlain(string(hop.Kind)),
+				safePlain(hop.Host),
+				hop.Port,
+				selected,
+				physical,
+			); err != nil {
+				return err
+			}
+			for _, attempt := range hop.Attempts {
+				if _, err := fmt.Fprintf(
+					writer,
+					"    - %s: kind=%s state=%s remote=%s local=%s interface=%s mtu=%d duration=%s selected=%t reused=%t error=%s\n",
+					safePlain(attempt.ID),
+					safePlain(string(attempt.Kind)),
+					safePlain(string(attempt.State)),
+					safePlain(attemptEndpoint(attempt)),
+					safePlain(attempt.LocalAddr),
+					safePlain(attempt.InterfaceName),
+					attempt.MTU,
+					formatDuration(attempt.Duration),
+					attempt.Selected,
+					attempt.Reused,
+					safePlain(attempt.ErrorCode),
+				); err != nil {
+					return err
+				}
+			}
+			for _, timing := range hop.Timings {
+				if _, err := fmt.Fprintf(
+					writer,
+					"    - timing %s (%s): %s\n",
+					safePlain(timing.Phase),
+					safePlain(timing.AttemptID),
+					formatDuration(timing.Duration),
+				); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func writeMarkdownNetworkPaths(writer io.Writer, paths []model.NetworkPath) error {
+	if _, err := fmt.Fprintln(writer, "\n## Network paths"); err != nil {
+		return err
+	}
+	if len(paths) == 0 {
+		_, err := fmt.Fprintln(writer, "\nNo correlated network path was recorded.")
+		return err
+	}
+	for _, path := range paths {
+		if _, err := fmt.Fprintf(
+			writer,
+			"\n- `%s`: role `%s`, kind `%s`\n",
+			escapeCode(path.ID),
+			escapeCode(string(path.Role)),
+			escapeCode(string(path.Kind)),
+		); err != nil {
+			return err
+		}
+		for _, hop := range path.Hops {
+			endpoint := fmt.Sprintf("%s:%d", hop.Host, hop.Port)
+			if _, err := fmt.Fprintf(
+				writer,
+				"  - `%s`: `%s` at `%s`",
+				escapeCode(hop.ID),
+				escapeCode(string(hop.Kind)),
+				escapeCode(endpoint),
+			); err != nil {
+				return err
+			}
+			if hop.SelectedAttemptID != "" {
+				if _, err := fmt.Fprintf(writer, "; selected `%s`", escapeCode(hop.SelectedAttemptID)); err != nil {
+					return err
+				}
+			}
+			if hop.RemoteAddr != "" {
+				if _, err := fmt.Fprintf(
+					writer,
+					"; remote `%s`; local `%s`; reused `%t`",
+					escapeCode(hop.RemoteAddr),
+					escapeCode(hop.LocalAddr),
+					hop.Reused,
+				); err != nil {
+					return err
+				}
+			}
+			if _, err := fmt.Fprintln(writer); err != nil {
+				return err
+			}
+			for _, attempt := range hop.Attempts {
+				if _, err := fmt.Fprintf(
+					writer,
+					"    - `%s`: `%s`, state `%s`, remote `%s`, local `%s`, interface `%s`, MTU %d, duration %s, selected `%t`, reused `%t`, error `%s`\n",
+					escapeCode(attempt.ID),
+					escapeCode(string(attempt.Kind)),
+					escapeCode(string(attempt.State)),
+					escapeCode(attemptEndpoint(attempt)),
+					escapeCode(attempt.LocalAddr),
+					escapeCode(attempt.InterfaceName),
+					attempt.MTU,
+					formatDuration(attempt.Duration),
+					attempt.Selected,
+					attempt.Reused,
+					escapeCode(attempt.ErrorCode),
+				); err != nil {
+					return err
+				}
+			}
+			for _, timing := range hop.Timings {
+				if _, err := fmt.Fprintf(
+					writer,
+					"    - timing `%s` (`%s`): %s\n",
+					escapeCode(timing.Phase),
+					escapeCode(timing.AttemptID),
+					formatDuration(timing.Duration),
+				); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func diagnosticScenarioText(diagnosis model.Diagnosis) string {
+	parts := []string{"mode=" + string(diagnosis.Target.Mode)}
+	if diagnosis.Options.ExpectedStatusConfigured {
+		parts = append(parts, fmt.Sprintf(
+			"expected-status=%d-%d",
+			diagnosis.Options.ExpectedStatusMin,
+			diagnosis.Options.ExpectedStatusMax,
+		))
+	}
+	if diagnosis.Options.LatencyThreshold > 0 {
+		parts = append(parts, "latency-threshold="+diagnosis.Options.LatencyThreshold.String())
+	}
+	if diagnosis.Options.ConnectIP != "" {
+		parts = append(parts, "connect-ip="+diagnosis.Options.ConnectIP)
+	}
+	if diagnosis.Options.ServerName != "" {
+		parts = append(parts, "sni="+diagnosis.Options.ServerName)
+	}
+	if diagnosis.Options.HTTPHost != "" {
+		parts = append(parts, "http-host="+diagnosis.Options.HTTPHost)
+	}
+	if diagnosis.Options.CustomCAConfigured {
+		parts = append(parts, "custom-ca=configured")
+	}
+	if len(diagnosis.Options.RequestHeaderNames) > 0 {
+		parts = append(parts, "one-time-header-names="+strings.Join(diagnosis.Options.RequestHeaderNames, ","))
+	}
+	if diagnosis.Options.CollectDNSDetails {
+		parts = append(parts, "dns-details=enabled")
+	}
+	if diagnosis.Options.InspectBody {
+		parts = append(parts, "body-inspection=enabled")
+	}
+	return strings.Join(parts, "; ")
+}
+
+func attemptEndpoint(attempt model.NetworkAttempt) string {
+	if attempt.RemoteAddr != "" {
+		return attempt.RemoteAddr
+	}
+	if attempt.RemoteIP != nil {
+		return attempt.RemoteIP.String()
+	}
+	return ""
 }
 
 func redirectPolicyText(options model.DiagnoseOptions) string {

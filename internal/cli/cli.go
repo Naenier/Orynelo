@@ -138,6 +138,10 @@ type diagnoseFlags struct {
 	timeout                string
 	checkTimeout           string
 	ipVersion              string
+	mode                   string
+	probeMode              string
+	addressLimit           string
+	addressMatrixBudget    string
 	format                 string
 	anonymize              string
 	output                 string
@@ -150,6 +154,15 @@ type diagnoseFlags struct {
 	logLevel               string
 	verbose                bool
 	persistence            string
+	expectStatus           string
+	latencyThreshold       string
+	connectIP              string
+	serverName             string
+	httpHost               string
+	caBundle               string
+	headers                []string
+	collectDNSDetails      bool
+	inspectBody            bool
 }
 
 func newDiagnose(options Options) *cobra.Command {
@@ -318,6 +331,10 @@ func newDiagnose(options Options) *cobra.Command {
 	command.Flags().StringVar(&flags.timeout, "timeout", (15 * time.Second).String(), "Global diagnostic timeout")
 	command.Flags().StringVar(&flags.checkTimeout, "check-timeout", (5 * time.Second).String(), "Timeout for an individual check")
 	command.Flags().StringVar(&flags.ipVersion, "ip-version", "auto", "Address family: auto, 4, or 6")
+	command.Flags().StringVar(&flags.mode, "mode", "auto", "Target interpretation: auto, tcp, or tls")
+	command.Flags().StringVar(&flags.probeMode, "probe-mode", "client-effective", "Probe scope: client-effective or address-matrix")
+	command.Flags().StringVar(&flags.addressLimit, "address-limit", "4", "Maximum backend addresses in address-matrix mode")
+	command.Flags().StringVar(&flags.addressMatrixBudget, "matrix-budget", (5 * time.Second).String(), "Total budget reserved for address-matrix attempts")
 	command.Flags().StringVar(&flags.format, "format", "text", "Report format: text, json, markdown, or md")
 	command.Flags().StringVar(
 		&flags.anonymize,
@@ -342,6 +359,15 @@ func newDiagnose(options Options) *cobra.Command {
 	)
 	command.Flags().StringVar(&flags.maxRedirects, "max-redirects", "10", "Maximum HTTP redirects")
 	command.Flags().StringVar(&flags.method, "method", "GET", "Safe HTTP method: GET, HEAD, or OPTIONS")
+	command.Flags().StringVar(&flags.expectStatus, "expect-status", "", "Expected HTTP status code or range, for example 204 or 200-299")
+	command.Flags().StringVar(&flags.latencyThreshold, "latency-threshold", "", "Fail when total HTTP latency exceeds this duration")
+	command.Flags().StringVar(&flags.connectIP, "connect-ip", "", "Connect to a specific backend IP while preserving logical identity")
+	command.Flags().StringVar(&flags.serverName, "sni", "", "Override TLS SNI and hostname verification name")
+	command.Flags().StringVar(&flags.httpHost, "http-host", "", "Override the initial HTTP Host authority")
+	command.Flags().StringVar(&flags.caBundle, "ca-bundle", "", "Add a bounded PEM CA bundle without disabling TLS verification")
+	command.Flags().StringArrayVar(&flags.headers, "header", nil, "One-time request header (repeatable; values are never persisted or logged)")
+	command.Flags().BoolVar(&flags.collectDNSDetails, "dns-details", false, "Collect optional CNAME, TTL, and resolver-source evidence")
+	command.Flags().BoolVar(&flags.inspectBody, "inspect-body", false, "Read bounded body metadata without storing response content")
 	command.Flags().StringVar(&flags.logLevel, "log-level", "info", "Log level: debug, info, warn, or error")
 	command.Flags().BoolVarP(&flags.verbose, "verbose", "v", false, "Write progress events to stderr")
 	command.Flags().StringVar(
@@ -388,6 +414,28 @@ func diagnoseOverrides(
 		value := model.IPVersion(flags.ipVersion)
 		overrides.IPVersion = &value
 	}
+	if command.Flags().Changed("mode") {
+		value := model.DiagnosticMode(flags.mode)
+		overrides.Mode = &value
+	}
+	if command.Flags().Changed("probe-mode") {
+		value := model.ProbeMode(strings.ReplaceAll(flags.probeMode, "-", "_"))
+		overrides.ProbeMode = &value
+	}
+	if command.Flags().Changed("address-limit") {
+		value, err := strconv.Atoi(flags.addressLimit)
+		if err != nil {
+			return application.DiagnoseOverrides{}, invalidCLIFlagValue(err, "address-limit")
+		}
+		overrides.AddressLimit = &value
+	}
+	if command.Flags().Changed("matrix-budget") {
+		value, err := time.ParseDuration(flags.addressMatrixBudget)
+		if err != nil {
+			return application.DiagnoseOverrides{}, invalidCLIFlagValue(err, "matrix-budget")
+		}
+		overrides.AddressMatrixBudget = &value
+	}
 	if command.Flags().Changed("no-proxy") {
 		value := flags.noProxy
 		overrides.NoProxy = &value
@@ -415,6 +463,52 @@ func diagnoseOverrides(
 		value := flags.method
 		overrides.Method = &value
 	}
+	if command.Flags().Changed("expect-status") {
+		minimum, maximum, err := parseStatusExpectation(flags.expectStatus)
+		if err != nil {
+			return application.DiagnoseOverrides{}, invalidCLIFlagValue(err, "expect-status")
+		}
+		overrides.ExpectedStatusMin = &minimum
+		overrides.ExpectedStatusMax = &maximum
+	}
+	if command.Flags().Changed("latency-threshold") {
+		value, err := time.ParseDuration(flags.latencyThreshold)
+		if err != nil {
+			return application.DiagnoseOverrides{}, invalidCLIFlagValue(err, "latency-threshold")
+		}
+		overrides.LatencyThreshold = &value
+	}
+	if command.Flags().Changed("connect-ip") {
+		value := flags.connectIP
+		overrides.ConnectIP = &value
+	}
+	if command.Flags().Changed("sni") {
+		value := flags.serverName
+		overrides.ServerName = &value
+	}
+	if command.Flags().Changed("http-host") {
+		value := flags.httpHost
+		overrides.HTTPHost = &value
+	}
+	if command.Flags().Changed("ca-bundle") {
+		value := flags.caBundle
+		overrides.CustomCABundlePath = &value
+	}
+	if command.Flags().Changed("header") {
+		headers, _, err := application.ParseTransientHeaders(flags.headers)
+		if err != nil {
+			return application.DiagnoseOverrides{}, invalidCLIFlagValue(err, "header")
+		}
+		overrides.RequestHeaders = headers
+	}
+	if command.Flags().Changed("dns-details") {
+		value := flags.collectDNSDetails
+		overrides.CollectDNSDetails = &value
+	}
+	if command.Flags().Changed("inspect-body") {
+		value := flags.inspectBody
+		overrides.InspectBody = &value
+	}
 	if command.Flags().Changed("verbose") {
 		value := model.ReportVerbosityNormal
 		if flags.verbose {
@@ -423,6 +517,29 @@ func diagnoseOverrides(
 		overrides.ReportVerbosity = &value
 	}
 	return overrides, nil
+}
+
+func parseStatusExpectation(value string) (int, int, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, 0, errors.New("expected status is empty")
+	}
+	left, right, ranged := strings.Cut(value, "-")
+	minimum, err := strconv.Atoi(strings.TrimSpace(left))
+	if err != nil {
+		return 0, 0, errors.New("expected status is invalid")
+	}
+	maximum := minimum
+	if ranged {
+		maximum, err = strconv.Atoi(strings.TrimSpace(right))
+		if err != nil {
+			return 0, 0, errors.New("expected status range is invalid")
+		}
+	}
+	if minimum < 100 || maximum > 599 || minimum > maximum {
+		return 0, 0, errors.New("expected status must be between 100 and 599")
+	}
+	return minimum, maximum, nil
 }
 
 func invalidCLIFlagValue(err error, field string) error {

@@ -1170,11 +1170,19 @@ func (c *controller) openLogDirectory() error {
 // profileViewFromDiagnosis extracts reusable settings from a completed run.
 func profileViewFromDiagnosis(diagnosis model.Diagnosis) presenter.ProfileView {
 	mode := "auto"
-	if diagnosis.Target.Kind == model.TargetTCP {
+	switch diagnosis.Target.Mode {
+	case model.TargetModeTCP:
 		mode = "tcp"
-	}
-	if diagnosis.Options.EnableTLS {
+	case model.TargetModeTLS:
 		mode = "tls"
+	default:
+		// Preserve compatibility with snapshots written before Target.Mode.
+		if diagnosis.Target.Kind == model.TargetTCP {
+			mode = "tcp"
+		}
+		if diagnosis.Options.EnableTLS {
+			mode = "tls"
+		}
 	}
 	return presenter.ProfileView{
 		Name:                   diagnosis.Target.DisplayHost,

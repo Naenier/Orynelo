@@ -10,7 +10,6 @@ import (
 	"io"
 	"net"
 	stdhttp "net/http"
-	"net/http/httptrace"
 	"net/netip"
 	"net/url"
 	"sort"
@@ -22,6 +21,7 @@ import (
 	"github.com/Naenier/orynelo/internal/diagnostics/checks/environment"
 	"github.com/Naenier/orynelo/internal/diagnostics/model"
 	"github.com/Naenier/orynelo/internal/redaction"
+	"github.com/Naenier/orynelo/internal/trust"
 )
 
 const (
@@ -31,6 +31,7 @@ const (
 	ErrorProxyConfig       = environment.ErrorProxyConfigInvalid
 	ErrorProxyUnavailable  = "PROXY_SELECTION_UNAVAILABLE"
 	ErrorProxyConnect      = "HTTP_PROXY_CONNECT_FAILED"
+	ErrorProxyAuth         = "HTTP_PROXY_AUTH_REQUIRED"
 	ErrorRedirectLoop      = "HTTP_REDIRECT_LOOP"
 	ErrorTooManyRedirects  = "HTTP_TOO_MANY_REDIRECTS"
 	ErrorRedirectDowngrade = "HTTP_REDIRECT_HTTPS_DOWNGRADE_BLOCKED"
@@ -40,6 +41,11 @@ const (
 	ErrorBodyRead          = "HTTP_BODY_READ_ERROR"
 	ErrorClientResponse    = "HTTP_CLIENT_ERROR"
 	ErrorServerResponse    = "HTTP_SERVER_ERROR"
+	ErrorUnexpectedStatus  = "HTTP_UNEXPECTED_STATUS"
+	ErrorLatencyThreshold  = "HTTP_LATENCY_THRESHOLD_EXCEEDED"
+	ErrorCustomCA          = "HTTP_CUSTOM_CA_INVALID"
+	ErrorConnectIP         = "HTTP_CONNECT_IP_INVALID"
+	ErrorConnectIPProxy    = "HTTP_CONNECT_IP_PROXY_UNSUPPORTED"
 )
 
 var (
@@ -51,8 +57,30 @@ var (
 	errProxyConfig       = errors.New("proxy policy selected an invalid proxy")
 	errProxyUnavailable  = errors.New("proxy policy selection is unavailable")
 	errProxyConnect      = errors.New("proxy rejected CONNECT request")
+	errProxyAuth         = errors.New("proxy authentication is required")
+	errCustomCA          = errors.New("custom CA bundle is invalid")
+	errConnectIP         = errors.New("connect IP is invalid")
 	errLocationTooLarge  = errors.New("redirect Location exceeds configured limit")
 )
+
+type proxyConnectResponseError struct {
+	statusCode int
+}
+
+func (e *proxyConnectResponseError) Error() string {
+	if e != nil && e.statusCode == stdhttp.StatusProxyAuthRequired {
+		return "proxy authentication is required"
+	}
+	return "proxy rejected CONNECT request"
+}
+
+func (e *proxyConnectResponseError) Is(target error) bool {
+	if target == errProxyConnect {
+		return true
+	}
+	return target == errProxyAuth && e != nil &&
+		e.statusCode == stdhttp.StatusProxyAuthRequired
+}
 
 // Resolver makes redirect network-scope classification deterministic in
 // tests. net.Resolver satisfies this interface.
@@ -72,8 +100,8 @@ type Check struct {
 	TransportFactory RoundTripperFactory
 	Resolver         Resolver
 	DialContext      DialContextFunc
-	// RequestHeaders is an internal test seam. Production constructors leave
-	// it nil because Orynelo never accepts arbitrary outbound headers.
+	// RequestHeaders is an internal test seam layered after the validated,
+	// runtime-only headers carried by DiagnoseOptions.
 	RequestHeaders stdhttp.Header
 	Now            func() time.Time
 }
@@ -164,12 +192,27 @@ func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 		}
 	}
 	request.Header.Set("User-Agent", state.Options.UserAgent)
-	for name, values := range c.RequestHeaders {
-		request.Header[name] = append([]string(nil), values...)
+	transientHeaderNames := make(map[string]struct{})
+	for name, value := range state.Options.RequestHeaders {
+		canonical := stdhttp.CanonicalHeaderKey(strings.TrimSpace(name))
+		if canonical == "" || strings.EqualFold(canonical, "Host") {
+			continue
+		}
+		request.Header.Set(canonical, value)
+		transientHeaderNames[canonical] = struct{}{}
 	}
-
-	timing := &traceTimings{requestStarted: c.now(), now: c.now}
-	request = request.WithContext(httptrace.WithClientTrace(request.Context(), timing.trace()))
+	for name, values := range c.RequestHeaders {
+		canonical := stdhttp.CanonicalHeaderKey(strings.TrimSpace(name))
+		if canonical == "" || strings.EqualFold(canonical, "Host") {
+			continue
+		}
+		request.Header[canonical] = append([]string(nil), values...)
+		transientHeaderNames[canonical] = struct{}{}
+	}
+	if host := strings.TrimSpace(state.Options.HTTPHost); host != "" {
+		request.Host = host
+	}
+	overallStarted := c.now()
 	activeProxySelection := proxySelectionForURL(
 		proxyInfo,
 		state.Options.NoProxy,
@@ -214,13 +257,13 @@ func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 	}
 
 	approvedTargets := newApprovedDialTargets()
-	transport, transportErr := c.transport(state, approvedTargets)
-	if transportErr != nil {
+	if strings.TrimSpace(state.Options.ConnectIP) != "" &&
+		proxySelectionRoute(activeProxySelection) == "proxy" {
 		result := model.HTTPResult{
 			Method:    method,
 			FinalURL:  SafeURL(request.URL),
-			ErrorCode: ErrorProxyConfig,
-			Error:     "validated proxy selection could not be constructed",
+			ErrorCode: ErrorConnectIPProxy,
+			Error:     "connect IP cannot be applied safely through the selected proxy",
 		}
 		applyRouteMetadata(&result, activeProxySelection)
 		state.SetHTTP(result)
@@ -228,10 +271,68 @@ func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 			ID:        c.ID(),
 			Name:      c.Name(),
 			Status:    model.StatusFailed,
-			Summary:   "HTTP was not sent because the proxy selection is unusable.",
-			ErrorCode: ErrorProxyConfig,
+			Summary:   "The HTTP request was not sent because a fixed connect IP is incompatible with the selected proxy route.",
+			ErrorCode: ErrorConnectIPProxy,
+			Evidence:  httpEvidence(result),
+			Recommendations: []model.Recommendation{{
+				ID:       "http.choose_connect_ip_route",
+				Priority: "high",
+				Message:  "Disable proxy use for this run or remove the fixed connect IP.",
+			}},
+		}
+	}
+	if connectIP := strings.TrimSpace(state.Options.ConnectIP); connectIP != "" &&
+		proxySelectionRoute(activeProxySelection) == "direct" {
+		if err := approvedTargets.approveAddress(request.URL, connectIP); err != nil {
+			result := model.HTTPResult{
+				Method:    method,
+				FinalURL:  SafeURL(request.URL),
+				ErrorCode: ErrorConnectIP,
+				Error:     "connect IP is invalid",
+			}
+			applyRouteMetadata(&result, activeProxySelection)
+			state.SetHTTP(result)
+			return model.CheckResult{
+				ID:        c.ID(),
+				Name:      c.Name(),
+				Status:    model.StatusFailed,
+				Summary:   errorSummary(ErrorConnectIP),
+				ErrorCode: ErrorConnectIP,
+				Evidence:  httpEvidence(result),
+			}
+		}
+	}
+	transport, transportErr := c.transport(state, approvedTargets)
+	if transportErr != nil {
+		code := classifyError(transportErr)
+		result := model.HTTPResult{
+			Method:    method,
+			FinalURL:  SafeURL(request.URL),
+			ErrorCode: code,
+			Error:     safeTransportError(transportErr),
+		}
+		applyRouteMetadata(&result, activeProxySelection)
+		state.SetHTTP(result)
+		return model.CheckResult{
+			ID:        c.ID(),
+			Name:      c.Name(),
+			Status:    model.StatusFailed,
+			Summary:   errorSummary(code),
+			ErrorCode: code,
 			Evidence:  httpEvidence(result),
 		}
+	}
+	recorder := newHTTPTraceRecorder(
+		c.now,
+		overallStarted,
+		func(target *url.URL) model.ProxySelection {
+			return proxySelectionForURL(proxyInfo, state.Options.NoProxy, target)
+		},
+	)
+	transport = &tracingRoundTripper{
+		base:        transport,
+		recorder:    recorder,
+		inspectBody: state.Options.InspectBody,
 	}
 	if closer, ok := transport.(interface{ CloseIdleConnections() }); ok {
 		defer closer.CloseIdleConnections()
@@ -268,6 +369,13 @@ func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 			// A server-controlled Location must never introduce URL userinfo,
 			// including on a same-origin hop.
 			next.URL.User = nil
+			// An explicit Host override identifies only the requested initial
+			// origin. A redirect must use the authority from its own URL.
+			next.Host = ""
+			transientSensitiveRemoved := stripTransientHeaders(
+				next.Header,
+				transientHeaderNames,
+			)
 			if redirect.CrossOrigin {
 				var previousHeaders stdhttp.Header
 				if len(via) > 0 {
@@ -277,10 +385,17 @@ func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 					next.Header,
 					previousHeaders,
 				)
+				redirect.SensitiveHeadersRemoved = mergeHeaderNames(
+					redirect.SensitiveHeadersRemoved,
+					transientSensitiveRemoved,
+				)
 				redirect.PolicyDecision = "followed_cross_origin"
 				if len(redirect.SensitiveHeadersRemoved) > 0 {
 					redirect.PolicyDecision = "followed_cross_origin_headers_removed"
 				}
+			} else if len(transientSensitiveRemoved) > 0 {
+				redirect.SensitiveHeadersRemoved = transientSensitiveRemoved
+				redirect.PolicyDecision = "followed_headers_removed"
 			}
 			rawLocation := ""
 			if next.Response != nil {
@@ -331,7 +446,7 @@ func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 			fromScope, fromErr := c.previousNetworkScope(
 				ctx,
 				fromURL,
-				timing,
+				recorder.lastRemoteAddress(),
 				activeProxySelection,
 			)
 			toScope, approvedAddresses, toErr := c.resolveNetworkScope(ctx, next.URL)
@@ -363,19 +478,27 @@ func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 	}
 
 	response, err := client.Do(request)
-	total := c.now().Sub(timing.requestStarted)
 	if err != nil {
 		if response != nil && response.Body != nil {
 			_ = response.Body.Close()
 		}
+		finished := c.now()
+		trace := recorder.snapshot(finished)
+		redirects = correlateRedirects(redirects, trace.hops)
+		appendHTTPNetworkPaths(state, trace.paths)
 		result := model.HTTPResult{
 			Method:    method,
 			FinalURL:  SafeURL(lastAttemptedURL),
 			Redirects: redirects,
-			Timings:   timing.snapshot(total),
-			RemoteIP:  timing.remoteAddress(),
+			Hops:      trace.hops,
+			Timings:   trace.timings,
+			RemoteIP:  trace.remoteIP,
 			ErrorCode: classifyError(err),
-			Error:     redaction.RedactText(safeTransportError(err)),
+			Error: redaction.RedactText(redactRuntimeHeaderValues(
+				safeTransportError(err),
+				state.Options.RequestHeaders,
+				c.RequestHeaders,
+			)),
 		}
 		applyRouteMetadata(&result, activeProxySelection)
 		result.Route = routeHistory.route()
@@ -385,66 +508,142 @@ func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 			status = model.StatusCancelled
 		}
 		return model.CheckResult{
-			ID:        c.ID(),
-			Name:      c.Name(),
-			Status:    status,
-			Summary:   errorSummary(result.ErrorCode),
-			ErrorCode: result.ErrorCode,
-			Evidence:  httpEvidence(result),
+			ID:          c.ID(),
+			Name:        c.Name(),
+			Status:      status,
+			Summary:     errorSummary(result.ErrorCode),
+			ErrorCode:   result.ErrorCode,
+			Evidence:    httpEvidence(result),
+			NetworkRefs: trace.networkRefs,
 		}
 	}
-	defer response.Body.Close()
 
 	bodyLimit := state.Options.BodyLimit
 	if bodyLimit <= 0 {
 		bodyLimit = 64 << 10
 	}
-	read, readErr := io.Copy(io.Discard, io.LimitReader(response.Body, bodyLimit+1))
-	total = c.now().Sub(timing.requestStarted)
+	var read int64
+	var readErr error
+	if state.Options.InspectBody && response.Body != nil {
+		read, readErr = io.Copy(io.Discard, io.LimitReader(response.Body, bodyLimit+1))
+	}
 	truncated := read > bodyLimit
 	if read > bodyLimit {
 		read = bodyLimit
 	}
+	if response.Body != nil {
+		_ = response.Body.Close()
+	}
+	finished := c.now()
+	trace := recorder.snapshot(finished)
+	redirects = correlateRedirects(redirects, trace.hops)
+	appendHTTPNetworkPaths(state, trace.paths)
 	result := model.HTTPResult{
 		Method:        method,
 		FinalURL:      SafeURL(response.Request.URL),
 		StatusCode:    response.StatusCode,
 		Status:        response.Status,
 		Redirects:     redirects,
+		Hops:          trace.hops,
 		Headers:       RedactHeaders(response.Header),
-		Timings:       timing.snapshot(total),
-		RemoteIP:      timing.remoteAddress(),
+		Timings:       trace.timings,
+		RemoteIP:      trace.remoteIP,
 		Protocol:      response.Proto,
 		BodyBytesRead: read,
 		BodyTruncated: truncated,
 	}
 	applyRouteMetadata(&result, activeProxySelection)
 	result.Route = routeHistory.route()
-	if readErr != nil {
+	proxyAuthenticationRequired := response.StatusCode == stdhttp.StatusProxyAuthRequired &&
+		proxySelectionRoute(activeProxySelection) == "proxy"
+	unexpectedStatus := statusOutsideExpectation(state.Options, response.StatusCode)
+	latencyExceeded := state.Options.LatencyThreshold > 0 &&
+		result.Timings.Total > state.Options.LatencyThreshold
+	switch {
+	case proxyAuthenticationRequired:
+		result.ErrorCode = ErrorProxyAuth
+		result.Error = "proxy authentication is required"
+	case unexpectedStatus:
+		result.ErrorCode = ErrorUnexpectedStatus
+		result.Error = "HTTP response status did not match the configured expectation"
+	case latencyExceeded:
+		result.ErrorCode = ErrorLatencyThreshold
+		result.Error = "HTTP response exceeded the configured latency threshold"
+	case readErr != nil:
 		result.ErrorCode = ErrorBodyRead
-		result.Error = readErr.Error()
+		result.Error = "bounded response body inspection failed"
 	}
 	state.SetHTTP(result)
 	evidence := httpEvidence(result)
 
-	if readErr != nil {
+	if proxyAuthenticationRequired {
 		return model.CheckResult{
-			ID:        c.ID(),
-			Name:      c.Name(),
-			Status:    model.StatusWarning,
-			Summary:   "The HTTP response arrived, but its bounded body could not be read completely.",
-			ErrorCode: ErrorBodyRead,
-			Evidence:  evidence,
+			ID:          c.ID(),
+			Name:        c.Name(),
+			Status:      model.StatusFailed,
+			Summary:     errorSummary(ErrorProxyAuth),
+			ErrorCode:   ErrorProxyAuth,
+			Evidence:    evidence,
+			NetworkRefs: trace.networkRefs,
+			Recommendations: []model.Recommendation{{
+				ID:       "http.configure_proxy_authentication",
+				Priority: "high",
+				Message:  "Verify proxy credentials and the proxy authentication policy.",
+			}},
 		}
 	}
-	if response.StatusCode >= 500 {
+	if unexpectedStatus {
 		return model.CheckResult{
-			ID:        c.ID(),
-			Name:      c.Name(),
-			Status:    model.StatusWarning,
-			Summary:   fmt.Sprintf("HTTP transport succeeded; the application returned %s.", response.Status),
-			ErrorCode: ErrorServerResponse,
-			Evidence:  evidence,
+			ID:          c.ID(),
+			Name:        c.Name(),
+			Status:      model.StatusFailed,
+			Summary:     "The HTTP response status did not match the configured expectation.",
+			ErrorCode:   ErrorUnexpectedStatus,
+			Evidence:    evidence,
+			NetworkRefs: trace.networkRefs,
+			Recommendations: []model.Recommendation{{
+				ID:       "http.verify_status_expectation",
+				Priority: "high",
+				Message:  "Verify service health and the configured expected status range.",
+			}},
+		}
+	}
+	if latencyExceeded {
+		return model.CheckResult{
+			ID:          c.ID(),
+			Name:        c.Name(),
+			Status:      model.StatusFailed,
+			Summary:     "The HTTP response exceeded the configured latency threshold.",
+			ErrorCode:   ErrorLatencyThreshold,
+			Evidence:    evidence,
+			NetworkRefs: trace.networkRefs,
+			Recommendations: []model.Recommendation{{
+				ID:       "http.investigate_latency",
+				Priority: "high",
+				Message:  "Inspect per-hop timings and service latency before retrying.",
+			}},
+		}
+	}
+	if readErr != nil {
+		return model.CheckResult{
+			ID:          c.ID(),
+			Name:        c.Name(),
+			Status:      model.StatusWarning,
+			Summary:     "The HTTP response arrived, but its bounded body could not be read completely.",
+			ErrorCode:   ErrorBodyRead,
+			Evidence:    evidence,
+			NetworkRefs: trace.networkRefs,
+		}
+	}
+	if !state.Options.ExpectedStatusConfigured && response.StatusCode >= 500 {
+		return model.CheckResult{
+			ID:          c.ID(),
+			Name:        c.Name(),
+			Status:      model.StatusWarning,
+			Summary:     fmt.Sprintf("HTTP transport succeeded; the application returned %s.", response.Status),
+			ErrorCode:   ErrorServerResponse,
+			Evidence:    evidence,
+			NetworkRefs: trace.networkRefs,
 			Recommendations: []model.Recommendation{{
 				ID:       "http.investigate_server",
 				Priority: "high",
@@ -452,14 +651,15 @@ func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 			}},
 		}
 	}
-	if response.StatusCode >= 400 {
+	if !state.Options.ExpectedStatusConfigured && response.StatusCode >= 400 {
 		return model.CheckResult{
-			ID:        c.ID(),
-			Name:      c.Name(),
-			Status:    model.StatusWarning,
-			Summary:   fmt.Sprintf("HTTP transport succeeded; the application returned %s.", response.Status),
-			ErrorCode: ErrorClientResponse,
-			Evidence:  evidence,
+			ID:          c.ID(),
+			Name:        c.Name(),
+			Status:      model.StatusWarning,
+			Summary:     fmt.Sprintf("HTTP transport succeeded; the application returned %s.", response.Status),
+			ErrorCode:   ErrorClientResponse,
+			Evidence:    evidence,
+			NetworkRefs: trace.networkRefs,
 			Recommendations: []model.Recommendation{{
 				ID:       "http.verify_request",
 				Priority: "medium",
@@ -468,11 +668,12 @@ func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 		}
 	}
 	return model.CheckResult{
-		ID:       c.ID(),
-		Name:     c.Name(),
-		Status:   model.StatusPassed,
-		Summary:  fmt.Sprintf("HTTP request succeeded with %s.", response.Status),
-		Evidence: evidence,
+		ID:          c.ID(),
+		Name:        c.Name(),
+		Status:      model.StatusPassed,
+		Summary:     fmt.Sprintf("HTTP request succeeded with %s.", response.Status),
+		Evidence:    evidence,
+		NetworkRefs: trace.networkRefs,
 	}
 }
 
@@ -514,6 +715,17 @@ func (c *Check) transport(
 	if len(approved) > 0 && approved[0] != nil {
 		approvedTargets = approved[0]
 	}
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: state.Options.Insecure, //nolint:gosec
+		ServerName:         strings.TrimSpace(state.Options.ServerName),
+	}
+	if len(state.Options.CustomCAPEM) > 0 {
+		rootCAs, err := trust.Pool(state.Options.CustomCAPEM)
+		if err != nil {
+			return nil, fmt.Errorf("%w: custom CA bundle is invalid", errCustomCA)
+		}
+		tlsConfig.RootCAs = rootCAs
+	}
 	return &stdhttp.Transport{
 		Proxy: proxy,
 		OnProxyConnectResponse: func(
@@ -525,7 +737,11 @@ func (c *Check) transport(
 			if response != nil && response.StatusCode >= 200 && response.StatusCode < 300 {
 				return nil
 			}
-			return errProxyConnect
+			statusCode := 0
+			if response != nil {
+				statusCode = response.StatusCode
+			}
+			return &proxyConnectResponseError{statusCode: statusCode}
 		},
 		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 			return approvedTargets.dial(
@@ -537,22 +753,26 @@ func (c *Check) transport(
 			)
 		},
 		ForceAttemptHTTP2:      true,
-		TLSClientConfig:        &tls.Config{InsecureSkipVerify: state.Options.Insecure}, //nolint:gosec
+		TLSClientConfig:        tlsConfig,
 		TLSHandshakeTimeout:    state.Options.CheckTimeout,
 		ResponseHeaderTimeout:  state.Options.CheckTimeout,
 		MaxResponseHeaderBytes: 64 << 10,
 		IdleConnTimeout:        30 * time.Second,
-		DisableKeepAlives:      true,
+		DisableKeepAlives:      false,
 	}, nil
 }
 
 type approvedDialTargets struct {
 	mu        sync.RWMutex
-	addresses map[string][]net.IP
+	addresses map[string][]string
+	fixed     map[string]bool
 }
 
 func newApprovedDialTargets() *approvedDialTargets {
-	return &approvedDialTargets{addresses: make(map[string][]net.IP)}
+	return &approvedDialTargets{
+		addresses: make(map[string][]string),
+		fixed:     make(map[string]bool),
+	}
 }
 
 func (targets *approvedDialTargets) approve(target *url.URL, addresses []net.IP) {
@@ -563,19 +783,43 @@ func (targets *approvedDialTargets) approve(target *url.URL, addresses []net.IP)
 	if key == "" {
 		return
 	}
-	approved := make([]net.IP, 0, len(addresses))
+	approved := make([]string, 0, len(addresses))
 	for _, address := range addresses {
 		if address == nil {
 			continue
 		}
-		approved = append(approved, append(net.IP(nil), address...))
+		approved = append(approved, address.String())
 	}
 	if len(approved) == 0 {
 		return
 	}
 	targets.mu.Lock()
+	if targets.fixed[key] {
+		targets.mu.Unlock()
+		return
+	}
 	targets.addresses[key] = approved
 	targets.mu.Unlock()
+}
+
+func (targets *approvedDialTargets) approveAddress(target *url.URL, address string) error {
+	if targets == nil || target == nil {
+		return errors.New("HTTP dial policy is unavailable")
+	}
+	host := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(address, "["), "]"))
+	parsed, err := netip.ParseAddr(host)
+	if err != nil {
+		return errConnectIP
+	}
+	key := urlDialAddress(target)
+	if key == "" {
+		return fmt.Errorf("%w: HTTP target has no dial address", errConnectIP)
+	}
+	targets.mu.Lock()
+	targets.addresses[key] = []string{parsed.String()}
+	targets.fixed[key] = true
+	targets.mu.Unlock()
+	return nil
 }
 
 func (targets *approvedDialTargets) dial(
@@ -591,17 +835,17 @@ func (targets *approvedDialTargets) dial(
 	key, port := canonicalDialAddress(address)
 	targets.mu.RLock()
 	approved, pinned := targets.addresses[key]
-	approved = cloneIPs(approved)
+	approved = append([]string(nil), approved...)
 	targets.mu.RUnlock()
 	if !pinned {
 		return dial(ctx, network, address)
 	}
 	var lastErr error
 	for _, candidate := range approved {
-		if !matchesIPVersion(candidate, ipVersion) {
+		if !matchesIPVersionAddress(candidate, ipVersion) {
 			continue
 		}
-		connection, err := dial(ctx, network, net.JoinHostPort(candidate.String(), port))
+		connection, err := dial(ctx, network, net.JoinHostPort(candidate, port))
 		if err == nil {
 			return connection, nil
 		}
@@ -614,6 +858,22 @@ func (targets *approvedDialTargets) dial(
 		lastErr = errors.New("no approved redirect address matches the requested IP family")
 	}
 	return nil, fmt.Errorf("approved redirect address dial failed: %w", lastErr)
+}
+
+func matchesIPVersionAddress(address string, version model.IPVersion) bool {
+	parsed, err := netip.ParseAddr(address)
+	if err != nil {
+		return false
+	}
+	parsed = parsed.Unmap()
+	switch version {
+	case model.IPVersion4:
+		return parsed.Is4()
+	case model.IPVersion6:
+		return parsed.Is6()
+	default:
+		return parsed.IsValid()
+	}
 }
 
 func urlDialAddress(value *url.URL) string {
@@ -648,15 +908,19 @@ func cloneIPs(values []net.IP) []net.IP {
 	return cloned
 }
 
-func matchesIPVersion(address net.IP, version model.IPVersion) bool {
-	switch version {
-	case model.IPVersion4:
-		return address.To4() != nil
-	case model.IPVersion6:
-		return address.To4() == nil && address.To16() != nil
-	default:
-		return address != nil
+func statusOutsideExpectation(options model.DiagnoseOptions, statusCode int) bool {
+	if !options.ExpectedStatusConfigured {
+		return false
 	}
+	minimum := options.ExpectedStatusMin
+	maximum := options.ExpectedStatusMax
+	if minimum <= 0 {
+		minimum = 100
+	}
+	if maximum <= 0 {
+		maximum = minimum
+	}
+	return statusCode < minimum || statusCode > maximum
 }
 
 func applyRouteMetadata(result *model.HTTPResult, selection model.ProxySelection) {
@@ -823,6 +1087,41 @@ func removeSensitiveHeaders(headers, previous stdhttp.Header) []string {
 	return removed
 }
 
+func stripTransientHeaders(
+	headers stdhttp.Header,
+	names map[string]struct{},
+) []string {
+	removedSensitive := make([]string, 0)
+	for name := range names {
+		if headers.Get(name) == "" {
+			continue
+		}
+		headers.Del(name)
+		if redaction.IsSensitiveHeader(name) {
+			removedSensitive = append(removedSensitive, stdhttp.CanonicalHeaderKey(name))
+		}
+	}
+	sort.Strings(removedSensitive)
+	return removedSensitive
+}
+
+func mergeHeaderNames(groups ...[]string) []string {
+	set := make(map[string]struct{})
+	for _, group := range groups {
+		for _, name := range group {
+			if canonical := stdhttp.CanonicalHeaderKey(name); canonical != "" {
+				set[canonical] = struct{}{}
+			}
+		}
+	}
+	merged := make([]string, 0, len(set))
+	for name := range set {
+		merged = append(merged, name)
+	}
+	sort.Strings(merged)
+	return merged
+}
+
 func (c *Check) networkScope(ctx context.Context, value *url.URL) (string, error) {
 	scope, _, err := c.resolveNetworkScope(ctx, value)
 	return scope, err
@@ -883,7 +1182,7 @@ func (c *Check) resolveNetworkScope(
 func (c *Check) previousNetworkScope(
 	ctx context.Context,
 	value *url.URL,
-	timing *traceTimings,
+	remoteAddress string,
 	selection model.ProxySelection,
 ) (string, error) {
 	// A proxy resolves or otherwise reaches the origin outside this process,
@@ -896,8 +1195,8 @@ func (c *Check) previousNetworkScope(
 	// For a direct route, httptrace gives the address actually used by the
 	// prior hop. Prefer that over another DNS lookup so a mixed answer cannot
 	// hide the fact that the connection was public.
-	if proxySelectionRoute(selection) == "direct" && timing != nil {
-		if address := net.ParseIP(timing.remoteAddress()); address != nil {
+	if proxySelectionRoute(selection) == "direct" {
+		if address := net.ParseIP(remoteAddress); address != nil {
 			return ipNetworkScope(address), nil
 		}
 	}
@@ -971,98 +1270,6 @@ func networkForIPVersion(network string, version model.IPVersion) string {
 	}
 }
 
-type traceTimings struct {
-	mu             sync.Mutex
-	now            func() time.Time
-	requestStarted time.Time
-	dnsStarted     time.Time
-	connectStarted time.Time
-	tlsStarted     time.Time
-	dns            time.Duration
-	tcp            time.Duration
-	tls            time.Duration
-	firstByte      time.Duration
-	remote         string
-}
-
-func (t *traceTimings) trace() *httptrace.ClientTrace {
-	return &httptrace.ClientTrace{
-		DNSStart: func(httptrace.DNSStartInfo) {
-			t.mu.Lock()
-			t.dnsStarted = t.now()
-			t.mu.Unlock()
-		},
-		DNSDone: func(httptrace.DNSDoneInfo) {
-			t.mu.Lock()
-			if !t.dnsStarted.IsZero() {
-				t.dns += t.now().Sub(t.dnsStarted)
-				t.dnsStarted = time.Time{}
-			}
-			t.mu.Unlock()
-		},
-		ConnectStart: func(_, _ string) {
-			t.mu.Lock()
-			t.connectStarted = t.now()
-			t.mu.Unlock()
-		},
-		ConnectDone: func(_, _ string, _ error) {
-			t.mu.Lock()
-			if !t.connectStarted.IsZero() {
-				t.tcp += t.now().Sub(t.connectStarted)
-				t.connectStarted = time.Time{}
-			}
-			t.mu.Unlock()
-		},
-		TLSHandshakeStart: func() {
-			t.mu.Lock()
-			t.tlsStarted = t.now()
-			t.mu.Unlock()
-		},
-		TLSHandshakeDone: func(tls.ConnectionState, error) {
-			t.mu.Lock()
-			if !t.tlsStarted.IsZero() {
-				t.tls += t.now().Sub(t.tlsStarted)
-				t.tlsStarted = time.Time{}
-			}
-			t.mu.Unlock()
-		},
-		GotFirstResponseByte: func() {
-			t.mu.Lock()
-			if t.firstByte == 0 {
-				t.firstByte = t.now().Sub(t.requestStarted)
-			}
-			t.mu.Unlock()
-		},
-		GotConn: func(info httptrace.GotConnInfo) {
-			t.mu.Lock()
-			t.remote = info.Conn.RemoteAddr().String()
-			t.mu.Unlock()
-		},
-	}
-}
-
-func (t *traceTimings) snapshot(total time.Duration) model.HTTPTimings {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return model.HTTPTimings{
-		DNS:       t.dns,
-		TCP:       t.tcp,
-		TLS:       t.tls,
-		FirstByte: t.firstByte,
-		Total:     total,
-	}
-}
-
-func (t *traceTimings) remoteAddress() string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	host, _, err := net.SplitHostPort(t.remote)
-	if err == nil {
-		return host
-	}
-	return t.remote
-}
-
 func classifyError(err error) string {
 	switch {
 	case errors.Is(err, context.Canceled):
@@ -1075,6 +1282,12 @@ func classifyError(err error) string {
 		return ErrorProxyConfig
 	case errors.Is(err, errProxyUnavailable):
 		return ErrorProxyUnavailable
+	case errors.Is(err, errProxyAuth):
+		return ErrorProxyAuth
+	case errors.Is(err, errCustomCA):
+		return ErrorCustomCA
+	case errors.Is(err, errConnectIP):
+		return ErrorConnectIP
 	case errors.Is(err, errRedirectPrivate):
 		return ErrorRedirectPrivate
 	case errors.Is(err, errRedirectResolve):
@@ -1105,8 +1318,14 @@ func safeTransportError(err error) string {
 		return safeTransportError(urlError.Err)
 	}
 	switch {
+	case errors.Is(err, errProxyAuth):
+		return "proxy authentication is required"
 	case isProxyConnectError(err):
 		return "proxy CONNECT failed"
+	case errors.Is(err, errCustomCA):
+		return "custom CA bundle is invalid"
+	case errors.Is(err, errConnectIP):
+		return "connect IP is invalid"
 	case errors.Is(err, errRedirectDowngrade):
 		return "HTTPS to HTTP redirect blocked by policy"
 	case errors.Is(err, errProxyConfig):
@@ -1128,6 +1347,26 @@ func safeTransportError(err error) string {
 	}
 }
 
+func redactRuntimeHeaderValues(
+	message string,
+	runtime map[string]string,
+	testHeaders stdhttp.Header,
+) string {
+	for _, value := range runtime {
+		if value != "" {
+			message = strings.ReplaceAll(message, value, "[REDACTED]")
+		}
+	}
+	for _, values := range testHeaders {
+		for _, value := range values {
+			if value != "" {
+				message = strings.ReplaceAll(message, value, "[REDACTED]")
+			}
+		}
+	}
+	return message
+}
+
 func errorSummary(code string) string {
 	switch code {
 	case ErrorCancelled:
@@ -1140,6 +1379,12 @@ func errorSummary(code string) string {
 		return "Proxy selection did not complete, so the HTTP request was blocked."
 	case ErrorProxyConnect:
 		return "The selected proxy could not establish the HTTP connection."
+	case ErrorProxyAuth:
+		return "The selected proxy requires authentication."
+	case ErrorCustomCA:
+		return "The custom certificate-authority bundle is invalid."
+	case ErrorConnectIP:
+		return "The configured connect IP is invalid."
 	case ErrorRedirectDowngrade:
 		return "An HTTPS to HTTP redirect was blocked by policy."
 	case ErrorRedirectPrivate:
@@ -1177,6 +1422,7 @@ func httpEvidence(result model.HTTPResult) []model.Evidence {
 		"statusCode":    strconv.Itoa(result.StatusCode),
 		"status":        result.Status,
 		"redirects":     strconv.Itoa(len(result.Redirects)),
+		"hops":          strconv.Itoa(len(result.Hops)),
 		"dnsDuration":   result.Timings.DNS.String(),
 		"tcpDuration":   result.Timings.TCP.String(),
 		"tlsDuration":   result.Timings.TLS.String(),
@@ -1206,11 +1452,17 @@ func httpEvidence(result model.HTTPResult) []model.Evidence {
 	for name, values := range result.Headers {
 		details["responseHeader."+name] = strings.Join(values, ", ")
 	}
+	var responseRef *model.NetworkRef
+	if len(result.Hops) > 0 {
+		ref := result.Hops[len(result.Hops)-1].NetworkRef
+		responseRef = &ref
+	}
 	evidence := []model.Evidence{{
-		ID:      "http.response",
-		Code:    httpEvidenceCode(result),
-		Message: "Bounded HTTP transport and response metadata were collected.",
-		Details: details,
+		ID:         "http.response",
+		NetworkRef: responseRef,
+		Code:       httpEvidenceCode(result),
+		Message:    "Bounded HTTP transport and response metadata were collected.",
+		Details:    details,
 	}}
 	for index, redirect := range result.Redirects {
 		redirectDetails := map[string]string{
@@ -1255,10 +1507,11 @@ func httpEvidence(result model.HTTPResult) []model.Evidence {
 			message = "Cross-origin redirect followed with sensitive-header forwarding blocked by policy."
 		}
 		evidence = append(evidence, model.Evidence{
-			ID:      fmt.Sprintf("http.redirect.%d", index+1),
-			Code:    redirectEvidenceCode(redirect),
-			Message: message,
-			Details: redirectDetails,
+			ID:         fmt.Sprintf("http.redirect.%d", index+1),
+			NetworkRef: redirect.FromNetworkRef,
+			Code:       redirectEvidenceCode(redirect),
+			Message:    message,
+			Details:    redirectDetails,
 		})
 	}
 	return evidence

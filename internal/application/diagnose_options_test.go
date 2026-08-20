@@ -82,7 +82,7 @@ func TestResolveDiagnoseOptionsAppliesProfileOverConfig(t *testing.T) {
 	if !reflect.DeepEqual(profile, original) {
 		t.Fatalf("profile was mutated: got %+v, want %+v", profile, original)
 	}
-	if got.Target != "example.test:9443" ||
+	if got.Target != "tls://example.test:9443" ||
 		got.Timeout != 12*time.Second ||
 		got.CheckTimeout != 3*time.Second ||
 		got.IPVersion != model.IPVersion4 ||
@@ -145,6 +145,9 @@ func TestResolveDiagnoseOptionsAppliesExplicitOverridesLast(t *testing.T) {
 		Timeout:                     18 * time.Second,
 		CheckTimeout:                2 * time.Second,
 		IPVersion:                   model.IPVersion6,
+		ProbeMode:                   model.ProbeModeClientEffective,
+		AddressLimit:                4,
+		AddressMatrixBudget:         5 * time.Second,
 		NoProxy:                     false,
 		Insecure:                    true,
 		EnableTLS:                   true,
@@ -159,6 +162,8 @@ func TestResolveDiagnoseOptionsAppliesExplicitOverridesLast(t *testing.T) {
 		CertificateWarningThreshold: 48 * time.Hour,
 		MaxConcurrency:              8,
 		BodyLimit:                   2048,
+		ExpectedStatusMin:           200,
+		ExpectedStatusMax:           399,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ResolveDiagnoseOptions() =\n%+v\nwant\n%+v", got, want)
@@ -169,17 +174,56 @@ func TestResolveDiagnoseOptionsTCPModeCanonicalizesTarget(t *testing.T) {
 	t.Parallel()
 
 	got, err := ResolveDiagnoseOptions(DefaultConfig(), nil, DiagnoseOverrides{
-		Target: optionPointer(" https://Example.Test:8443/private?q=1 "),
+		Target: optionPointer(" Example.Test:8443 "),
 		Mode:   optionPointer(model.DiagnosticModeTCP),
 	})
 	if err != nil {
 		t.Fatalf("ResolveDiagnoseOptions() error = %v", err)
 	}
-	if got.Target != "example.test:8443" {
-		t.Fatalf("Target = %q, want %q", got.Target, "example.test:8443")
+	if got.Target != "tcp://example.test:8443" {
+		t.Fatalf("Target = %q, want %q", got.Target, "tcp://example.test:8443")
 	}
 	if got.EnableTLS {
 		t.Fatal("EnableTLS = true in TCP mode")
+	}
+}
+
+func TestResolveDiagnoseOptionsAcceptsExplicitSchemesAndLinkLocalZone(t *testing.T) {
+	t.Parallel()
+	for _, target := range []string{
+		"tcp://example.test:443",
+		"tls://example.test:443",
+		"http://example.test/path",
+		"https://example.test/path",
+	} {
+		target := target
+		t.Run(target, func(t *testing.T) {
+			t.Parallel()
+			got, err := ResolveDiagnoseOptions(DefaultConfig(), nil, DiagnoseOverrides{
+				Target: &target,
+			})
+			if err != nil {
+				t.Fatalf("ResolveDiagnoseOptions(%q) error = %v", target, err)
+			}
+			if got.Target != target {
+				t.Fatalf("Target = %q, want %q", got.Target, target)
+			}
+		})
+	}
+
+	target := "tls://[fe80::1%25eth0]:443"
+	connectIP := "fe80::2%eth0"
+	ipVersion := model.IPVersion6
+	got, err := ResolveDiagnoseOptions(DefaultConfig(), nil, DiagnoseOverrides{
+		Target:    &target,
+		IPVersion: &ipVersion,
+		ConnectIP: &connectIP,
+	})
+	if err != nil {
+		t.Fatalf("link-local ResolveDiagnoseOptions() error = %v", err)
+	}
+	if got.ConnectIP != connectIP {
+		t.Fatalf("ConnectIP = %q, want %q", got.ConnectIP, connectIP)
 	}
 }
 
@@ -215,6 +259,102 @@ func TestResolveDiagnoseOptionsFallsBackFromEmptyConfiguredUserAgent(t *testing.
 	}
 	if got.UserAgent != model.DefaultDiagnoseOptions("").UserAgent {
 		t.Fatalf("UserAgent = %q, want model default", got.UserAgent)
+	}
+}
+
+func TestResolveDiagnoseOptionsAppliesStageThreeRuntimeOverridesWithoutSerializingSecrets(t *testing.T) {
+	probeMode := model.ProbeModeAddressMatrix
+	addressLimit := 7
+	matrixBudget := 4 * time.Second
+	expectedMin, expectedMax := 201, 204
+	latency := 750 * time.Millisecond
+	connectIP := "192.0.2.44"
+	serverName := "node.example.test"
+	httpHost := "service.example.test:8443"
+	caPath := "/runtime/only/ca.pem"
+	collectDNS, inspectBody := true, true
+	got, err := ResolveDiagnoseOptions(DefaultConfig(), nil, DiagnoseOverrides{
+		Target:              optionPointer("https://service.example.test:8443/health"),
+		ProbeMode:           &probeMode,
+		AddressLimit:        &addressLimit,
+		AddressMatrixBudget: &matrixBudget,
+		ExpectedStatusMin:   &expectedMin,
+		ExpectedStatusMax:   &expectedMax,
+		LatencyThreshold:    &latency,
+		ConnectIP:           &connectIP,
+		ServerName:          &serverName,
+		HTTPHost:            &httpHost,
+		CustomCABundlePath:  &caPath,
+		CollectDNSDetails:   &collectDNS,
+		InspectBody:         &inspectBody,
+		RequestHeaders: map[string]string{
+			"Authorization": "Bearer stage-three-secret",
+			"X-Incident":    "INC-42",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ResolveDiagnoseOptions() error = %v", err)
+	}
+	if got.ProbeMode != probeMode || got.AddressLimit != addressLimit ||
+		got.AddressMatrixBudget != matrixBudget || !got.ExpectedStatusConfigured ||
+		got.ExpectedStatusMin != expectedMin || got.ExpectedStatusMax != expectedMax ||
+		got.LatencyThreshold != latency || got.ConnectIP != connectIP ||
+		got.ServerName != serverName || got.HTTPHost != httpHost ||
+		!got.CustomCAConfigured || !got.CollectDNSDetails || !got.InspectBody ||
+		got.RequestHeaders["authorization"] == "" {
+		t.Fatalf("stage-three options = %+v", got)
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serialized := string(encoded)
+	for _, forbidden := range []string{"stage-three-secret", caPath, "INC-42"} {
+		if strings.Contains(serialized, forbidden) {
+			t.Fatalf("serialized options exposed runtime-only value %q: %s", forbidden, serialized)
+		}
+	}
+}
+
+func TestPreviewDiagnoseOptionsUsesNormalizedPrivacySafeTarget(t *testing.T) {
+	caPath := "/runtime/private/ca.pem"
+	preview, err := PreviewDiagnoseOptions(
+		DefaultConfig(),
+		nil,
+		DiagnoseOverrides{
+			Target:             optionPointer("https://user:password@Example.Test/path?token=secret"),
+			CustomCABundlePath: &caPath,
+			RequestHeaders: map[string]string{
+				"Authorization": "Bearer preview-header-secret",
+				"X-Incident":    "INC-preview-secret",
+			},
+		},
+		privacy.ModeStandard,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Target != "https://example.test:443/path?token=[REDACTED]" ||
+		strings.Contains(preview.Target, "password") || strings.Contains(preview.Target, "secret") {
+		t.Fatalf("preview target = %q", preview.Target)
+	}
+	if preview.CustomCABundlePath != "" || preview.CustomCAPEM != nil || preview.RequestHeaders != nil {
+		t.Fatalf("preview retained runtime-only options: %+v", preview)
+	}
+	if !preview.CustomCAConfigured ||
+		strings.Join(preview.RequestHeaderNames, ",") != "authorization,x-incident" {
+		t.Fatalf("preview omitted safe runtime metadata: %+v", preview)
+	}
+	encoded, err := json.Marshal(preview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{
+		"password", "secret", caPath, "preview-header-secret", "INC-preview-secret",
+	} {
+		if strings.Contains(string(encoded), secret) {
+			t.Fatalf("preview JSON leaked %q: %s", secret, encoded)
+		}
 	}
 }
 
@@ -279,11 +419,16 @@ func TestResolveDiagnoseOptionsValidation(t *testing.T) {
 		{name: "long target", overrides: DiagnoseOverrides{Target: optionPointer(strings.Repeat("a", maximumDiagnoseTargetBytes+1))}, want: "4096 bytes"},
 		{name: "invalid target", overrides: DiagnoseOverrides{Target: optionPointer("https://")}, want: "invalid target"},
 		{name: "invalid mode", overrides: DiagnoseOverrides{Target: optionPointer("example.test"), Mode: optionPointer(model.DiagnosticMode("udp"))}, want: "mode must be"},
+		{name: "scheme-less path in explicit TLS mode", overrides: DiagnoseOverrides{Target: optionPointer("example.test:443/private?token=mode-secret"), Mode: optionPointer(model.DiagnosticModeTLS)}, want: "does not accept URL paths"},
 		{name: "zero timeout", overrides: DiagnoseOverrides{Target: optionPointer("example.test"), Timeout: optionPointer(time.Duration(0))}, want: "timeout must be"},
 		{name: "long timeout", overrides: DiagnoseOverrides{Target: optionPointer("example.test"), Timeout: optionPointer(25 * time.Hour)}, want: "timeout must be"},
 		{name: "zero check timeout", overrides: DiagnoseOverrides{Target: optionPointer("example.test"), CheckTimeout: optionPointer(time.Duration(0))}, want: "check timeout must be"},
 		{name: "check exceeds total", overrides: DiagnoseOverrides{Target: optionPointer("example.test"), Timeout: optionPointer(time.Second), CheckTimeout: optionPointer(2 * time.Second)}, want: "must not exceed"},
 		{name: "invalid IP version", overrides: DiagnoseOverrides{Target: optionPointer("example.test"), IPVersion: optionPointer(model.IPVersion("5"))}, want: "IP version must be"},
+		{name: "invalid probe mode", overrides: DiagnoseOverrides{Target: optionPointer("example.test"), ProbeMode: optionPointer(model.ProbeMode("scan"))}, want: "probe mode"},
+		{name: "zero address limit", overrides: DiagnoseOverrides{Target: optionPointer("example.test"), AddressLimit: optionPointer(0)}, want: "address limit"},
+		{name: "large address limit", overrides: DiagnoseOverrides{Target: optionPointer("example.test"), AddressLimit: optionPointer(17)}, want: "address limit"},
+		{name: "negative matrix budget", overrides: DiagnoseOverrides{Target: optionPointer("example.test"), AddressMatrixBudget: optionPointer(-time.Second)}, want: "matrix budget"},
 		{name: "negative redirects", overrides: DiagnoseOverrides{Target: optionPointer("example.test"), MaxRedirects: optionPointer(-1)}, want: "maximum redirects"},
 		{name: "too many redirects", overrides: DiagnoseOverrides{Target: optionPointer("example.test"), MaxRedirects: optionPointer(51)}, want: "maximum redirects"},
 		{name: "zero Location limit", overrides: DiagnoseOverrides{Target: optionPointer("example.test"), MaxRedirectLocationBytes: optionPointer(0)}, want: "Location limit"},
@@ -302,6 +447,14 @@ func TestResolveDiagnoseOptionsValidation(t *testing.T) {
 		{name: "large concurrency", overrides: DiagnoseOverrides{Target: optionPointer("example.test"), MaxConcurrency: optionPointer(33)}, want: "concurrency"},
 		{name: "zero body limit", overrides: DiagnoseOverrides{Target: optionPointer("example.test"), BodyLimit: optionPointer(int64(0))}, want: "body limit"},
 		{name: "large body limit", overrides: DiagnoseOverrides{Target: optionPointer("example.test"), BodyLimit: optionPointer(int64(4<<20 + 1))}, want: "body limit"},
+		{name: "invalid expected status", overrides: DiagnoseOverrides{Target: optionPointer("example.test"), ExpectedStatusMin: optionPointer(99), ExpectedStatusMax: optionPointer(200)}, want: "expected HTTP status"},
+		{name: "reversed expected status", overrides: DiagnoseOverrides{Target: optionPointer("example.test"), ExpectedStatusMin: optionPointer(300), ExpectedStatusMax: optionPointer(200)}, want: "expected HTTP status"},
+		{name: "negative latency", overrides: DiagnoseOverrides{Target: optionPointer("example.test"), LatencyThreshold: optionPointer(-time.Second)}, want: "latency threshold"},
+		{name: "invalid connect IP", overrides: DiagnoseOverrides{Target: optionPointer("example.test"), ConnectIP: optionPointer("not-an-ip")}, want: "connect IP"},
+		{name: "connect IP family mismatch", overrides: DiagnoseOverrides{Target: optionPointer("example.test"), IPVersion: optionPointer(model.IPVersion4), ConnectIP: optionPointer("2001:db8::1")}, want: "does not match"},
+		{name: "zone on global IP", overrides: DiagnoseOverrides{Target: optionPointer("example.test"), ConnectIP: optionPointer("2001:db8::1%eth0")}, want: "zone"},
+		{name: "invalid SNI", overrides: DiagnoseOverrides{Target: optionPointer("example.test"), ServerName: optionPointer("bad/name")}, want: "invalid characters"},
+		{name: "insecure custom CA", overrides: DiagnoseOverrides{Target: optionPointer("example.test"), Insecure: optionPointer(true), CustomCABundlePath: optionPointer("ca.pem")}, want: "mutually exclusive"},
 	}
 
 	for _, test := range tests {

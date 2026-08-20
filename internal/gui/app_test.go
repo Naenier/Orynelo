@@ -58,6 +58,65 @@ func TestDiagnoseRequestCarriesExplicitOverridesToApplicationResolver(t *testing
 	}
 }
 
+func TestDiagnoseRequestCarriesStageThreeRuntimeOverrides(t *testing.T) {
+	t.Parallel()
+	coordinator := &DiagnoseCoordinator{config: application.DefaultConfig()}
+	input := presenter.DiagnoseInput{
+		Target:              "https://service.example.test:8443/health",
+		Mode:                "auto",
+		IPVersion:           "auto",
+		Timeout:             15 * time.Second,
+		CheckTimeout:        5 * time.Second,
+		Method:              "GET",
+		MaxRedirects:        10,
+		Verbosity:           "normal",
+		ProbeMode:           "address_matrix",
+		AddressLimit:        6,
+		AddressMatrixBudget: 3 * time.Second,
+		ExpectedStatusMin:   201,
+		ExpectedStatusMax:   204,
+		ExpectedStatusSet:   true,
+		LatencyThreshold:    750 * time.Millisecond,
+		ConnectIP:           "192.0.2.44",
+		ServerName:          "node.example.test",
+		HTTPHost:            "service.example.test:8443",
+		CustomCABundlePath:  "/runtime/private/ca.pem",
+		RequestHeaders:      map[string]string{"authorization": "Bearer gui-runtime-secret"},
+		CollectDNSDetails:   true,
+		InspectBody:         true,
+	}
+	request := coordinator.request(input)
+	overrides := request.Overrides
+	if overrides.ProbeMode == nil || *overrides.ProbeMode != model.ProbeModeAddressMatrix ||
+		overrides.AddressLimit == nil || *overrides.AddressLimit != 6 ||
+		overrides.AddressMatrixBudget == nil || *overrides.AddressMatrixBudget != 3*time.Second ||
+		overrides.ExpectedStatusMin == nil || *overrides.ExpectedStatusMin != 201 ||
+		overrides.ExpectedStatusMax == nil || *overrides.ExpectedStatusMax != 204 ||
+		overrides.LatencyThreshold == nil || *overrides.LatencyThreshold != 750*time.Millisecond ||
+		overrides.ConnectIP == nil || *overrides.ConnectIP != "192.0.2.44" ||
+		overrides.ServerName == nil || *overrides.ServerName != "node.example.test" ||
+		overrides.HTTPHost == nil || *overrides.HTTPHost != "service.example.test:8443" ||
+		overrides.CustomCABundlePath == nil ||
+		*overrides.CustomCABundlePath != "/runtime/private/ca.pem" ||
+		overrides.RequestHeaders["authorization"] != "Bearer gui-runtime-secret" ||
+		overrides.CollectDNSDetails == nil || !*overrides.CollectDNSDetails ||
+		overrides.InspectBody == nil || !*overrides.InspectBody {
+		t.Fatalf("Stage 3 request overrides = %#v", overrides)
+	}
+	resolved, err := application.ResolveDiagnoseOptions(
+		application.DefaultConfig(),
+		nil,
+		overrides,
+	)
+	if err != nil {
+		t.Fatalf("ResolveDiagnoseOptions() error = %v", err)
+	}
+	if !resolved.ExpectedStatusConfigured ||
+		strings.Join(resolved.RequestHeaderNames, ",") != "authorization" {
+		t.Fatalf("resolved Stage 3 options = %+v", resolved)
+	}
+}
+
 func TestDiagnoseRequestUsesProfileWithoutReencodingItsDefaults(t *testing.T) {
 	t.Parallel()
 
@@ -228,6 +287,17 @@ func TestHistoryRunOptionsAreRestoredToDiagnoseScreen(t *testing.T) {
 	}
 	if input.Verbosity != "verbose" {
 		t.Fatalf("history rerun verbosity = %q, want verbose", input.Verbosity)
+	}
+}
+
+func TestProfileViewPreservesExplicitTLSTargetMode(t *testing.T) {
+	t.Parallel()
+	view := profileViewFromDiagnosis(model.Diagnosis{Target: model.Target{
+		Kind: model.TargetTCP,
+		Mode: model.TargetModeTLS,
+	}})
+	if view.Mode != "tls" {
+		t.Fatalf("profile mode = %q, want tls", view.Mode)
 	}
 }
 

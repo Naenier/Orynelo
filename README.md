@@ -78,8 +78,16 @@ Useful CLI invocations:
 
 ```bash
 ./bin/orynelo diagnose https://example.com
-./bin/orynelo diagnose git.example.internal:22
+./bin/orynelo diagnose tcp://git.example.internal:22
+./bin/orynelo diagnose tls://mail.example.internal:465
 ./bin/orynelo diagnose https://example.com --ip-version 4
+./bin/orynelo diagnose https://example.com \
+  --probe-mode address-matrix --address-limit 4 --matrix-budget 5s
+./bin/orynelo diagnose https://service.example \
+  --connect-ip 192.0.2.40 --sni service.example --http-host service.example
+./bin/orynelo diagnose https://service.example --ca-bundle ./internal-ca.pem
+./bin/orynelo diagnose https://service.example \
+  --expect-status 200-299 --latency-threshold 750ms
 ./bin/orynelo diagnose https://example.com --format json
 ./bin/orynelo diagnose https://example.com --format markdown --output report.md
 ./bin/orynelo diagnose https://example.com --anonymize strict --output report.json
@@ -89,6 +97,80 @@ Useful CLI invocations:
 ./bin/orynelo version --json
 ./bin/orynelo completion bash
 ```
+
+### Target and probe modes
+
+The target syntax selects explicit transport semantics:
+
+| Target form | Effective mode |
+| --- | --- |
+| `tcp://host:port` or `host:port` | TCP connect only |
+| `tls://host:port` | TCP plus TLS handshake and certificate validation |
+| `http://host/path` | HTTP |
+| `https://host/path` or a bare hostname | HTTPS |
+
+`--mode auto` keeps these parser semantics. For a scheme-less endpoint,
+`--mode tcp` or `--mode tls` makes the intended transport explicit. Link-local
+IPv6 targets may include a URL-escaped interface zone, for example
+`tls://[fe80::2%25eth0]:443`. The normalized, privacy-safe target is retained
+in results; raw userinfo and secret-like query values are not serialized.
+
+The default `--probe-mode client-effective` follows a bounded Happy Eyeballs
+style selection and reports the connection actually selected for the logical
+request. It limits direct candidates so routine diagnosis stays close to
+normal client behavior. `--probe-mode address-matrix` is an explicit backend
+comparison: it checks a deterministic, bounded set of A/AAAA addresses and
+records per-address DNS, route, TCP, and TLS evidence. `--address-limit`
+defaults to four; omitted addresses are reported as skipped by the limit.
+`--matrix-budget` is divided into independent per-address caps, while the
+global and per-check deadlines still apply.
+
+Results contain a correlated `NetworkPath` graph. Direct, HTTP-proxy, and
+HTTPS-CONNECT routes are separate paths; proxy peers, origins, and redirects
+are separate hops. Evidence and timings carry path, hop, and attempt IDs, so a
+direct comparison cannot be mistaken for the proxy-backed request and
+overlapping connection attempts cannot overwrite one another.
+For HTTP targets, the short-lived direct preflight is explicitly auxiliary;
+the path captured by the real HTTP transport is the client-effective route.
+
+### Advanced diagnostic controls
+
+| Flag | Purpose |
+| --- | --- |
+| `--probe-mode client-effective\|address-matrix` | Select normal client-like behavior or an explicit backend matrix |
+| `--address-limit N` | Bound matrix addresses (`1`–`16`, default `4`) |
+| `--matrix-budget DURATION` | Bound the total matrix budget used to derive independent attempt deadlines |
+| `--connect-ip IP` | Dial one backend IP while preserving the target's logical identity |
+| `--sni NAME` | Override both TLS SNI and the certificate hostname used for verification |
+| `--http-host AUTHORITY` | Override the initial HTTP `Host` authority independently of SNI and dial IP |
+| `--ca-bundle FILE` | Extend system roots with a bounded certificate-only PEM bundle |
+| `--expect-status CODE_OR_RANGE` | Require one HTTP status or a range such as `200-299` |
+| `--latency-threshold DURATION` | Fail the HTTP expectation when total latency exceeds the threshold |
+| `--header 'Name: value'` | Add a repeatable, one-run request header whose value is never persisted or logged |
+| `--dns-details` | Collect best-effort CNAME, TTL, resolver-source, and search-domain evidence |
+| `--inspect-body` | Read bounded body metadata without retaining response content |
+
+Custom CA bundles are additive to normal system trust. They cannot be combined
+with `--insecure`, and private-key PEM blocks are rejected. `--connect-ip`,
+`--sni`, and `--http-host` are intentionally independent for diagnosing one
+load-balancer backend. One-run header values and CA contents are runtime-only;
+only safe header names and the fact that a custom CA was configured may appear
+in a report. Be aware that command arguments can still be visible in shell
+history or the operating-system process list.
+
+`--connect-ip` is intentionally fail-closed when a proxy route is selected:
+Orynelo will not pretend that a proxy CONNECT to the logical hostname reached
+the requested backend IP. Use `--no-proxy` for a fixed-backend run, or omit the
+fixed IP when the proxy route itself is the subject of the diagnosis.
+
+TLS results separate TCP dial, TLS handshake, and total duration for every
+selected address. They include the peer chain, subject and issuer, DNS/IP SANs,
+validity, public-key and signature metadata, negotiated version, cipher suite,
+and ALPN. DNS results distinguish NXDOMAIN, NODATA, SERVFAIL, timeout,
+family mismatch, and an ambiguous platform `not found` response. HTTP results
+retain a redacted per-redirect hop with status, DNS/connect/TLS/TTFB/total
+timings, selected remote/local endpoints, connection reuse, proxy selection,
+and individual connect attempts. Body content remains excluded.
 
 The CLI exit codes are:
 
@@ -239,7 +321,7 @@ Native Fyne build dependencies are still required for the desktop binary.
 Make builds record the application version, commit, build date, and whether the
 source tree was modified without rewriting tracked source files. Go module and
 VCS metadata provide local-build fallbacks; otherwise the application reports
-the current stage version (`0.3.0`).
+the current stage version (`0.4.0`).
 
 ## Releases
 

@@ -132,6 +132,26 @@ const (
 	DiagnoseNoEvidenceRecorded        Key = "diagnose.no_evidence_recorded"
 	DiagnoseNoRecommendationsRecorded Key = "diagnose.no_recommendations_recorded"
 	DiagnoseCheckRunning              Key = "diagnose.check_running"
+	DiagnoseAutoExplanation           Key = "diagnose.auto_explanation"
+	DiagnoseTargetPreview             Key = "diagnose.target_preview"
+	DiagnoseProbeMode                 Key = "diagnose.probe_mode"
+	DiagnoseAddressLimit              Key = "diagnose.address_limit"
+	DiagnoseMatrixBudget              Key = "diagnose.matrix_budget"
+	DiagnoseExpectedStatus            Key = "diagnose.expected_status"
+	DiagnoseLatencyThreshold          Key = "diagnose.latency_threshold"
+	DiagnoseConnectIP                 Key = "diagnose.connect_ip"
+	DiagnoseServerName                Key = "diagnose.server_name"
+	DiagnoseHTTPHost                  Key = "diagnose.http_host"
+	DiagnoseCABundle                  Key = "diagnose.ca_bundle"
+	DiagnoseRequestHeaders            Key = "diagnose.request_headers"
+	DiagnoseCollectDNSDetails         Key = "diagnose.collect_dns_details"
+	DiagnoseInspectBody               Key = "diagnose.inspect_body"
+	DiagnoseInvalidAddressLimit       Key = "diagnose.invalid_address_limit"
+	DiagnoseInvalidMatrixBudget       Key = "diagnose.invalid_matrix_budget"
+	DiagnoseInvalidExpectedStatus     Key = "diagnose.invalid_expected_status"
+	DiagnoseInvalidLatencyThreshold   Key = "diagnose.invalid_latency_threshold"
+	OptionClientEffective             Key = "option.client_effective"
+	OptionAddressMatrix               Key = "option.address_matrix"
 
 	TimingDNS              Key = "timing.dns"
 	TimingTCP              Key = "timing.tcp"
@@ -477,6 +497,26 @@ var english = map[Key]string{
 	DiagnoseNoEvidenceRecorded:        "No evidence was recorded.",
 	DiagnoseNoRecommendationsRecorded: "No recommendations were recorded.",
 	DiagnoseCheckRunning:              "Check is running.",
+	DiagnoseAutoExplanation:           "Auto uses the explicit URI scheme; a bare host means HTTPS and host:port means TCP.",
+	DiagnoseTargetPreview:             "Effective target: %s",
+	DiagnoseProbeMode:                 "Probe mode",
+	DiagnoseAddressLimit:              "Address limit",
+	DiagnoseMatrixBudget:              "Matrix budget",
+	DiagnoseExpectedStatus:            "Expected HTTP status (for example 200-299)",
+	DiagnoseLatencyThreshold:          "Latency threshold",
+	DiagnoseConnectIP:                 "Connect IP",
+	DiagnoseServerName:                "TLS SNI / verification name",
+	DiagnoseHTTPHost:                  "HTTP Host",
+	DiagnoseCABundle:                  "Custom CA bundle path",
+	DiagnoseRequestHeaders:            "One-time request headers (never saved or logged)",
+	DiagnoseCollectDNSDetails:         "Collect CNAME, TTL, and resolver details",
+	DiagnoseInspectBody:               "Inspect bounded body metadata (body is never stored)",
+	DiagnoseInvalidAddressLimit:       "address limit must be between 1 and 16",
+	DiagnoseInvalidMatrixBudget:       "matrix budget must be a positive duration",
+	DiagnoseInvalidExpectedStatus:     "expected status must be one code or an ascending range from 100 to 599",
+	DiagnoseInvalidLatencyThreshold:   "latency threshold must be empty or a positive duration",
+	OptionClientEffective:             "Client-effective",
+	OptionAddressMatrix:               "Address matrix",
 
 	TimingDNS:              "DNS",
 	TimingTCP:              "TCP",
