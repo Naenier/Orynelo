@@ -1,6 +1,7 @@
 package privacy
 
 import (
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -224,6 +225,102 @@ func TestStrictProjectionHidesTLSIdentityMetadata(t *testing.T) {
 	}
 	if details["version"] != "TLS 1.3" || details["cipherSuite"] != "TLS_AES_128_GCM_SHA256" {
 		t.Fatalf("strict projection removed non-identifying TLS context: %#v", details)
+	}
+}
+
+func TestDiagnosisProjectionProtectsStage3RuntimeInputsAndNetworkPaths(t *testing.T) {
+	t.Parallel()
+
+	started := time.Date(2026, 8, 20, 10, 0, 0, 0, time.FixedZone("private-zone", 3*60*60))
+	input := model.Diagnosis{
+		Options: model.DiagnoseOptions{
+			ConnectIP:          "10.1.2.3",
+			ServerName:         "backend01.internal",
+			HTTPHost:           "service.internal",
+			CustomCAConfigured: true,
+			RequestHeaderNames: []string{"Authorization", "X-Incident"},
+			CustomCABundlePath: "/home/alice/private-ca.pem",
+			CustomCAPEM:        []byte("private-ca-material"),
+			RequestHeaders:     map[string]string{"Authorization": "Bearer request-secret"},
+		},
+		NetworkPaths: []model.NetworkPath{{
+			ID:   "path-direct",
+			Role: model.NetworkPathRoleClientEffective,
+			Kind: model.NetworkPathDirect,
+			Hops: []model.NetworkHop{{
+				ID:         "hop-origin",
+				PathID:     "path-direct",
+				Kind:       model.NetworkHopOrigin,
+				URL:        "https://service.internal/private?token=path-secret",
+				Host:       "service.internal",
+				Zone:       "corp-zone",
+				RemoteIP:   net.ParseIP("10.1.2.3"),
+				RemoteAddr: "10.1.2.3:443",
+				LocalAddr:  "192.168.1.10:54000",
+				Attempts: []model.NetworkAttempt{{
+					ID:            "attempt-tcp-001",
+					PathID:        "path-direct",
+					HopID:         "hop-origin",
+					Kind:          model.NetworkAttemptTCP,
+					RemoteIP:      net.ParseIP("10.1.2.3"),
+					RemoteAddr:    "10.1.2.3:443",
+					LocalAddr:     "192.168.1.10:54000",
+					InterfaceName: "corp0",
+					Error:         "dial backend01.internal:443 via 10.1.2.3",
+					StartedAt:     started,
+					FinishedAt:    started.Add(time.Millisecond),
+				}},
+			}},
+		}},
+	}
+
+	standard := Standard().Diagnosis(input)
+	if standard.Options.CustomCABundlePath != "" || standard.Options.CustomCAPEM != nil ||
+		standard.Options.RequestHeaders != nil {
+		t.Fatalf("standard projection retained runtime inputs: %#v", standard.Options)
+	}
+	if len(standard.Options.RequestHeaderNames) != 2 || !standard.Options.CustomCAConfigured {
+		t.Fatalf("standard projection lost safe option metadata: %#v", standard.Options)
+	}
+	standard.Options.RequestHeaderNames[0] = "mutated"
+	standard.NetworkPaths[0].Hops[0].Attempts[0].RemoteIP[len(standard.NetworkPaths[0].Hops[0].Attempts[0].RemoteIP)-1] = 99
+	if input.Options.RequestHeaderNames[0] != "Authorization" ||
+		input.NetworkPaths[0].Hops[0].Attempts[0].RemoteIP[len(input.NetworkPaths[0].Hops[0].Attempts[0].RemoteIP)-1] != 3 {
+		t.Fatal("projection aliased stage 3 option or network-path slices")
+	}
+
+	strict := Strict().Diagnosis(input)
+	hop := strict.NetworkPaths[0].Hops[0]
+	attempt := hop.Attempts[0]
+	combined := strings.Join([]string{
+		strict.Options.ConnectIP,
+		strict.Options.ServerName,
+		strict.Options.HTTPHost,
+		hop.URL,
+		hop.Host,
+		hop.Zone,
+		hop.RemoteIP.String(),
+		hop.RemoteAddr,
+		hop.LocalAddr,
+		attempt.RemoteIP.String(),
+		attempt.RemoteAddr,
+		attempt.LocalAddr,
+		attempt.InterfaceName,
+		attempt.Error,
+	}, "\n")
+	for _, privateValue := range []string{
+		"10.1.2.3", "192.168.1.10", "backend01.internal", "service.internal",
+		"corp-zone", "corp0", "private", "path-secret",
+	} {
+		if strings.Contains(combined, privateValue) {
+			t.Fatalf("strict stage 3 projection retained %q:\n%s", privateValue, combined)
+		}
+	}
+	if !strings.Contains(combined, "[REDACTED]") && !strings.Contains(combined, "redacted.invalid") {
+		t.Fatalf("strict stage 3 projection did not expose redaction provenance:\n%s", combined)
+	}
+	if attempt.StartedAt.Location() != time.UTC || attempt.FinishedAt.Location() != time.UTC {
+		t.Fatalf("network-attempt timestamps were not normalized to UTC: %#v", attempt)
 	}
 }
 

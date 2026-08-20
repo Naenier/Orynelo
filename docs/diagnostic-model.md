@@ -9,6 +9,9 @@ evidence-based conclusions independently of UI or persistence technology.
 | --- | --- |
 | `Diagnosis` | One complete, ordered run, its timing, target, build, checks, and summary |
 | `Target` | Original-safe and normalized-safe target data plus protocol semantics |
+| `NetworkPath` | One direct, HTTP-proxy, or HTTPS-CONNECT route through the network |
+| `NetworkHop` | One origin, proxy peer, or redirect endpoint inside a path |
+| `NetworkRef` | Stable path, hop, and attempt correlation carried by evidence and timings |
 | `Check` | Context-aware unit of diagnostic work |
 | `CheckResult` | Immutable outcome, timing, evidence, recommendations, and error code |
 | `CheckEvent` | Best-effort progress update for CLI or GUI consumers |
@@ -65,7 +68,7 @@ stateDiagram-v2
 - `cancelled` is distinct from timeout or network failure.
 
 HTTP 4xx and 5xx results do not retroactively fail successful DNS, TCP, or TLS
-checks. They are application-response warnings after transport success.
+checks. They remain application-layer outcomes after transport success.
 
 ## Check results
 
@@ -82,6 +85,7 @@ type CheckResult struct {
     Duration        time.Duration
     Summary         string
     Evidence        []Evidence
+    NetworkRefs     []NetworkRef
     Recommendations []Recommendation
     ErrorCode       string
 }
@@ -115,17 +119,27 @@ Accepted forms include:
 ```text
 example.com
 example.com:443
+tcp://example.com:22
+tls://example.com:8443
 https://example.com/path
 http://10.10.0.25:8080/api/health
 [2001:db8::1]:443
 https://[2001:db8::1]/
+tls://[fe80::2%25eth0]:443
 ```
 
-HTTP defaults to port 80 and HTTPS to 443. A host with an explicit port is a
-TCP target. A bare hostname uses the safe, documented HTTPS default on port
-443; users can select TCP mode explicitly in the desktop application. IPv6
-addresses are normalized with brackets for URL or host-and-port output.
-Internationalized hostnames are normalized before DNS use.
+The parsed `Target.Mode` is always one of `tcp`, `tls`, `http`, or `https`.
+HTTP defaults to port 80 and HTTPS to 443. `tcp://` and `tls://` require an
+explicit port and cannot contain URL paths, queries, userinfo, or fragments. A
+host with an explicit port is a TCP target; a bare hostname uses the documented
+HTTPS default on port 443. The interface-level `auto`, `tcp`, and `tls` modes
+resolve ambiguous scheme-less input before parsing; a conflicting explicit URI
+and mode is rejected instead of silently changing protocol semantics.
+
+IPv6 addresses are normalized with brackets for URL or host-and-port output.
+A zone is accepted only for a link-local IPv6 literal and is URL escaped as
+`%25zone` when it appears in a URI. Internationalized hostnames are normalized
+before DNS use.
 
 `Original` and `Normalized` are report-safe forms. A raw request URL is kept
 out of serialization because userinfo and query values can be sensitive.
@@ -149,6 +163,158 @@ After execution, `Diagnosis.Options` contains the application-projected value,
 not the raw form input or request-capable resolver result. Report rendering and
 history reruns therefore retain the same non-secret network semantics whether
 the request originated in the CLI or desktop application.
+
+Stage 3 options preserve three independent endpoint identities when requested:
+
+- `ConnectIP` selects the physical backend address without changing the
+  logical target;
+- `ServerName` overrides both TLS SNI and certificate hostname verification;
+- `HTTPHost` overrides the initial HTTP authority independently of the dial IP
+  and SNI.
+
+Custom CA bytes, the CA file path, and one-run request-header values are
+execution-only fields with `json:"-"`. The system trust pool is extended, not
+replaced, by a validated certificate-only CA bundle. Private-key PEM blocks
+are rejected, custom CA and insecure mode are mutually exclusive, and only
+safe request-header names are retained in projected options.
+
+A fixed `ConnectIP` is applied only to a direct route. If proxy policy selects
+a proxy, HTTP fails closed with `HTTP_CONNECT_IP_PROXY_UNSUPPORTED` instead of
+silently sending CONNECT for the logical hostname and claiming that the fixed
+backend was exercised.
+
+The Stage 3 CLI maps directly to these application-owned contracts; the CLI
+does not apply a second set of defaults:
+
+| CLI flag | Application/model contract |
+| --- | --- |
+| `--mode auto\|tcp\|tls` | Resolves ambiguous input before the target parser; explicit URI conflicts fail validation |
+| `--probe-mode client-effective\|address-matrix` | `ProbeModeClientEffective` or `ProbeModeAddressMatrix` |
+| `--address-limit N` | `AddressLimit`, validated from 1 through 16 |
+| `--matrix-budget DURATION` | `AddressMatrixBudget`, capped by the global timeout and divided into attempt budgets |
+| `--connect-ip IP` | `ConnectIP`; a zone is valid only on link-local IPv6 |
+| `--sni NAME` | `ServerName` for TLS SNI and hostname verification |
+| `--http-host AUTHORITY` | `HTTPHost` for the initial request authority |
+| `--ca-bundle FILE` | Runtime-only `CustomCABundlePath`; the runner loads bounded PEM into `CustomCAPEM` |
+| `--expect-status CODE_OR_RANGE` | Explicit `ExpectedStatusMin/Max` plus `ExpectedStatusConfigured` |
+| `--latency-threshold DURATION` | Positive `LatencyThreshold` assertion |
+| `--header 'Name: value'` | Repeatable runtime-only `RequestHeaders`; projection keeps names only |
+| `--dns-details` | Enables `CollectDNSDetails` best-effort enrichment |
+| `--inspect-body` | Enables bounded metadata inspection without storing content |
+
+## Correlated network paths
+
+`Diagnosis.NetworkPaths` is the authoritative graph of concrete routes used or
+compared during one diagnosis. Its identifiers are opaque within the run and
+must not encode hostnames, addresses, or credentials.
+
+```text
+NetworkPath (direct | http_proxy | https_connect)
+  role: client_effective | address_matrix | auxiliary_direct
+  NetworkHop (origin | proxy_peer | redirect)
+    selectedAttemptId
+    NetworkAttempt (dns | route | tcp | tls | http)
+    PhaseTiming
+```
+
+A `NetworkRef` contains `PathID`, `HopID`, and `AttemptID`. Path-specific
+`CheckResult.NetworkRefs`, `Evidence.NetworkRef`, route and TCP records, TLS
+attempts, HTTP hops, redirects, and phase timings use the same identity. The
+reference is optional in JSON so schema-v1 snapshots written before path
+correlation remain readable.
+
+Direct-origin work, HTTP proxy traffic, and HTTPS CONNECT traffic never share
+one path. A proxy path has a `proxy_peer` hop for the socket endpoint and a
+separate `origin` hop for the logical destination; the proxy address is not
+reported as the origin address. Redirects retain from/to references, and a
+route change creates another path linked with `RedirectFromPathID`.
+
+`NetworkAttempt` records its lifecycle, network, remote and local endpoint,
+start and finish times, duration, selection/reuse state, and typed error.
+`PhaseTiming` records an individual phase against the same attempt. Timings
+belong to one attempt and are not overwritten when Happy Eyeballs or redirect
+connections overlap. Older flat DNS, TLS, and HTTP fields remain selected
+compatibility projections rather than competing sources of truth.
+
+## Probe scopes and address selection
+
+`client_effective` is the default scope. DNS produces a deterministic family
+order, TCP uses bounded Happy Eyeballs behavior, and the winning connection is
+marked selected. Direct candidate count is kept small; TLS follows only the
+selected successful TCP attempt (or the first successful attempt when no
+selection marker is available). The HTTP trace records the connection the
+transport actually used. For HTTP targets the separate direct preflight has the
+`auxiliary_direct` role even without a proxy, because its short-lived socket is
+not the socket selected by the actual HTTP transport. It therefore cannot be
+presented as the client route.
+
+`address_matrix` is explicit opt-in for comparing multiple A/AAAA backends.
+The candidate order remains stable, `AddressLimit` bounds the attempted set
+(default four, validated from one through sixteen), and omitted candidates
+produce `skipped_by_limit` evidence. `AddressMatrixBudget` is divided into
+independent per-address context budgets capped by the check and run deadlines;
+bounded concurrency prevents one slow backend from serially consuming the
+entire diagnosis. Each selected backend retains its own route, TCP, TLS, and
+error evidence. Mixed success is reported as a partial result rather than
+being flattened to the first address.
+
+## Protocol-specific evidence
+
+### DNS and route
+
+Each A and AAAA lookup has a `DNSFamilyResult` with one stable status:
+`success`, `nxdomain`, `nodata`, `not_found_unknown`, `servfail`, `timeout`,
+`cancelled`, `family_mismatch`, or `error`. This keeps a normal lack of AAAA
+records distinct from a failed lookup and avoids deriving machine meaning from
+platform-specific error strings.
+
+With `CollectDNSDetails` enabled, an optional detailed resolver can add CNAMEs,
+minimum TTL, resolver source, and search domains. These values are best effort:
+an unsupported platform or detail lookup failure produces explicit evidence
+without invalidating successful base A/AAAA resolution. Route evidence records
+the selected source IP, interface state/name, MTU, family, and backend ref;
+interface enumeration is cached for the run and partial failures remain
+visible.
+
+### TLS
+
+Every selected backend produces a `TLSAttempt`. TCP dial, TLS handshake, and
+total durations are measured separately. The attempt records remote IP,
+effective SNI, selected state, negotiated TLS version, cipher suite, ALPN, and
+typed failure. The selected successful attempt is also projected into the
+legacy `TLSResult`.
+
+The complete peer chain is represented by report-safe `CertificateInfo`
+values: subject, issuer, serial, DNS/IP SANs, validity interval and remaining
+time, chain length, hostname/trust result, public-key algorithm/bits/curve,
+signature algorithm, and CA flag. Hostname validation uses the effective
+logical identity (`ServerName` override or target host), even when `ConnectIP`
+chooses a different physical backend. A valid custom CA extends normal system
+roots. `Insecure` still collects metadata but turns success into an explicit
+warning; it never masquerades as verified trust. Matrix outcomes distinguish
+all-pass, all-fail, and mixed `TLS_PARTIAL_FAILURE` results.
+
+### HTTP and redirects
+
+`HTTPResult.Hops` stores one redacted `HTTPHop` per request/response leg. A hop
+contains URL, status, DNS/connect/TLS/first-byte/total timings, remote and local
+IP when attributable, connection reuse, route, proxy selection, and its
+individual `HTTPConnectAttempt` values. Failed and successful concurrent
+connect callbacks remain separate, and only the connection actually used is
+selected. Proxy authentication and CONNECT rejection have distinct typed
+failures.
+
+Redirect records carry from/to network refs, the route selected for the next
+URL, and the existing downgrade/private-network/cross-origin policy decision.
+An explicit expected status or status range and an optional total-latency
+threshold turn HTTP into a reproducible assertion; default HTTP status
+classification remains in effect when no expectation was configured.
+
+One-run headers are applied only to the initial request, and sensitive headers
+are stripped on cross-origin redirects. Header values are never written to
+events, reports, history, or logs. Body inspection is disabled by default; its
+opt-in mode reads bounded metadata while response content itself remains
+excluded from the model.
 
 ## Events and deterministic ordering
 

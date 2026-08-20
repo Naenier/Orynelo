@@ -206,6 +206,9 @@ func TestRunnerDiagnoseAndEvents(t *testing.T) {
 			t.Fatalf("event %d = %#v", index, events[index])
 		}
 	}
+	if events[2].Result == nil || len(events[2].Result.NetworkRefs) == 0 {
+		t.Fatalf("completed event is not path-correlated: %#v", events[2])
+	}
 }
 
 func TestRunnerProjectsEventsThroughPrivacyBoundary(t *testing.T) {
@@ -488,6 +491,19 @@ func TestMarkProxyPreflightAuxiliary(t *testing.T) {
 	}
 }
 
+func TestMarkHTTPPreflightAuxiliaryWithoutProxy(t *testing.T) {
+	t.Parallel()
+	results := []model.CheckResult{{ID: "dns"}, {ID: "http"}}
+	markHTTPPreflightAuxiliary(results, false)
+	if results[0].Role != model.CheckRoleAuxiliaryDirectComparison ||
+		results[0].Evidence[0].Details["route"] != "direct_origin_preflight" {
+		t.Fatalf("direct HTTP preflight = %#v", results[0])
+	}
+	if results[1].Role != "" {
+		t.Fatalf("HTTP role = %q", results[1].Role)
+	}
+}
+
 func TestRunnerInvalidProxySkipsEveryDirectOriginNetworkCheck(t *testing.T) {
 	t.Parallel()
 	calls := 0
@@ -514,7 +530,12 @@ func TestRunnerInvalidProxySkipsEveryDirectOriginNetworkCheck(t *testing.T) {
 		if result.Status != model.StatusSkipped || result.ErrorCode != "PROXY_CONFIG_INVALID" {
 			t.Fatalf("result = %#v", result)
 		}
-		if len(result.Evidence) != 1 || result.Evidence[0].Code != "PROXY_CONFIG_INVALID" {
+		var proxyFailure, auxiliaryRole bool
+		for _, evidence := range result.Evidence {
+			proxyFailure = proxyFailure || evidence.Code == "PROXY_CONFIG_INVALID"
+			auxiliaryRole = auxiliaryRole || evidence.Code == "AUXILIARY_DIRECT_COMPARISON"
+		}
+		if !proxyFailure || !auxiliaryRole {
 			t.Fatalf("evidence = %#v", result.Evidence)
 		}
 	}

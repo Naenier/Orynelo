@@ -8,11 +8,14 @@ import (
 	"io"
 	"net"
 	stdhttp "net/http"
+	"net/http/httptest"
+	"net/http/httptrace"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	environmentcheck "github.com/Naenier/orynelo/internal/diagnostics/checks/environment"
 	"github.com/Naenier/orynelo/internal/diagnostics/model"
@@ -28,6 +31,30 @@ type resolverFunc func(context.Context, string, string) ([]net.IP, error)
 
 func (f resolverFunc) LookupIP(ctx context.Context, network, host string) ([]net.IP, error) {
 	return f(ctx, network, host)
+}
+
+type readTrackingBody struct {
+	reads  atomic.Int32
+	closed atomic.Bool
+}
+
+type addressedConn struct {
+	net.Conn
+	local  net.Addr
+	remote net.Addr
+}
+
+func (c *addressedConn) LocalAddr() net.Addr  { return c.local }
+func (c *addressedConn) RemoteAddr() net.Addr { return c.remote }
+
+func (b *readTrackingBody) Read([]byte) (int, error) {
+	b.reads.Add(1)
+	return 0, errors.New("body must not be read")
+}
+
+func (b *readTrackingBody) Close() error {
+	b.closed.Store(true)
+	return nil
 }
 
 func TestCheckReportsTCPTargetAsNotApplicable(t *testing.T) {
@@ -62,6 +89,7 @@ func TestCheckBoundsBodyAndRedactsHeaders(t *testing.T) {
 	}
 	options := model.DefaultDiagnoseOptions("http://example.com")
 	options.BodyLimit = 4
+	options.InspectBody = true
 	state := model.NewState(model.Target{
 		Kind:       model.TargetHTTP,
 		Scheme:     "http",
@@ -89,6 +117,97 @@ func TestCheckBoundsBodyAndRedactsHeaders(t *testing.T) {
 	}
 	if strings.Contains(httpResult.FinalURL, "secret") {
 		t.Fatalf("final URL leaked query secret: %s", httpResult.FinalURL)
+	}
+}
+
+func TestCheckDoesNotInspectBodyByDefault(t *testing.T) {
+	t.Parallel()
+	body := &readTrackingBody{}
+	check := New()
+	check.TransportFactory = func(*model.State) stdhttp.RoundTripper {
+		return roundTripFunc(func(request *stdhttp.Request) (*stdhttp.Response, error) {
+			return &stdhttp.Response{
+				StatusCode: stdhttp.StatusOK,
+				Status:     "200 OK",
+				Proto:      "HTTP/1.1",
+				Header:     make(stdhttp.Header),
+				Body:       body,
+				Request:    request,
+			}, nil
+		})
+	}
+	state := testHTTPState("http://example.com/")
+
+	result := check.Run(context.Background(), state)
+
+	if result.Status != model.StatusPassed {
+		t.Fatalf("result = %#v", result)
+	}
+	if body.reads.Load() != 0 || !body.closed.Load() {
+		t.Fatalf("body reads=%d closed=%t", body.reads.Load(), body.closed.Load())
+	}
+	if got := state.HTTP(); got.BodyBytesRead != 0 || got.BodyTruncated {
+		t.Fatalf("body metadata = %#v", got)
+	}
+}
+
+func TestCheckReportsConnectionReuseAcrossRedirectHops(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+		if request.URL.Path == "/start" {
+			writer.Header().Set("Location", "/final")
+			writer.WriteHeader(stdhttp.StatusFound)
+			return
+		}
+		writer.WriteHeader(stdhttp.StatusNoContent)
+	}))
+	defer server.Close()
+
+	state := testHTTPState(server.URL + "/start")
+	result := New().Run(context.Background(), state)
+	if result.Status != model.StatusPassed {
+		t.Fatalf("result = %#v", result)
+	}
+	hops := state.HTTP().Hops
+	if len(hops) != 2 || hops[0].Reused || !hops[1].Reused {
+		t.Fatalf("redirect connection reuse = %#v", hops)
+	}
+	paths := state.NetworkPaths()
+	if len(paths) != 1 || len(paths[0].Hops) != 2 || paths[0].Hops[0].Reused ||
+		!paths[0].Hops[1].Reused || paths[0].Hops[1].RemoteIP == nil {
+		t.Fatalf("redirect network path reuse = %#v", paths)
+	}
+}
+
+func TestCheckDoesNotInspectRedirectBodiesByDefault(t *testing.T) {
+	t.Parallel()
+	firstBody := &readTrackingBody{}
+	finalBody := &readTrackingBody{}
+	check := New()
+	check.Resolver = publicResolver()
+	check.TransportFactory = func(*model.State) stdhttp.RoundTripper {
+		return roundTripFunc(func(request *stdhttp.Request) (*stdhttp.Response, error) {
+			if request.URL.Path == "/start" {
+				response := redirectResponse(request, "/final")
+				response.Body = firstBody
+				return response, nil
+			}
+			response := successResponse(request)
+			response.Body = finalBody
+			return response, nil
+		})
+	}
+	state := testHTTPState("http://example.com/start")
+
+	result := check.Run(context.Background(), state)
+
+	if result.Status != model.StatusPassed {
+		t.Fatalf("result = %#v", result)
+	}
+	for index, body := range []*readTrackingBody{firstBody, finalBody} {
+		if body.reads.Load() != 0 || !body.closed.Load() {
+			t.Fatalf("body %d reads=%d closed=%t", index, body.reads.Load(), body.closed.Load())
+		}
 	}
 }
 
@@ -156,6 +275,89 @@ func TestCheckClassifiesHTTPClientError(t *testing.T) {
 	}
 }
 
+func TestCheckEvaluatesConfiguredStatusExpectation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		statusCode int
+		status     string
+		minimum    int
+		maximum    int
+		wantStatus model.Status
+		wantCode   string
+	}{
+		{
+			name:       "outside range fails",
+			statusCode: stdhttp.StatusNoContent,
+			status:     "204 No Content",
+			minimum:    stdhttp.StatusOK,
+			maximum:    stdhttp.StatusOK,
+			wantStatus: model.StatusFailed,
+			wantCode:   ErrorUnexpectedStatus,
+		},
+		{
+			name:       "expected client response passes",
+			statusCode: stdhttp.StatusNotFound,
+			status:     "404 Not Found",
+			minimum:    400,
+			maximum:    499,
+			wantStatus: model.StatusPassed,
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			check := New()
+			check.TransportFactory = func(*model.State) stdhttp.RoundTripper {
+				return roundTripFunc(func(request *stdhttp.Request) (*stdhttp.Response, error) {
+					response := successResponse(request)
+					response.StatusCode = test.statusCode
+					response.Status = test.status
+					return response, nil
+				})
+			}
+			state := testHTTPState("http://example.com/")
+			state.Options.ExpectedStatusConfigured = true
+			state.Options.ExpectedStatusMin = test.minimum
+			state.Options.ExpectedStatusMax = test.maximum
+
+			result := check.Run(context.Background(), state)
+
+			if result.Status != test.wantStatus || result.ErrorCode != test.wantCode {
+				t.Fatalf("result = %#v", result)
+			}
+			if state.HTTP().ErrorCode != test.wantCode {
+				t.Fatalf("HTTP result = %#v", state.HTTP())
+			}
+		})
+	}
+}
+
+func TestCheckEvaluatesLatencyThreshold(t *testing.T) {
+	t.Parallel()
+	var tick atomic.Int64
+	base := time.Unix(1_700_000_000, 0)
+	check := New()
+	check.Now = func() time.Time {
+		return base.Add(time.Duration(tick.Add(1)) * time.Millisecond)
+	}
+	check.TransportFactory = func(*model.State) stdhttp.RoundTripper {
+		return roundTripFunc(func(request *stdhttp.Request) (*stdhttp.Response, error) {
+			return successResponse(request), nil
+		})
+	}
+	state := testHTTPState("http://example.com/")
+	state.Options.LatencyThreshold = time.Nanosecond
+
+	result := check.Run(context.Background(), state)
+
+	if result.Status != model.StatusFailed || result.ErrorCode != ErrorLatencyThreshold ||
+		state.HTTP().ErrorCode != ErrorLatencyThreshold {
+		t.Fatalf("result=%#v HTTP=%#v", result, state.HTTP())
+	}
+}
+
 func TestCheckFollowsAndRecordsRedirect(t *testing.T) {
 	t.Parallel()
 	check := New()
@@ -206,6 +408,25 @@ func TestCheckFollowsAndRecordsRedirect(t *testing.T) {
 		redirect.From != "http://example.com:80/start?token=[REDACTED]" ||
 		redirect.To != "http://example.com:80/final?api_key=[REDACTED]&view=full" {
 		t.Fatalf("redirect = %#v", redirect)
+	}
+	if len(httpResult.Hops) != 2 ||
+		httpResult.Hops[0].StatusCode != stdhttp.StatusFound ||
+		httpResult.Hops[1].StatusCode != stdhttp.StatusNoContent {
+		t.Fatalf("HTTP hops = %#v", httpResult.Hops)
+	}
+	if httpResult.Hops[0].URL != redirect.From ||
+		httpResult.Hops[1].URL != redirect.To ||
+		redirect.FromNetworkRef == nil || redirect.ToNetworkRef == nil ||
+		*redirect.FromNetworkRef != httpResult.Hops[0].NetworkRef ||
+		*redirect.ToNetworkRef != httpResult.Hops[1].NetworkRef {
+		t.Fatalf("redirect correlation = %#v; hops = %#v", redirect, httpResult.Hops)
+	}
+	paths := state.NetworkPaths()
+	if len(paths) != 1 || paths[0].Kind != model.NetworkPathDirect ||
+		len(paths[0].Hops) != 2 ||
+		paths[0].Hops[0].ID != httpResult.Hops[0].HopID ||
+		paths[0].Hops[1].ID != httpResult.Hops[1].HopID {
+		t.Fatalf("network paths = %#v", paths)
 	}
 }
 
@@ -649,6 +870,29 @@ func TestTransportAppliesCapturedProxyPolicyForEveryRequest(t *testing.T) {
 	}
 }
 
+func TestTransportAppliesExplicitServerNameAndRejectsInvalidCustomCA(t *testing.T) {
+	t.Parallel()
+	state := testHTTPState("https://example.com/start")
+	state.Options.ServerName = "backend.internal"
+	transport, err := New().transport(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual := transport.(*stdhttp.Transport)
+	if actual.TLSClientConfig == nil || actual.TLSClientConfig.ServerName != "backend.internal" {
+		t.Fatalf("TLS config = %#v", actual.TLSClientConfig)
+	}
+
+	state.Options.CustomCAPEM = []byte("not a certificate; private-secret")
+	result := New().Run(context.Background(), state)
+	if result.Status != model.StatusFailed || result.ErrorCode != ErrorCustomCA {
+		t.Fatalf("result = %#v", result)
+	}
+	if serialized := fmt.Sprintf("%#v %#v", result, state.HTTP()); strings.Contains(serialized, "private-secret") {
+		t.Fatalf("custom CA bytes leaked: %s", serialized)
+	}
+}
+
 func TestCheckCrossOriginRemovesSensitiveHeadersAndRecordsPolicy(t *testing.T) {
 	t.Parallel()
 	check := New()
@@ -699,6 +943,78 @@ func TestCheckCrossOriginRemovesSensitiveHeadersAndRecordsPolicy(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("cross-origin evidence missing: %#v", result.Evidence)
+	}
+}
+
+func TestRuntimeHeadersAndHTTPHostApplyOnlyToInitialRequest(t *testing.T) {
+	t.Parallel()
+	const (
+		authorization = "Bearer runtime-secret"
+		traceValue    = "runtime-trace-secret"
+	)
+	requests := 0
+	check := New()
+	check.Resolver = publicResolver()
+	check.TransportFactory = func(*model.State) stdhttp.RoundTripper {
+		return roundTripFunc(func(request *stdhttp.Request) (*stdhttp.Response, error) {
+			requests++
+			if requests == 1 {
+				if request.Host != "backend.internal" ||
+					request.Header.Get("Authorization") != authorization ||
+					request.Header.Get("X-Diagnostic-Trace") != traceValue {
+					t.Fatalf("initial request host=%q headers=%#v", request.Host, request.Header)
+				}
+				return redirectResponse(request, "/final"), nil
+			}
+			if request.Header.Get("Authorization") != "" ||
+				request.Header.Get("X-Diagnostic-Trace") != "" {
+				t.Fatalf("transient headers reached redirect: %#v", request.Header)
+			}
+			if request.Host == "backend.internal" {
+				t.Fatalf("custom HTTP Host reached redirect: %q", request.Host)
+			}
+			return successResponse(request), nil
+		})
+	}
+	state := testHTTPState("http://example.com/start")
+	state.Options.HTTPHost = "backend.internal"
+	state.Options.RequestHeaders = map[string]string{
+		"Authorization":      authorization,
+		"X-Diagnostic-Trace": traceValue,
+	}
+
+	result := check.Run(context.Background(), state)
+
+	if result.Status != model.StatusPassed || requests != 2 {
+		t.Fatalf("requests=%d result=%#v", requests, result)
+	}
+	serialized := fmt.Sprintf("%#v %#v", result, state.HTTP())
+	for _, secret := range []string{authorization, traceValue} {
+		if strings.Contains(serialized, secret) {
+			t.Fatalf("runtime header value leaked into result: %s", serialized)
+		}
+	}
+}
+
+func TestRuntimeHeaderValueIsRemovedFromTransportErrors(t *testing.T) {
+	t.Parallel()
+	const secret = "runtime-header-secret"
+	check := New()
+	check.TransportFactory = func(*model.State) stdhttp.RoundTripper {
+		return roundTripFunc(func(*stdhttp.Request) (*stdhttp.Response, error) {
+			return nil, errors.New("transport echoed " + secret)
+		})
+	}
+	state := testHTTPState("http://example.com/")
+	state.Options.RequestHeaders = map[string]string{"X-Diagnostic": secret}
+
+	result := check.Run(context.Background(), state)
+
+	if result.Status != model.StatusFailed || strings.Contains(
+		fmt.Sprintf("%#v %#v", result, state.HTTP()),
+		secret,
+	) {
+		t.Fatalf("runtime header leaked: result=%#v HTTP=%#v", result, state.HTTP())
 	}
 }
 
@@ -847,6 +1163,53 @@ func TestCheckClassifiesProxyConnectFailure(t *testing.T) {
 	}
 }
 
+func TestCheckClassifiesPlainProxyAuthenticationResponse(t *testing.T) {
+	t.Parallel()
+	check := New()
+	check.TransportFactory = func(*model.State) stdhttp.RoundTripper {
+		return roundTripFunc(func(request *stdhttp.Request) (*stdhttp.Response, error) {
+			response := successResponse(request)
+			response.StatusCode = stdhttp.StatusProxyAuthRequired
+			response.Status = "407 Proxy Authentication Required"
+			return response, nil
+		})
+	}
+	state := testHTTPState("http://origin.invalid/start")
+	state.SetProxy(model.ProxyInfo{
+		Selected: true,
+		Selection: model.ProxySelection{
+			SourceVariable: "HTTP_PROXY",
+			URL:            "http://proxy.example:8080",
+			RequestURL:     "http://proxy.example:8080",
+			Validity:       model.ProxyValidityValid,
+		},
+	})
+
+	result := check.Run(context.Background(), state)
+
+	if result.Status != model.StatusFailed || result.ErrorCode != ErrorProxyAuth ||
+		state.HTTP().ErrorCode != ErrorProxyAuth {
+		t.Fatalf("result=%#v HTTP=%#v", result, state.HTTP())
+	}
+	paths := state.NetworkPaths()
+	if len(paths) != 1 || paths[0].Kind != model.NetworkPathHTTPProxy ||
+		len(paths[0].Hops) != 2 ||
+		paths[0].Hops[0].Kind != model.NetworkHopProxyPeer ||
+		paths[0].Hops[1].Kind != model.NetworkHopOrigin {
+		t.Fatalf("proxy path = %#v", paths)
+	}
+}
+
+func TestProxyCONNECTResponseClassification(t *testing.T) {
+	t.Parallel()
+	if got := classifyError(&proxyConnectResponseError{statusCode: 407}); got != ErrorProxyAuth {
+		t.Fatalf("407 classification = %q", got)
+	}
+	if got := classifyError(&proxyConnectResponseError{statusCode: 403}); got != ErrorProxyConnect {
+		t.Fatalf("403 classification = %q", got)
+	}
+}
+
 func TestCheckClassifiesRealProxyCONNECTRejectionWithoutDirectFallback(t *testing.T) {
 	t.Parallel()
 	var connectRequests atomic.Int32
@@ -889,17 +1252,37 @@ func TestCheckClassifiesRealProxyCONNECTRejectionWithoutDirectFallback(t *testin
 	})
 	result := check.Run(context.Background(), state)
 
-	if result.Status != model.StatusFailed || result.ErrorCode != ErrorProxyConnect ||
+	if result.Status != model.StatusFailed || result.ErrorCode != ErrorProxyAuth ||
 		connectRequests.Load() != 1 {
 		t.Fatalf("requests=%d result=%#v HTTP=%#v", connectRequests.Load(), result, state.HTTP())
 	}
-	if state.HTTP().Route != "proxy" || state.HTTP().Error != "proxy CONNECT failed" {
+	if state.HTTP().Route != "proxy" || state.HTTP().Error != "proxy authentication is required" {
 		t.Fatalf("HTTP result = %#v", state.HTTP())
 	}
 	select {
 	case err := <-serverErrors:
 		t.Fatal(err)
 	default:
+	}
+}
+
+func TestCheckRejectsConnectIPWhenProxyIsSelected(t *testing.T) {
+	t.Parallel()
+	state := testHTTPState("https://origin.invalid/start")
+	state.Options.ConnectIP = "192.0.2.10"
+	state.SetProxy(model.ProxyInfo{
+		Selected: true,
+		Selection: model.ProxySelection{
+			SourceVariable: "HTTPS_PROXY",
+			URL:            "http://proxy.example:8080",
+			RequestURL:     "http://proxy.example:8080",
+			Validity:       model.ProxyValidityValid,
+		},
+	})
+	result := New().Run(context.Background(), state)
+	if result.Status != model.StatusFailed || result.ErrorCode != ErrorConnectIPProxy ||
+		state.HTTP().Route != "proxy" {
+		t.Fatalf("result=%#v HTTP=%#v", result, state.HTTP())
 	}
 }
 
@@ -977,6 +1360,55 @@ func TestRedirectDialUsesPolicyApprovedIPWithoutSecondResolution(t *testing.T) {
 	}
 }
 
+func TestDirectInitialRequestUsesConnectIPAndHTTPHost(t *testing.T) {
+	t.Parallel()
+	dialed := make(chan string, 1)
+	receivedHost := make(chan string, 1)
+	serverErrors := make(chan error, 1)
+	check := New()
+	check.DialContext = func(_ context.Context, _, address string) (net.Conn, error) {
+		client, server := net.Pipe()
+		dialed <- address
+		go func() {
+			defer server.Close()
+			request, err := stdhttp.ReadRequest(bufio.NewReader(server))
+			if err != nil {
+				serverErrors <- err
+				return
+			}
+			receivedHost <- request.Host
+			_ = request.Body.Close()
+			if _, err := io.WriteString(
+				server,
+				"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+			); err != nil {
+				serverErrors <- err
+			}
+		}()
+		return client, nil
+	}
+	state := testHTTPState("http://origin.example/start")
+	state.Options.ConnectIP = "192.0.2.44"
+	state.Options.HTTPHost = "backend.internal"
+
+	result := check.Run(context.Background(), state)
+
+	if result.Status != model.StatusPassed {
+		t.Fatalf("result=%#v HTTP=%#v", result, state.HTTP())
+	}
+	if got := <-dialed; got != "192.0.2.44:80" {
+		t.Fatalf("dial address = %q", got)
+	}
+	if got := <-receivedHost; got != "backend.internal" {
+		t.Fatalf("HTTP Host = %q", got)
+	}
+	select {
+	case err := <-serverErrors:
+		t.Fatal(err)
+	default:
+	}
+}
+
 func TestNetworkForIPVersion(t *testing.T) {
 	t.Parallel()
 
@@ -999,6 +1431,124 @@ func TestNetworkForIPVersion(t *testing.T) {
 				t.Fatalf("networkForIPVersion() = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestHTTPTraceKeepsOverlappingConnectAttemptsSeparate(t *testing.T) {
+	t.Parallel()
+	var tick atomic.Int64
+	base := time.Unix(1_700_000_000, 0)
+	now := func() time.Time {
+		return base.Add(time.Duration(tick.Add(1)) * time.Millisecond)
+	}
+	request, err := stdhttp.NewRequest(stdhttp.MethodGet, "http://example.com/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := newHTTPTraceRecorder(
+		now,
+		now(),
+		func(*url.URL) model.ProxySelection {
+			return model.ProxySelection{Validity: model.ProxyValidityNotConfigured}
+		},
+	)
+	hop := recorder.begin(request)
+	trace := hop.trace()
+	trace.ConnectStart("tcp", "192.0.2.10:80")
+	trace.ConnectStart("tcp", "192.0.2.11:80")
+	trace.ConnectDone("tcp", "192.0.2.11:80", nil)
+	client, server := net.Pipe()
+	trace.GotConn(httptrace.GotConnInfo{Conn: client})
+	trace.ConnectDone("tcp", "192.0.2.10:80", errors.New("connection refused"))
+	_ = client.Close()
+	_ = server.Close()
+	hop.recordResponse(&stdhttp.Response{StatusCode: 200, Status: "200 OK"})
+	hop.finish()
+	snapshot := recorder.snapshot(now())
+
+	if len(snapshot.hops) != 1 || len(snapshot.hops[0].ConnectAttempts) != 2 {
+		t.Fatalf("snapshot = %#v", snapshot)
+	}
+	attempts := snapshot.hops[0].ConnectAttempts
+	if attempts[0].AttemptID == attempts[1].AttemptID ||
+		attempts[0].AttemptID != "http-client-path-1-hop-1-connect-1" ||
+		attempts[1].AttemptID != "http-client-path-1-hop-1-connect-2" {
+		t.Fatalf("attempt IDs = %#v", attempts)
+	}
+	if attempts[0].Duration <= attempts[1].Duration ||
+		attempts[0].ErrorCode != httpConnectAttemptError ||
+		attempts[0].Selected || !attempts[1].Selected {
+		t.Fatalf("attempt attribution = %#v", attempts)
+	}
+	if len(snapshot.paths) != 1 || len(snapshot.paths[0].Hops) != 1 {
+		t.Fatalf("paths = %#v", snapshot.paths)
+	}
+	var tcpTimings []model.PhaseTiming
+	for _, timing := range snapshot.paths[0].Hops[0].Timings {
+		if timing.Phase == "tcp" {
+			tcpTimings = append(tcpTimings, timing)
+		}
+	}
+	if len(tcpTimings) != 2 ||
+		tcpTimings[0].AttemptID == tcpTimings[1].AttemptID {
+		t.Fatalf("TCP timings = %#v", tcpTimings)
+	}
+}
+
+func TestHTTPTraceSeparatesProxyPeerFromOrigin(t *testing.T) {
+	t.Parallel()
+	request, err := stdhttp.NewRequest(stdhttp.MethodGet, "https://origin.example/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := newHTTPTraceRecorder(
+		time.Now,
+		time.Now(),
+		func(*url.URL) model.ProxySelection {
+			return model.ProxySelection{
+				SourceVariable: "HTTPS_PROXY",
+				URL:            "http://proxy.example:8080",
+				Validity:       model.ProxyValidityValid,
+			}
+		},
+	)
+	hop := recorder.begin(request)
+	trace := hop.trace()
+	trace.ConnectStart("tcp", "192.0.2.20:8080")
+	trace.ConnectDone("tcp", "192.0.2.20:8080", nil)
+	client, server := net.Pipe()
+	connection := &addressedConn{
+		Conn:   client,
+		local:  &net.TCPAddr{IP: net.ParseIP("192.0.2.10"), Port: 45000},
+		remote: &net.TCPAddr{IP: net.ParseIP("192.0.2.20"), Port: 8080},
+	}
+	trace.GotConn(httptrace.GotConnInfo{Conn: connection})
+	hop.recordResponse(&stdhttp.Response{StatusCode: 200, Status: "200 OK"})
+	hop.finish()
+	_ = connection.Close()
+	_ = server.Close()
+	snapshot := recorder.snapshot(time.Now())
+
+	if len(snapshot.hops) != 1 || snapshot.hops[0].RemoteIP != "" {
+		t.Fatalf("HTTP hop conflated proxy peer: %#v", snapshot.hops)
+	}
+	if len(snapshot.paths) != 1 ||
+		snapshot.paths[0].Kind != model.NetworkPathHTTPSConnect ||
+		len(snapshot.paths[0].Hops) != 2 {
+		t.Fatalf("proxy path = %#v", snapshot.paths)
+	}
+	peer := snapshot.paths[0].Hops[0]
+	origin := snapshot.paths[0].Hops[1]
+	if peer.Kind != model.NetworkHopProxyPeer || peer.Host != "proxy.example" ||
+		!peer.RemoteIP.Equal(net.ParseIP("192.0.2.20")) || peer.LocalAddr == "" ||
+		len(peer.Attempts) != 1 || !peer.Attempts[0].RemoteIP.Equal(net.ParseIP("192.0.2.20")) {
+		t.Fatalf("proxy peer = %#v", peer)
+	}
+	if origin.Kind != model.NetworkHopOrigin || origin.Host != "origin.example" ||
+		origin.RemoteIP != nil || origin.RemoteAddr != "" ||
+		len(origin.Attempts) != 1 || origin.Attempts[0].Kind != model.NetworkAttemptHTTP ||
+		origin.Attempts[0].RemoteIP != nil {
+		t.Fatalf("origin = %#v", origin)
 	}
 }
 

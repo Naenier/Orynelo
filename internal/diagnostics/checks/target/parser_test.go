@@ -16,7 +16,9 @@ func TestParseValidTargets(t *testing.T) {
 		host       string
 		port       uint16
 		kind       model.TargetKind
+		mode       model.TargetMode
 		scheme     string
+		zone       string
 		useTLS     bool
 		normalized string
 	}{
@@ -26,6 +28,7 @@ func TestParseValidTargets(t *testing.T) {
 			host:       "example.com",
 			port:       443,
 			kind:       model.TargetHTTP,
+			mode:       model.TargetModeHTTPS,
 			scheme:     "https",
 			useTLS:     true,
 			normalized: "https://example.com:443",
@@ -36,6 +39,7 @@ func TestParseValidTargets(t *testing.T) {
 			host:       "example.com",
 			port:       443,
 			kind:       model.TargetTCP,
+			mode:       model.TargetModeTCP,
 			normalized: "example.com:443",
 		},
 		{
@@ -44,6 +48,7 @@ func TestParseValidTargets(t *testing.T) {
 			host:       "example.com",
 			port:       80,
 			kind:       model.TargetHTTP,
+			mode:       model.TargetModeHTTP,
 			scheme:     "http",
 			normalized: "http://example.com:80/health",
 		},
@@ -53,6 +58,7 @@ func TestParseValidTargets(t *testing.T) {
 			host:       "example.com",
 			port:       8443,
 			kind:       model.TargetHTTP,
+			mode:       model.TargetModeHTTPS,
 			scheme:     "https",
 			useTLS:     true,
 			normalized: "https://example.com:8443/a",
@@ -63,6 +69,7 @@ func TestParseValidTargets(t *testing.T) {
 			host:       "10.10.0.25",
 			port:       8080,
 			kind:       model.TargetHTTP,
+			mode:       model.TargetModeHTTP,
 			scheme:     "http",
 			normalized: "http://10.10.0.25:8080/api/health",
 		},
@@ -72,6 +79,7 @@ func TestParseValidTargets(t *testing.T) {
 			host:       "2001:db8::1",
 			port:       443,
 			kind:       model.TargetTCP,
+			mode:       model.TargetModeTCP,
 			normalized: "[2001:db8::1]:443",
 		},
 		{
@@ -80,6 +88,7 @@ func TestParseValidTargets(t *testing.T) {
 			host:       "2001:db8::1",
 			port:       443,
 			kind:       model.TargetHTTP,
+			mode:       model.TargetModeHTTPS,
 			scheme:     "https",
 			useTLS:     true,
 			normalized: "https://[2001:db8::1]:443/",
@@ -90,6 +99,7 @@ func TestParseValidTargets(t *testing.T) {
 			host:       "2001:db8::1",
 			port:       443,
 			kind:       model.TargetHTTP,
+			mode:       model.TargetModeHTTPS,
 			scheme:     "https",
 			useTLS:     true,
 			normalized: "https://[2001:db8::1]:443",
@@ -100,9 +110,55 @@ func TestParseValidTargets(t *testing.T) {
 			host:       "xn--e1afmkfd.xn--p1ai",
 			port:       443,
 			kind:       model.TargetHTTP,
+			mode:       model.TargetModeHTTPS,
 			scheme:     "https",
 			useTLS:     true,
 			normalized: "https://xn--e1afmkfd.xn--p1ai:443/%D0%BF%D1%83%D1%82%D1%8C",
+		},
+		{
+			name:       "explicit TCP scheme",
+			input:      "tcp://example.com:22",
+			host:       "example.com",
+			port:       22,
+			kind:       model.TargetTCP,
+			mode:       model.TargetModeTCP,
+			scheme:     "tcp",
+			normalized: "tcp://example.com:22",
+		},
+		{
+			name:       "explicit TLS scheme",
+			input:      "tls://example.com:8443",
+			host:       "example.com",
+			port:       8443,
+			kind:       model.TargetTCP,
+			mode:       model.TargetModeTLS,
+			scheme:     "tls",
+			useTLS:     true,
+			normalized: "tls://example.com:8443",
+		},
+		{
+			name:       "link local IPv6 URL with zone",
+			input:      "https://[fe80::1%25eth0]:8443/health",
+			host:       "fe80::1",
+			port:       8443,
+			kind:       model.TargetHTTP,
+			mode:       model.TargetModeHTTPS,
+			scheme:     "https",
+			zone:       "eth0",
+			useTLS:     true,
+			normalized: "https://[fe80::1%25eth0]:8443/health",
+		},
+		{
+			name:       "link local IPv6 TLS endpoint with zone",
+			input:      "tls://[fe80::2%25en0]:443",
+			host:       "fe80::2",
+			port:       443,
+			kind:       model.TargetTCP,
+			mode:       model.TargetModeTLS,
+			scheme:     "tls",
+			zone:       "en0",
+			useTLS:     true,
+			normalized: "tls://[fe80::2%25en0]:443",
 		},
 	}
 	for _, test := range tests {
@@ -114,8 +170,12 @@ func TestParseValidTargets(t *testing.T) {
 				t.Fatalf("Parse() error = %v", err)
 			}
 			if got.Host != test.host || got.Port != test.port || got.Kind != test.kind ||
-				got.Scheme != test.scheme || got.UseTLS != test.useTLS || got.Normalized != test.normalized {
+				got.Mode != test.mode || got.Scheme != test.scheme || got.Zone != test.zone ||
+				got.UseTLS != test.useTLS || got.Normalized != test.normalized {
 				t.Fatalf("Parse() = %#v", got)
+			}
+			if got.Zone != "" && !strings.Contains(got.Address(), "%"+got.Zone) {
+				t.Fatalf("Address() = %q, want zone %q", got.Address(), got.Zone)
 			}
 		})
 	}
@@ -191,6 +251,10 @@ func TestParseInvalidTargets(t *testing.T) {
 		{"", ErrorEmptyTarget},
 		{"   ", ErrorEmptyTarget},
 		{"ftp://example.com", ErrorUnsupportedScheme},
+		{"tcp://example.com", ErrorInvalidPort},
+		{"tls://example.com:443/path", ErrorInvalidTarget},
+		{"tls://example.com:443?token=secret", ErrorInvalidTarget},
+		{"tcp://[2001:db8::1%25eth0]:443", ErrorInvalidTarget},
 		{"https:///path", ErrorMissingHost},
 		{"example.com:0", ErrorInvalidPort},
 		{"example.com:65536", ErrorInvalidPort},

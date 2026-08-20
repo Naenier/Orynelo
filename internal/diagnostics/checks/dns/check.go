@@ -1,11 +1,10 @@
-// Package dns performs address-family-aware name resolution behind an
-// injectable resolver interface.
+// Package dns performs address-family-aware name resolution behind injectable
+// system and detailed resolver interfaces.
 package dns
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"sort"
 	"strings"
@@ -17,19 +16,35 @@ import (
 const (
 	ErrorLookupFailed     = "DNS_LOOKUP_FAILED"
 	ErrorNoRecords        = "DNS_NO_RECORDS"
+	ErrorNXDOMAIN         = "DNS_NXDOMAIN"
+	ErrorNoData           = "DNS_NODATA"
+	ErrorSERVFAIL         = "DNS_SERVFAIL"
+	ErrorTimeout          = "DNS_TIMEOUT"
+	ErrorNotFoundUnknown  = "DNS_NOT_FOUND_UNKNOWN"
+	ErrorPartialFailure   = "DNS_PARTIAL_FAILURE"
+	ErrorDetailsFailed    = "DNS_DETAILS_FAILED"
+	ErrorFamilyMismatch   = "DNS_FAMILY_MISMATCH"
 	ErrorIPFamilyMismatch = "DNS_IP_LITERAL_FAMILY_MISMATCH"
 	ErrorCancelled        = "DNS_CANCELLED"
 )
 
-// Resolver is implemented by net.Resolver and test doubles.
+const (
+	directPathID = "path-direct"
+	originHopID  = "hop-origin"
+)
+
+// Resolver is implemented by net.Resolver and deterministic test doubles.
 type Resolver interface {
 	LookupIP(ctx context.Context, network, host string) ([]net.IP, error)
 }
 
-// Check resolves A and AAAA records with a system resolver by default.
+// Check resolves A and AAAA records with the system resolver by default.
+// DetailedResolver is consulted only when CollectDNSDetails is enabled.
 type Check struct {
-	Resolver Resolver
-	Now      func() time.Time
+	Resolver         Resolver
+	DetailedResolver DetailedResolver
+	ResolverInfo     func() resolverInfo
+	Now              func() time.Time
 }
 
 // New constructs a DNS check.
@@ -37,7 +52,11 @@ func New(resolver Resolver) *Check {
 	if resolver == nil {
 		resolver = net.DefaultResolver
 	}
-	return &Check{Resolver: resolver, Now: time.Now}
+	return &Check{
+		Resolver:     resolver,
+		ResolverInfo: systemResolverInfo,
+		Now:          time.Now,
+	}
 }
 
 // ID returns the stable diagnostic identifier.
@@ -53,206 +72,235 @@ type lookupResult struct {
 	duration  time.Duration
 }
 
-// Run resolves the target's A and AAAA records.
+// Run resolves both address families so a requested-family absence can be
+// distinguished from a hostname that exists only in the other family.
 func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 	host := state.Target.Host
 	if ip := net.ParseIP(host); ip != nil {
-		result := model.DNSResult{}
-		if ip.To4() != nil {
-			if state.Options.IPVersion == model.IPVersion6 {
-				return ipFamilyMismatchResult(
-					c,
-					ip,
-					state.Options.IPVersion,
-					"The target is IPv4 but IPv6-only mode was requested.",
-				)
-			}
-			result.IPv4 = []net.IP{canonicalIP(ip)}
+		return c.literalResult(state, ip)
+	}
+
+	lookups := c.lookupFamilies(ctx, host)
+	info := resolverInfo{source: "system resolver"}
+	if c.ResolverInfo != nil {
+		info = c.ResolverInfo()
+	}
+	dnsResult := model.DNSResult{
+		ResolverSource: info.source,
+		SearchDomains:  append([]string(nil), info.searchDomains...),
+	}
+
+	families := make([]model.DNSFamilyResult, 0, 2)
+	duplicates := make(map[string]int, 2)
+	for _, family := range []string{"ip4", "ip6"} {
+		lookup := lookups[family]
+		addresses, removed := normalize(lookup.addresses, family)
+		duplicates[family] = removed
+		families = append(
+			families,
+			classifyFamilyLookup(family, addresses, lookup.err, lookup.duration),
+		)
+	}
+
+	var detailResult DetailedResult
+	var detailErr error
+	if state.Options.CollectDNSDetails {
+		resolver := detailedResolverFor(c)
+		if resolver == nil {
+			detailErr = errors.New("detailed resolver is unavailable on this platform")
 		} else {
-			if state.Options.IPVersion == model.IPVersion4 {
-				return ipFamilyMismatchResult(
-					c,
-					ip,
-					state.Options.IPVersion,
-					"The target is IPv6 but IPv4-only mode was requested.",
-				)
+			detailResult, detailErr = lookupDetails(ctx, resolver, host)
+			families = mergeDetailedFamilies(families, detailResult.Families)
+			if detailResult.ResolverSource != "" {
+				dnsResult.ResolverSource = detailResult.ResolverSource
 			}
-			result.IPv6 = []net.IP{canonicalIP(ip)}
-		}
-		state.SetDNS(result)
-		return model.CheckResult{
-			ID:      c.ID(),
-			Name:    c.Name(),
-			Status:  model.StatusPassed,
-			Summary: "The target is an IP literal; DNS lookup is not required.",
-			Evidence: []model.Evidence{{
-				ID:      "dns.literal",
-				Code:    "DNS_IP_LITERAL",
-				Message: "The target contains a canonical IP address.",
-				Details: map[string]string{"address": ip.String()},
-			}},
+			if detailResult.SearchDomains != nil {
+				dnsResult.SearchDomains = normalizedDomains(detailResult.SearchDomains)
+			}
+			dnsResult.CNAMEs = normalizeCNAMEs(detailResult.CNAMEs, 16)
+			if detailResult.TTL > 0 {
+				dnsResult.TTL = detailResult.TTL
+			}
 		}
 	}
 
-	families := requestedFamilies(state.Options.IPVersion)
-	results := make(chan lookupResult, len(families))
-	for _, family := range families {
-		family := family
-		go func() {
-			started := c.now()
-			addresses, err := c.Resolver.LookupIP(ctx, family, host)
-			results <- lookupResult{
-				family:    family,
-				addresses: addresses,
-				err:       err,
-				duration:  c.now().Sub(started),
-			}
-		}()
-	}
-
-	byFamily := make(map[string]lookupResult, len(families))
-	for range families {
-		result := <-results
-		byFamily[result.family] = result
-	}
-
-	dnsResult := model.DNSResult{}
-	var evidence []model.Evidence
-	for _, family := range families {
-		result := byFamily[family]
-		addresses, duplicates := normalize(result.addresses, family)
-		if family == "ip4" {
-			dnsResult.IPv4 = addresses
-			dnsResult.ADuration = result.duration
-			if result.err != nil {
-				dnsResult.AError = result.err.Error()
-			}
-		} else {
-			dnsResult.IPv6 = addresses
-			dnsResult.AAAADuration = result.duration
-			if result.err != nil {
-				dnsResult.AAAAError = result.err.Error()
-			}
-		}
-		recordType := map[string]string{"ip4": "A", "ip6": "AAAA"}[family]
-		details := map[string]string{
-			"recordType": recordType,
-			"addresses":  joinIPs(addresses),
-			"duration":   result.duration.String(),
-		}
-		if duplicates > 0 {
-			details["duplicatesRemoved"] = fmt.Sprintf("%d", duplicates)
-		}
-		if result.err != nil {
-			details["error"] = result.err.Error()
-		}
-		evidence = append(evidence, model.Evidence{
-			ID:      "dns." + strings.ToLower(recordType),
-			Code:    "DNS_" + recordType + "_RESULT",
-			Message: fmt.Sprintf("%s lookup returned %d unique address(es).", recordType, len(addresses)),
-			Details: details,
-		})
-	}
+	applyResolvedFamilyMismatch(families, state.Options.IPVersion)
+	dnsResult.Families = families
+	populateLegacyDNSResult(&dnsResult)
 	state.SetDNS(dnsResult)
+	c.recordDNSPath(state, dnsResult)
+
+	evidence := familyEvidence(
+		families,
+		duplicates,
+		detailResult.ResponseCodes,
+		state.Options.IPVersion,
+		state.Options.AddressLimit,
+	)
+	evidence = append(
+		evidence,
+		resolverEvidence(dnsResult, state.Options.CollectDNSDetails, detailErr),
+	)
+	selection := SelectAddresses(dnsResult, state.Options)
+	if selection.Skipped > 0 {
+		evidence = append(evidence, skippedByLimitEvidence(selection, state.Options))
+	}
 
 	if ctx.Err() != nil {
 		return model.CheckResult{
-			ID:        c.ID(),
-			Name:      c.Name(),
-			Status:    model.StatusCancelled,
-			Summary:   "DNS resolution was cancelled.",
-			Evidence:  evidence,
-			ErrorCode: ErrorCancelled,
+			ID:          c.ID(),
+			Name:        c.Name(),
+			Status:      model.StatusCancelled,
+			Summary:     "DNS resolution was cancelled.",
+			NetworkRefs: familyNetworkRefs(families),
+			Evidence:    evidence,
+			ErrorCode:   ErrorCancelled,
 		}
 	}
-
-	has4, has6 := len(dnsResult.IPv4) > 0, len(dnsResult.IPv6) > 0
-	requiredFound := (state.Options.IPVersion == model.IPVersionAuto && (has4 || has6)) ||
-		(state.Options.IPVersion == model.IPVersion4 && has4) ||
-		(state.Options.IPVersion == model.IPVersion6 && has6)
-	if !requiredFound {
-		code := ErrorNoRecords
-		summary := "DNS returned no usable addresses for the requested IP mode."
-		if dnsResult.AError != "" || dnsResult.AAAAError != "" {
-			code = ErrorLookupFailed
-			summary = "DNS resolution failed for the requested IP mode."
-		}
-		return model.CheckResult{
-			ID:        c.ID(),
-			Name:      c.Name(),
-			Status:    model.StatusFailed,
-			Summary:   summary,
-			Evidence:  evidence,
-			ErrorCode: code,
-			Recommendations: []model.Recommendation{{
-				ID:       "dns.verify_name",
-				Priority: "high",
-				Message:  "Verify the hostname, resolver configuration, and expected DNS records.",
-			}},
-		}
+	status, code, summary := evaluateFamilyResults(
+		families,
+		state.Options.IPVersion,
+		detailErr,
+	)
+	result := model.CheckResult{
+		ID:          c.ID(),
+		Name:        c.Name(),
+		Status:      status,
+		Summary:     summary,
+		NetworkRefs: familyNetworkRefs(families),
+		Evidence:    evidence,
+		ErrorCode:   code,
 	}
-
-	summary := fmt.Sprintf("Resolved %d IPv4 and %d IPv6 address(es).", len(dnsResult.IPv4), len(dnsResult.IPv6))
-	return model.CheckResult{
-		ID:       c.ID(),
-		Name:     c.Name(),
-		Status:   model.StatusPassed,
-		Summary:  summary,
-		Evidence: evidence,
-	}
-}
-
-func ipFamilyMismatchResult(
-	c *Check,
-	literal net.IP,
-	requested model.IPVersion,
-	summary string,
-) model.CheckResult {
-	return model.CheckResult{
-		ID:        c.ID(),
-		Name:      c.Name(),
-		Status:    model.StatusFailed,
-		Summary:   summary,
-		ErrorCode: ErrorIPFamilyMismatch,
-		Evidence: []model.Evidence{{
-			ID:      "dns.literal_family_mismatch",
-			Code:    ErrorIPFamilyMismatch,
-			Message: "The literal address family does not match the requested IP mode.",
-			Details: map[string]string{
-				"address":       literal.String(),
-				"addressFamily": literalFamily(literal),
-				"requestedMode": string(requested),
-			},
-		}},
-		Recommendations: []model.Recommendation{{
-			ID:       "dns.select_literal_family",
+	switch status {
+	case model.StatusFailed:
+		result.Recommendations = []model.Recommendation{{
+			ID:       recommendationID(code),
 			Priority: "high",
-			Message:  "Select an IP family that matches the literal target address.",
-		}},
+			Message:  recommendation(code),
+		}}
+	case model.StatusWarning:
+		result.Recommendations = []model.Recommendation{{
+			ID:       "dns.investigate_partial",
+			Priority: "medium",
+			Message:  "Inspect the affected address family and resolver evidence before assigning a host-wide cause.",
+		}}
 	}
+	return result
 }
 
-func literalFamily(ip net.IP) string {
-	if ip.To4() != nil {
-		return "ipv4"
-	}
-	return "ipv6"
+func lookupDetails(
+	ctx context.Context,
+	resolver DetailedResolver,
+	host string,
+) (result DetailedResult, err error) {
+	defer func() {
+		if recover() != nil {
+			result = DetailedResult{}
+			err = errors.New("detailed resolver adapter failed internally")
+		}
+	}()
+	return resolver.LookupDetails(ctx, host)
 }
 
-func requestedFamilies(version model.IPVersion) []string {
-	switch version {
-	case model.IPVersion4:
-		return []string{"ip4"}
-	case model.IPVersion6:
-		return []string{"ip6"}
-	default:
-		return []string{"ip4", "ip6"}
+func (c *Check) lookupFamilies(ctx context.Context, host string) map[string]lookupResult {
+	const familyCount = 2
+	results := make(chan lookupResult, familyCount)
+	for _, family := range []string{"ip4", "ip6"} {
+		family := family
+		go func() {
+			results <- c.lookupFamily(ctx, family, host)
+		}()
 	}
+	byFamily := make(map[string]lookupResult, familyCount)
+	for range familyCount {
+		result := <-results
+		byFamily[result.family] = result
+	}
+	return byFamily
+}
+
+func (c *Check) lookupFamily(
+	ctx context.Context,
+	family string,
+	host string,
+) (result lookupResult) {
+	started := c.now()
+	result.family = family
+	defer func() {
+		result.duration = c.now().Sub(started)
+		if recover() != nil {
+			result.addresses = nil
+			result.err = errors.New("resolver adapter failed internally")
+		}
+	}()
+	if c.Resolver == nil {
+		result.err = errors.New("resolver adapter is unavailable")
+		return result
+	}
+	result.addresses, result.err = c.Resolver.LookupIP(ctx, family, host)
+	return result
+}
+
+func classifyFamilyLookup(
+	family string,
+	addresses []net.IP,
+	err error,
+	duration time.Duration,
+) model.DNSFamilyResult {
+	record := recordType(family)
+	result := model.DNSFamilyResult{
+		NetworkRef: networkRef(dnsAttemptID(record)),
+		Family:     displayFamily(family),
+		RecordType: record,
+		Addresses:  cloneIPs(addresses),
+		Duration:   duration,
+	}
+	if len(addresses) > 0 {
+		result.Status = model.DNSFamilyStatusSuccess
+		if err != nil {
+			result.ErrorCode = ErrorPartialFailure
+			result.Error = boundedErrorText(err)
+		}
+		return result
+	}
+	if err == nil {
+		result.Status = model.DNSFamilyStatusNoData
+		result.ErrorCode = ErrorNoData
+		return result
+	}
+	result.Error = boundedErrorText(err)
+	result.Status, result.ErrorCode = classifyResolverError(err)
+	return result
+}
+
+func classifyResolverError(err error) (model.DNSFamilyStatus, string) {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return model.DNSFamilyStatusCancelled, ErrorCancelled
+	case errors.Is(err, context.DeadlineExceeded):
+		return model.DNSFamilyStatusTimeout, ErrorTimeout
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		switch {
+		case dnsErr.IsTimeout:
+			return model.DNSFamilyStatusTimeout, ErrorTimeout
+		case dnsErr.IsNotFound:
+			// net.Resolver maps both NXDOMAIN and successful empty answers to
+			// IsNotFound. Only structured detailed evidence can refine it.
+			return model.DNSFamilyStatusNotFoundUnknown, ErrorNotFoundUnknown
+		}
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return model.DNSFamilyStatusTimeout, ErrorTimeout
+	}
+	return model.DNSFamilyStatusError, ErrorLookupFailed
 }
 
 func normalize(addresses []net.IP, family string) ([]net.IP, int) {
 	seen := make(map[string]struct{})
-	var out []net.IP
+	var result []net.IP
 	duplicates := 0
 	for _, address := range addresses {
 		address = canonicalIP(address)
@@ -261,17 +309,17 @@ func normalize(addresses []net.IP, family string) ([]net.IP, int) {
 			continue
 		}
 		key := address.String()
-		if _, ok := seen[key]; ok {
+		if _, duplicate := seen[key]; duplicate {
 			duplicates++
 			continue
 		}
 		seen[key] = struct{}{}
-		out = append(out, address)
+		result = append(result, address)
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		return bytesCompare(out[i], out[j]) < 0
+	sort.SliceStable(result, func(left, right int) bool {
+		return bytesCompare(result[left], result[right]) < 0
 	})
-	return out, duplicates
+	return result, duplicates
 }
 
 func canonicalIP(ip net.IP) net.IP {
@@ -285,11 +333,11 @@ func canonicalIP(ip net.IP) net.IP {
 }
 
 func bytesCompare(left, right net.IP) int {
-	for i := 0; i < len(left) && i < len(right); i++ {
-		if left[i] < right[i] {
+	for index := 0; index < len(left) && index < len(right); index++ {
+		if left[index] < right[index] {
 			return -1
 		}
-		if left[i] > right[i] {
+		if left[index] > right[index] {
 			return 1
 		}
 	}

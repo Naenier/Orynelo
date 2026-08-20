@@ -25,6 +25,58 @@ func (e CheckEvent) MarshalJSON() ([]byte, error) {
 	}{alias: alias(e), At: jsonUTC(e.At)})
 }
 
+// MarshalJSON enforces UTC attempt timestamps.
+func (a NetworkAttempt) MarshalJSON() ([]byte, error) {
+	type alias NetworkAttempt
+	return json.Marshal(struct {
+		alias
+		StartedAt  time.Time `json:"startedAt,omitempty"`
+		FinishedAt time.Time `json:"finishedAt,omitempty"`
+	}{alias: alias(a), StartedAt: jsonUTC(a.StartedAt), FinishedAt: jsonUTC(a.FinishedAt)})
+}
+
+// MarshalJSON enforces UTC phase timestamps.
+func (timing PhaseTiming) MarshalJSON() ([]byte, error) {
+	type alias PhaseTiming
+	return json.Marshal(struct {
+		alias
+		StartedAt  time.Time `json:"startedAt,omitempty"`
+		FinishedAt time.Time `json:"finishedAt,omitempty"`
+	}{
+		alias:      alias(timing),
+		StartedAt:  jsonUTC(timing.StartedAt),
+		FinishedAt: jsonUTC(timing.FinishedAt),
+	})
+}
+
+// MarshalJSON enforces UTC TLS-attempt timestamps.
+func (attempt TLSAttempt) MarshalJSON() ([]byte, error) {
+	type alias TLSAttempt
+	return json.Marshal(struct {
+		alias
+		StartedAt  time.Time `json:"startedAt,omitempty"`
+		FinishedAt time.Time `json:"finishedAt,omitempty"`
+	}{
+		alias:      alias(attempt),
+		StartedAt:  jsonUTC(attempt.StartedAt),
+		FinishedAt: jsonUTC(attempt.FinishedAt),
+	})
+}
+
+// MarshalJSON enforces UTC HTTP-connect timestamps.
+func (attempt HTTPConnectAttempt) MarshalJSON() ([]byte, error) {
+	type alias HTTPConnectAttempt
+	return json.Marshal(struct {
+		alias
+		StartedAt  time.Time `json:"startedAt,omitempty"`
+		FinishedAt time.Time `json:"finishedAt,omitempty"`
+	}{
+		alias:      alias(attempt),
+		StartedAt:  jsonUTC(attempt.StartedAt),
+		FinishedAt: jsonUTC(attempt.FinishedAt),
+	})
+}
+
 // MarshalJSON enforces UTC diagnosis timestamps.
 func (d Diagnosis) MarshalJSON() ([]byte, error) {
 	type alias Diagnosis

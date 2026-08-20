@@ -59,6 +59,104 @@ func TestDiagnoseUsesCatalogWithoutChangingDomainValues(t *testing.T) {
 	}
 }
 
+func TestDiagnoseStageThreeControlsProduceRuntimeInput(t *testing.T) {
+	test.NewTempApp(t)
+	texts := localization.English{}
+	screen := NewDiagnose(texts, DiagnoseActions{})
+	screen.target.SetText("example.test:8443")
+	screen.mode.SetSelected(texts.Text(localization.OptionTLS))
+	screen.probeMode.SetSelected(texts.Text(localization.OptionAddressMatrix))
+	screen.addressLimit.SetText("6")
+	screen.matrixBudget.SetText("3s")
+	screen.expectedStatus.SetText("201-204")
+	screen.latencyThreshold.SetText("750ms")
+	screen.connectIP.SetText("192.0.2.44")
+	screen.serverName.SetText("node.example.test")
+	screen.httpHost.SetText("service.example.test:8443")
+	screen.caBundle.SetText("/runtime/private/ca.pem")
+	screen.requestHeaders.SetText(
+		"Authorization: Bearer gui-one-time-secret\nX-Incident: INC-42",
+	)
+	screen.collectDNSDetails.SetChecked(true)
+	screen.inspectBody.SetChecked(true)
+
+	input, err := screen.Input()
+	if err != nil {
+		t.Fatalf("Input() error = %v", err)
+	}
+	if input.Mode != "tls" || input.ProbeMode != "address_matrix" ||
+		input.AddressLimit != 6 || input.AddressMatrixBudget != 3*time.Second ||
+		!input.ExpectedStatusSet || input.ExpectedStatusMin != 201 ||
+		input.ExpectedStatusMax != 204 || input.LatencyThreshold != 750*time.Millisecond ||
+		input.ConnectIP != "192.0.2.44" || input.ServerName != "node.example.test" ||
+		input.HTTPHost != "service.example.test:8443" ||
+		input.CustomCABundlePath != "/runtime/private/ca.pem" ||
+		input.RequestHeaders["authorization"] != "Bearer gui-one-time-secret" ||
+		input.RequestHeaders["x-incident"] != "INC-42" ||
+		!input.CollectDNSDetails || !input.InspectBody {
+		t.Fatalf("Input() = %#v", input)
+	}
+}
+
+func TestDiagnoseTargetPreviewNeverShowsCredentialsOrSecretQueryValues(t *testing.T) {
+	test.NewTempApp(t)
+	screen := NewDiagnose(localization.English{}, DiagnoseActions{})
+	screen.target.SetText(
+		"https://preview-user:preview-password@example.test/private?token=preview-token&view=full",
+	)
+
+	preview := screen.targetPreview.Text
+	for _, secret := range []string{"preview-user", "preview-password", "preview-token"} {
+		if strings.Contains(preview, secret) {
+			t.Fatalf("target preview exposed %q: %q", secret, preview)
+		}
+	}
+	if !strings.Contains(preview, "https://example.test:443/private") ||
+		!strings.Contains(preview, "token=[REDACTED]") ||
+		!strings.Contains(preview, "view=full") {
+		t.Fatalf("target preview lost safe effective context: %q", preview)
+	}
+}
+
+func TestDiagnoseStageThreeControlsRejectInvalidValuesWithoutEchoingSecrets(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*DiagnoseScreen)
+		secret    string
+	}{
+		{name: "address limit", configure: func(screen *DiagnoseScreen) {
+			screen.addressLimit.SetText("17")
+		}},
+		{name: "matrix budget", configure: func(screen *DiagnoseScreen) {
+			screen.matrixBudget.SetText("0s")
+		}},
+		{name: "status range", configure: func(screen *DiagnoseScreen) {
+			screen.expectedStatus.SetText("500-200")
+		}},
+		{name: "latency", configure: func(screen *DiagnoseScreen) {
+			screen.latencyThreshold.SetText("0s")
+		}},
+		{name: "header injection", secret: "gui-header-secret", configure: func(screen *DiagnoseScreen) {
+			screen.requestHeaders.SetText("gui-header-secret-without-colon")
+		}},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			test.NewTempApp(t)
+			screen := NewDiagnose(localization.English{}, DiagnoseActions{})
+			screen.target.SetText("https://example.test")
+			testCase.configure(screen)
+			_, err := screen.Input()
+			if err == nil {
+				t.Fatal("Input() error = nil")
+			}
+			if testCase.secret != "" && strings.Contains(err.Error(), testCase.secret) {
+				t.Fatalf("Input() error exposed transient value: %v", err)
+			}
+		})
+	}
+}
+
 func TestSetProfileResetsUnsafeRunOnlyControls(t *testing.T) {
 	test.NewTempApp(t)
 	screen := NewDiagnose(localization.English{}, DiagnoseActions{})
@@ -66,6 +164,18 @@ func TestSetProfileResetsUnsafeRunOnlyControls(t *testing.T) {
 	screen.allowInsecureRedirects.SetChecked(true)
 	screen.allowPrivateRedirects.SetChecked(true)
 	screen.verbosity.SetSelected("Verbose")
+	screen.probeMode.SetSelected(localization.English{}.Text(localization.OptionAddressMatrix))
+	screen.addressLimit.SetText("8")
+	screen.matrixBudget.SetText("9s")
+	screen.expectedStatus.SetText("204")
+	screen.latencyThreshold.SetText("500ms")
+	screen.connectIP.SetText("192.0.2.44")
+	screen.serverName.SetText("node.example.test")
+	screen.httpHost.SetText("service.example.test")
+	screen.caBundle.SetText("/runtime/private/ca.pem")
+	screen.requestHeaders.SetText("Authorization: Bearer profile-secret")
+	screen.collectDNSDetails.SetChecked(true)
+	screen.inspectBody.SetChecked(true)
 
 	screen.SetProfile(presenter.ProfileView{
 		Target:       "example.test:443",
@@ -89,6 +199,13 @@ func TestSetProfileResetsUnsafeRunOnlyControls(t *testing.T) {
 	}
 	if input.Verbosity != "normal" {
 		t.Fatalf("stored profile verbosity = %q, want normal", input.Verbosity)
+	}
+	if input.ProbeMode != "client_effective" || input.AddressLimit != 4 ||
+		input.AddressMatrixBudget != 5*time.Second || input.ExpectedStatusSet ||
+		input.LatencyThreshold != 0 || input.ConnectIP != "" || input.ServerName != "" ||
+		input.HTTPHost != "" || input.CustomCABundlePath != "" ||
+		len(input.RequestHeaders) != 0 || input.CollectDNSDetails || input.InspectBody {
+		t.Fatalf("stored profile retained run-only Stage 3 values: %#v", input)
 	}
 }
 

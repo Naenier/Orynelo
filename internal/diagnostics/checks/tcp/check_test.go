@@ -6,6 +6,7 @@ import (
 	"net"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/Naenier/orynelo/internal/diagnostics/model"
 )
@@ -81,6 +82,7 @@ func TestCheckPreservesPerAddressOutcomes(t *testing.T) {
 	t.Parallel()
 	options := model.DefaultDiagnoseOptions("example.com:443")
 	options.MaxConcurrency = 2
+	options.ProbeMode = model.ProbeModeAddressMatrix
 	state := model.NewState(model.Target{Host: "example.com", Port: 443}, options)
 	state.SetDNS(model.DNSResult{
 		IPv4: []net.IP{net.ParseIP("192.0.2.1")},
@@ -146,6 +148,7 @@ func TestCheckCancellationPreservesOnlyStartedAttempts(t *testing.T) {
 	t.Parallel()
 	options := model.DefaultDiagnoseOptions("example.com:443")
 	options.MaxConcurrency = 1
+	options.ProbeMode = model.ProbeModeAddressMatrix
 	state := model.NewState(model.Target{Host: "example.com", Port: 443}, options)
 	state.SetDNS(model.DNSResult{IPv4: []net.IP{
 		net.ParseIP("192.0.2.1"),
@@ -190,5 +193,20 @@ func TestCheckCancellationPreservesOnlyStartedAttempts(t *testing.T) {
 			evidence.Message == "" {
 			t.Fatalf("false cancellation evidence = %#v", evidence)
 		}
+	}
+}
+
+func TestMatrixAddressContextHonorsConfiguredPerAddressBudget(t *testing.T) {
+	t.Parallel()
+	options := model.DefaultDiagnoseOptions("example.com:443")
+	options.ProbeMode = model.ProbeModeAddressMatrix
+	options.AddressMatrixBudget = 40 * time.Millisecond
+	options.CheckTimeout = time.Second
+	started := time.Now()
+	ctx, cancel := New(fakeDialer{}).addressContext(context.Background(), options, 4)
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	if !ok || deadline.Sub(started) > 25*time.Millisecond {
+		t.Fatalf("per-address deadline = %v, want about 10ms", deadline.Sub(started))
 	}
 }

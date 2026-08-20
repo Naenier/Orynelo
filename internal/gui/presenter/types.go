@@ -18,6 +18,20 @@ type DiagnoseInput struct {
 	AllowPrivateRedirects  bool
 	MaxRedirects           int
 	Verbosity              string
+	ProbeMode              string
+	AddressLimit           int
+	AddressMatrixBudget    time.Duration
+	ExpectedStatusMin      int
+	ExpectedStatusMax      int
+	ExpectedStatusSet      bool
+	LatencyThreshold       time.Duration
+	ConnectIP              string
+	ServerName             string
+	HTTPHost               string
+	CustomCABundlePath     string
+	RequestHeaders         map[string]string
+	CollectDNSDetails      bool
+	InspectBody            bool
 }
 
 // CheckView is a display-ready diagnostic step.

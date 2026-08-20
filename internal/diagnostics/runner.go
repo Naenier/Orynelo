@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/netip"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,6 +19,8 @@ import (
 	"github.com/Naenier/orynelo/internal/diagnostics/model"
 	"github.com/Naenier/orynelo/internal/diagnostics/summary"
 	"github.com/Naenier/orynelo/internal/privacy"
+	"github.com/Naenier/orynelo/internal/trust"
+	"golang.org/x/net/http/httpguts"
 )
 
 // InputError reports invalid user-controlled options.
@@ -94,12 +98,16 @@ func (r *Runner) Diagnose(ctx context.Context, options model.DiagnoseOptions, si
 	if err != nil {
 		return model.Diagnosis{}, err
 	}
+	options, err = prepareRuntimeOptions(options)
+	if err != nil {
+		return model.Diagnosis{}, err
+	}
 	delivery := newEventDispatcher(privacyEventSink(sink), r.now)
 	sink = delivery.Sink()
 	started := r.now()
 	diagnosis := model.Diagnosis{
 		ID:        newDiagnosisID(started),
-		Options:   options,
+		Options:   reportableOptions(options),
 		StartedAt: started,
 		Build:     r.build,
 	}
@@ -163,8 +171,10 @@ func (r *Runner) Diagnose(ctx context.Context, options model.DiagnoseOptions, si
 	// Never retain the raw target in a diagnosis because it can contain
 	// credentials or secret query values.
 	options.Target = parsed.Normalized
-	diagnosis.Options = options
+	diagnosis.Options = reportableOptions(options)
 	state := model.NewState(parsed, options)
+	state.SetNetworkPaths([]model.NetworkPath{initialDirectPath(parsed, options)})
+	sink = correlatedEventSink(sink, state)
 
 	runContext := ctx
 	cancel := func() {}
@@ -209,14 +219,25 @@ func (r *Runner) Diagnose(ctx context.Context, options model.DiagnoseOptions, si
 			SkipCheck:        skipInvalidProxyDirectCheck,
 			EventIndexOffset: planSize(mandatory),
 		})
+		proxySelected := state.Proxy().Selected
+		auxiliaryHTTPPreflight := parsed.Kind == model.TargetHTTP &&
+			(options.ProbeMode != model.ProbeModeAddressMatrix || proxySelected)
+		preflightSink := sink
+		if auxiliaryHTTPPreflight {
+			preflightSink = auxiliaryPreflightEventSink(sink, proxySelected)
+		}
 		preflightResults := preflightExecutor.Run(
 			preflightContext,
 			state,
 			auxiliary,
-			sink,
+			preflightSink,
 		)
 		cancelPreflight()
-		markProxyPreflightAuxiliary(preflightResults, state.Proxy())
+		if parsed.Kind == model.TargetHTTP && options.ProbeMode != model.ProbeModeAddressMatrix {
+			markHTTPPreflightAuxiliary(preflightResults, proxySelected)
+		} else if options.ProbeMode == model.ProbeModeAddressMatrix {
+			markProxyPreflightAuxiliary(preflightResults, state.Proxy())
+		}
 
 		actualExecutor := engine.New(engine.Config{
 			CheckTimeout:     options.CheckTimeout,
@@ -228,6 +249,7 @@ func (r *Runner) Diagnose(ctx context.Context, options model.DiagnoseOptions, si
 		diagnosis.Checks = append(mandatoryResults, preflightResults...)
 		diagnosis.Checks = append(diagnosis.Checks, actualResults...)
 	}
+	diagnosis.NetworkPaths, diagnosis.Checks = correlatedNetworkResult(state, diagnosis.Checks)
 	diagnosis.Summary = summary.Build(diagnosis.Checks)
 	diagnosis.FinishedAt = r.now()
 	diagnosis.Duration = diagnosis.FinishedAt.Sub(started)
@@ -237,6 +259,21 @@ func (r *Runner) Diagnose(ctx context.Context, options model.DiagnoseOptions, si
 		At:     diagnosis.FinishedAt,
 	})
 	return finishEventDelivery(delivery, diagnosis, nil)
+}
+
+func correlatedEventSink(sink model.EventSink, state *model.State) model.EventSink {
+	if sink == nil || state == nil {
+		return sink
+	}
+	return func(event model.CheckEvent) {
+		if event.Result != nil {
+			_, results := correlatedNetworkResult(state, []model.CheckResult{*event.Result})
+			if len(results) == 1 {
+				event.Result = &results[0]
+			}
+		}
+		emit(sink, event)
+	}
 }
 
 // Stream runs asynchronously and closes both returned channels on completion.
@@ -291,6 +328,33 @@ func normalizeOptions(options model.DiagnoseOptions) (model.DiagnoseOptions, err
 			Code:    "INVALID_IP_VERSION",
 			Message: fmt.Sprintf("invalid IP version %q", options.IPVersion),
 		}
+	}
+	if options.ProbeMode == "" {
+		options.ProbeMode = defaults.ProbeMode
+	}
+	options.ProbeMode = model.ProbeMode(
+		strings.ReplaceAll(strings.ToLower(strings.TrimSpace(string(options.ProbeMode))), "-", "_"),
+	)
+	if options.ProbeMode == "matrix" {
+		options.ProbeMode = model.ProbeModeAddressMatrix
+	}
+	if !options.ProbeMode.Valid() {
+		return options, &InputError{Code: "INVALID_PROBE_MODE", Message: "probe mode must be client_effective or address_matrix"}
+	}
+	if options.AddressLimit == 0 {
+		options.AddressLimit = defaults.AddressLimit
+	}
+	if options.AddressLimit < 1 || options.AddressLimit > 16 {
+		return options, &InputError{Code: "INVALID_ADDRESS_LIMIT", Message: "address limit must be between 1 and 16"}
+	}
+	if options.AddressMatrixBudget == 0 {
+		options.AddressMatrixBudget = defaults.AddressMatrixBudget
+	}
+	if options.AddressMatrixBudget < 0 || options.AddressMatrixBudget > maximumDiagnosticTimeout {
+		return options, &InputError{Code: "INVALID_ADDRESS_MATRIX_BUDGET", Message: "address matrix budget must be positive and at most 24h"}
+	}
+	if options.AddressMatrixBudget > options.Timeout {
+		options.AddressMatrixBudget = options.Timeout
 	}
 	if options.MaxRedirects < 0 || options.MaxRedirects > 50 {
 		return options, &InputError{Code: "INVALID_MAX_REDIRECTS", Message: "maximum redirects must be between 0 and 50"}
@@ -365,7 +429,127 @@ func normalizeOptions(options model.DiagnoseOptions) (model.DiagnoseOptions, err
 	if options.BodyLimit == 0 {
 		options.BodyLimit = defaults.BodyLimit
 	}
+	if options.ExpectedStatusMin == 0 {
+		options.ExpectedStatusMin = defaults.ExpectedStatusMin
+	}
+	if options.ExpectedStatusMax == 0 {
+		options.ExpectedStatusMax = defaults.ExpectedStatusMax
+	}
+	if options.ExpectedStatusMin < 100 || options.ExpectedStatusMin > 599 ||
+		options.ExpectedStatusMax < 100 || options.ExpectedStatusMax > 599 ||
+		options.ExpectedStatusMin > options.ExpectedStatusMax {
+		return options, &InputError{Code: "INVALID_EXPECTED_STATUS", Message: "expected HTTP status must be between 100 and 599"}
+	}
+	if options.LatencyThreshold < 0 || options.LatencyThreshold > maximumDiagnosticTimeout {
+		return options, &InputError{Code: "INVALID_LATENCY_THRESHOLD", Message: "latency threshold must be between zero and 24h"}
+	}
+	options.ConnectIP = strings.TrimSpace(options.ConnectIP)
+	if options.ConnectIP != "" {
+		address, parseErr := netip.ParseAddr(options.ConnectIP)
+		if parseErr != nil {
+			return options, &InputError{Code: "INVALID_CONNECT_IP", Message: "connect IP must be an IP literal"}
+		}
+		if address.Zone() != "" && (!address.Is6() || !address.IsLinkLocalUnicast()) {
+			return options, &InputError{Code: "INVALID_CONNECT_IP", Message: "an IPv6 zone is allowed only for a link-local address"}
+		}
+		if options.IPVersion == model.IPVersion4 && !address.Is4() ||
+			options.IPVersion == model.IPVersion6 && !address.Is6() {
+			return options, &InputError{Code: "INVALID_CONNECT_IP", Message: "connect IP does not match the selected IP version"}
+		}
+		options.ConnectIP = address.String()
+	}
+	options.ServerName = strings.TrimSuffix(strings.TrimSpace(options.ServerName), ".")
+	options.HTTPHost = strings.TrimSpace(options.HTTPHost)
+	if invalidEndpointIdentity(options.ServerName, false) || invalidEndpointIdentity(options.HTTPHost, true) {
+		return options, &InputError{Code: "INVALID_ENDPOINT_IDENTITY", Message: "SNI or HTTP Host override is invalid"}
+	}
+	headers, names, headerErr := normalizeRuntimeHeaders(options.RequestHeaders)
+	if headerErr != nil {
+		return options, headerErr
+	}
+	options.RequestHeaders = headers
+	options.RequestHeaderNames = names
 	return options, nil
+}
+
+var runnerManagedHeaders = map[string]struct{}{
+	"connection": {}, "content-length": {}, "host": {}, "keep-alive": {},
+	"proxy-authenticate": {}, "proxy-authorization": {}, "proxy-connection": {},
+	"te": {}, "trailer": {}, "transfer-encoding": {}, "upgrade": {},
+}
+
+func normalizeRuntimeHeaders(input map[string]string) (map[string]string, []string, error) {
+	if len(input) == 0 {
+		return nil, nil, nil
+	}
+	if len(input) > 16 {
+		return nil, nil, &InputError{Code: "INVALID_REQUEST_HEADERS", Message: "at most 16 one-time request headers are allowed"}
+	}
+	result := make(map[string]string, len(input))
+	total := 0
+	for name, value := range input {
+		name = strings.TrimSpace(name)
+		canonical := strings.ToLower(name)
+		if !httpguts.ValidHeaderFieldName(name) || !httpguts.ValidHeaderFieldValue(value) {
+			return nil, nil, &InputError{Code: "INVALID_REQUEST_HEADERS", Message: "one-time request headers are invalid"}
+		}
+		if _, forbidden := runnerManagedHeaders[canonical]; forbidden {
+			return nil, nil, &InputError{Code: "INVALID_REQUEST_HEADERS", Message: "one-time request header is managed by Orynelo"}
+		}
+		if _, duplicate := result[canonical]; duplicate {
+			return nil, nil, &InputError{Code: "INVALID_REQUEST_HEADERS", Message: "one-time request header is duplicated"}
+		}
+		total += len(name) + len(value)
+		if total > 8<<10 {
+			return nil, nil, &InputError{Code: "INVALID_REQUEST_HEADERS", Message: "one-time request headers exceed the 8 KiB limit"}
+		}
+		result[canonical] = value
+	}
+	names := make([]string, 0, len(result))
+	for name := range result {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return result, names, nil
+}
+
+func invalidEndpointIdentity(value string, allowPort bool) bool {
+	if value == "" {
+		return false
+	}
+	if len(value) > 512 || containsControl(value) || strings.ContainsAny(value, " /\\?#@") {
+		return true
+	}
+	return !allowPort && strings.Contains(value, ":")
+}
+
+func prepareRuntimeOptions(options model.DiagnoseOptions) (model.DiagnoseOptions, error) {
+	if options.Insecure && (options.CustomCABundlePath != "" || len(options.CustomCAPEM) > 0) {
+		return options, &InputError{Code: "INVALID_CA_BUNDLE", Message: "custom CA and insecure TLS mode are mutually exclusive"}
+	}
+	if options.CustomCABundlePath != "" {
+		content, err := trust.ReadBundle(options.CustomCABundlePath)
+		if err != nil {
+			return options, &InputError{Code: "INVALID_CA_BUNDLE", Message: "custom CA bundle could not be loaded"}
+		}
+		options.CustomCAPEM = content
+	}
+	if len(options.CustomCAPEM) > 0 {
+		if err := trust.ValidateBundle(options.CustomCAPEM); err != nil {
+			return options, &InputError{Code: "INVALID_CA_BUNDLE", Message: "custom CA bundle is invalid"}
+		}
+		options.CustomCAConfigured = true
+	}
+	return options, nil
+}
+
+func reportableOptions(options model.DiagnoseOptions) model.DiagnoseOptions {
+	result := options
+	result.CustomCABundlePath = ""
+	result.CustomCAPEM = nil
+	result.RequestHeaders = nil
+	result.RequestHeaderNames = append([]string(nil), options.RequestHeaderNames...)
+	return result
 }
 
 func splitPlanAtCheck(plan engine.Plan, checkID string) (engine.Plan, engine.Plan) {
@@ -438,21 +622,46 @@ func markProxyPreflightAuxiliary(results []model.CheckResult, proxy model.ProxyI
 	if !proxy.Selected {
 		return
 	}
+	markHTTPPreflightAuxiliary(results, true)
+}
+
+func markHTTPPreflightAuxiliary(results []model.CheckResult, proxySelected bool) {
 	for index := range results {
 		switch results[index].ID {
 		case "dns", "route", "tcp", "tls":
 			results[index].Role = model.CheckRoleAuxiliaryDirectComparison
+			message := "This short-lived direct preflight is separate from the connection selected by the actual HTTP transport."
+			route := "direct_origin_preflight"
+			if proxySelected {
+				message = "This direct-origin probe is an auxiliary comparison, not the selected proxy route."
+				route = "direct_origin_comparison"
+			}
 			results[index].Evidence = append(results[index].Evidence, model.Evidence{
 				ID:      results[index].ID + ".auxiliary_role",
 				CheckID: results[index].ID,
 				Code:    "AUXILIARY_DIRECT_COMPARISON",
-				Message: "This direct-origin probe is an auxiliary comparison, not the selected proxy route.",
+				Message: message,
 				Details: map[string]string{
 					"role":  string(model.CheckRoleAuxiliaryDirectComparison),
-					"route": "direct_origin_comparison",
+					"route": route,
 				},
 			})
 		}
+	}
+}
+
+func auxiliaryPreflightEventSink(sink model.EventSink, proxySelected bool) model.EventSink {
+	if sink == nil {
+		return nil
+	}
+	return func(event model.CheckEvent) {
+		if event.Result != nil {
+			result := *event.Result
+			values := []model.CheckResult{result}
+			markHTTPPreflightAuxiliary(values, proxySelected)
+			event.Result = &values[0]
+		}
+		emit(sink, event)
 	}
 }
 
@@ -460,6 +669,24 @@ func skipInvalidProxyDirectCheck(
 	state *model.State,
 	check model.Check,
 ) (model.CheckResult, bool) {
+	if state.Proxy().Selected && state.Options.ProbeMode != model.ProbeModeAddressMatrix {
+		switch check.ID() {
+		case "dns", "route", "tcp", "tls":
+			return model.CheckResult{
+				ID:          check.ID(),
+				Name:        check.Name(),
+				Status:      model.StatusSkipped,
+				Summary:     "The direct-origin comparison was not selected in client-effective proxy mode.",
+				NetworkRefs: []model.NetworkRef{{PathID: directPathID, HopID: originHopID}},
+				Evidence: []model.Evidence{{
+					ID:         check.ID() + ".client_effective_proxy",
+					Code:       "DIRECT_PROBE_NOT_SELECTED",
+					Message:    "Only the actual proxy route was exercised; enable address-matrix mode for a direct-origin comparison.",
+					NetworkRef: &model.NetworkRef{PathID: directPathID, HopID: originHopID},
+				}},
+			}, true
+		}
+	}
 	validity := state.Proxy().Selection.Validity
 	if validity != model.ProxyValidityInvalid && validity != "" {
 		return model.CheckResult{}, false

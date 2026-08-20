@@ -57,7 +57,8 @@ func TestCheckFamilyRequirements(t *testing.T) {
 			mode:   model.IPVersionAuto,
 			values: map[string][]net.IP{"ip4": {net.ParseIP("192.0.2.1")}},
 			errs:   map[string]error{"ip6": &net.DNSError{Err: "no such host"}},
-			status: model.StatusPassed,
+			status: model.StatusWarning,
+			code:   ErrorPartialFailure,
 		},
 		{
 			name:   "IPv6 requires AAAA",
@@ -71,7 +72,7 @@ func TestCheckFamilyRequirements(t *testing.T) {
 			mode:   model.IPVersion4,
 			values: map[string][]net.IP{"ip4": {}},
 			status: model.StatusFailed,
-			code:   ErrorNoRecords,
+			code:   ErrorNoData,
 		},
 	}
 	for _, test := range tests {

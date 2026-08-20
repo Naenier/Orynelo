@@ -1,20 +1,30 @@
 // Package route discovers the local source address and interface selected for
-// each remote address without requiring raw sockets or elevated privileges.
+// each bounded remote candidate without raw sockets or elevated privileges.
 package route
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
+	"strings"
 	"sync"
+	"time"
 
+	dnscheck "github.com/Naenier/orynelo/internal/diagnostics/checks/dns"
 	"github.com/Naenier/orynelo/internal/diagnostics/model"
 )
 
 const (
-	ErrorDiscoveryFailed = "ROUTE_DISCOVERY_FAILED"
-	ErrorCancelled       = "ROUTE_CANCELLED"
+	ErrorDiscoveryFailed  = "ROUTE_DISCOVERY_FAILED"
+	ErrorAttemptTimeout   = "ROUTE_ATTEMPT_TIMEOUT"
+	ErrorInterfacePartial = "ROUTE_INTERFACE_PARTIAL"
+	ErrorCancelled        = "ROUTE_CANCELLED"
+
+	directPathID = "path-direct"
+	originHopID  = "hop-origin"
 )
 
 // SourceDiscoverer determines the local source IP for a remote endpoint.
@@ -22,14 +32,31 @@ type SourceDiscoverer interface {
 	SourceIP(ctx context.Context, remote net.IP, port uint16) (net.IP, error)
 }
 
+type zonedSourceDiscoverer interface {
+	SourceIPInZone(ctx context.Context, remote net.IP, zone string, port uint16) (net.IP, error)
+}
+
 type udpDiscoverer struct{}
 
 // SourceIP discovers the local source address selected for a remote endpoint.
 func (udpDiscoverer) SourceIP(ctx context.Context, remote net.IP, port uint16) (net.IP, error) {
+	return udpDiscoverer{}.SourceIPInZone(ctx, remote, "", port)
+}
+
+func (udpDiscoverer) SourceIPInZone(
+	ctx context.Context,
+	remote net.IP,
+	zone string,
+	port uint16,
+) (net.IP, error) {
+	host := remote.String()
+	if zone != "" {
+		host += "%" + zone
+	}
 	connection, err := (&net.Dialer{}).DialContext(
 		ctx,
 		"udp",
-		net.JoinHostPort(remote.String(), strconv.Itoa(int(port))),
+		net.JoinHostPort(host, strconv.Itoa(int(port))),
 	)
 	if err != nil {
 		return nil, err
@@ -42,15 +69,30 @@ func (udpDiscoverer) SourceIP(ctx context.Context, remote net.IP, port uint16) (
 	return append(net.IP(nil), address.IP...), nil
 }
 
-// Check performs cross-platform source and interface discovery.
+// Check performs cross-platform source and interface discovery. Interfaces
+// and their addresses are snapshotted exactly once per Run.
 type Check struct {
-	Discoverer SourceDiscoverer
-	Interfaces func() ([]net.Interface, error)
+	Discoverer     SourceDiscoverer
+	Interfaces     func() ([]net.Interface, error)
+	InterfaceAddrs func(net.Interface) ([]net.Addr, error)
+	Now            func() time.Time
 }
 
 type routeSlot struct {
 	result  model.RouteInfo
+	attempt model.NetworkAttempt
 	started bool
+}
+
+type interfaceEntry struct {
+	interfaceInfo net.Interface
+	addresses     []net.IP
+}
+
+type interfaceSnapshot struct {
+	entries       []interfaceEntry
+	errors        []string
+	omittedErrors int
 }
 
 // New constructs a route check using UDP route selection and net.Interfaces.
@@ -58,7 +100,14 @@ func New(discoverer SourceDiscoverer) *Check {
 	if discoverer == nil {
 		discoverer = udpDiscoverer{}
 	}
-	return &Check{Discoverer: discoverer, Interfaces: net.Interfaces}
+	return &Check{
+		Discoverer: discoverer,
+		Interfaces: net.Interfaces,
+		InterfaceAddrs: func(value net.Interface) ([]net.Addr, error) {
+			return value.Addrs()
+		},
+		Now: time.Now,
+	}
 }
 
 // ID returns the stable diagnostic identifier.
@@ -67,27 +116,46 @@ func (*Check) ID() string { return "route" }
 // Name returns the human-readable check name.
 func (*Check) Name() string { return "Route and source address" }
 
-// Run discovers source addresses and interface metadata for each remote address.
+// Run discovers source addresses and interface metadata for the bounded
+// candidates selected by the shared DNS address policy.
 func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
-	dnsResult := state.DNS()
-	addresses := usableAddresses(dnsResult.IPv4, dnsResult.IPv6)
+	selection := dnscheck.SelectAddresses(state.DNS(), state.Options)
+	addresses := selection.Addresses
 	if len(addresses) == 0 {
 		return model.CheckResult{
 			ID:      c.ID(),
 			Name:    c.Name(),
 			Status:  model.StatusSkipped,
-			Summary: "Route discovery was skipped because no remote addresses are available.",
+			Summary: "Route discovery was skipped because no selected remote addresses are available.",
+		}
+	}
+	if ctx.Err() != nil {
+		return c.result(nil, len(addresses), true, interfaceSnapshot{}, selection, state.Options)
+	}
+
+	interfaces := c.snapshotInterfaces()
+	slots := make([]routeSlot, len(addresses))
+	for index, remote := range addresses {
+		ref := routeNetworkRef(index)
+		slots[index] = routeSlot{
+			result: model.RouteInfo{
+				NetworkRef: ref,
+				RemoteIP:   append(net.IP(nil), remote...),
+				Family:     family(remote),
+				State:      model.AttemptStateQueued,
+			},
+			attempt: model.NetworkAttempt{
+				ID:       ref.AttemptID,
+				PathID:   ref.PathID,
+				HopID:    ref.HopID,
+				Kind:     model.NetworkAttemptRoute,
+				State:    model.AttemptStateQueued,
+				Network:  network(remote),
+				RemoteIP: append(net.IP(nil), remote...),
+			},
 		}
 	}
 
-	slots := make([]routeSlot, len(addresses))
-	for index, remote := range addresses {
-		slots[index].result = model.RouteInfo{
-			RemoteIP: append(net.IP(nil), remote...),
-			Family:   family(remote),
-			State:    model.AttemptStateQueued,
-		}
-	}
 	jobs := make(chan int)
 	workers := state.Options.MaxConcurrency
 	if workers < 1 {
@@ -96,37 +164,14 @@ func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 	if workers > len(addresses) {
 		workers = len(addresses)
 	}
+	attemptBudget := routeAttemptBudget(state.Options)
 	var wait sync.WaitGroup
 	wait.Add(workers)
 	for range workers {
 		go func() {
 			defer wait.Done()
 			for index := range jobs {
-				remote := addresses[index]
-				result := slots[index].result
-				result.State = model.AttemptStateRunning
-				slots[index] = routeSlot{result: result, started: true}
-				local, err := c.Discoverer.SourceIP(ctx, remote, state.Target.Port)
-				if err != nil {
-					result.Error = err.Error()
-					result.State = model.AttemptStateCompleted
-					if ctx.Err() != nil {
-						result.State = model.AttemptStateCancelled
-					}
-					slots[index] = routeSlot{result: result, started: true}
-					continue
-				}
-				result.LocalIP = local
-				iface, err := c.interfaceFor(local)
-				if err != nil {
-					result.Error = err.Error()
-				} else if iface != nil {
-					result.InterfaceName = iface.Name
-					result.InterfaceUp = iface.Flags&net.FlagUp != 0
-					result.MTU = iface.MTU
-				}
-				result.State = model.AttemptStateCompleted
-				slots[index] = routeSlot{result: result, started: true}
+				c.runAttempt(ctx, state, interfaces, slots, index, attemptBudget)
 			}
 		}()
 	}
@@ -150,149 +195,213 @@ func (c *Check) Run(ctx context.Context, state *model.State) model.CheckResult {
 	if ctx.Err() != nil {
 		cancelled = true
 	}
-	results := startedRoutes(slots)
+	results, attempts := startedRoutes(slots)
 	state.SetRoutes(results)
-	return c.result(results, len(addresses), cancelled)
+	recordRouteAttempts(state, attempts)
+	return c.result(results, len(addresses), cancelled, interfaces, selection, state.Options)
 }
 
-func (c *Check) result(results []model.RouteInfo, total int, cancelled bool) model.CheckResult {
-	sources := 0
-	complete := 0
-	completedAttempts := 0
-	evidence := make([]model.Evidence, 0, len(results))
-	for index, result := range results {
-		if result.RemoteIP == nil ||
-			result.State == model.AttemptStateQueued ||
-			result.State == model.AttemptStateSkipped {
-			continue
-		}
-		details := map[string]string{
-			"remoteIp": result.RemoteIP.String(),
-			"family":   result.Family,
-			"state":    string(result.State),
-		}
-		message := "Route source discovery failed."
-		if result.LocalIP != nil {
-			sources++
-			message = "The operating system selected a local source address."
-			details["localIp"] = result.LocalIP.String()
-			details["interface"] = result.InterfaceName
-			details["interfaceUp"] = strconv.FormatBool(result.InterfaceUp)
-			details["mtu"] = strconv.Itoa(result.MTU)
-			if result.Error == "" {
-				complete++
-			} else {
-				message = "A local source address was selected, but interface metadata is incomplete."
-				details["interfaceError"] = result.Error
-			}
-		} else if result.Error != "" {
-			details["error"] = result.Error
-		}
-		switch result.State {
-		case model.AttemptStateCancelled:
-			message = "Route source discovery was cancelled after it started."
-		case model.AttemptStateCompleted:
-			completedAttempts++
-		}
-		evidence = append(evidence, model.Evidence{
-			ID:      fmt.Sprintf("route.%d", index),
-			Code:    "ROUTE_SOURCE",
-			Message: message,
-			Details: details,
-		})
+func (c *Check) runAttempt(
+	parent context.Context,
+	state *model.State,
+	interfaces interfaceSnapshot,
+	slots []routeSlot,
+	index int,
+	budget time.Duration,
+) {
+	remote := slots[index].result.RemoteIP
+	result := slots[index].result
+	attempt := slots[index].attempt
+	result.State = model.AttemptStateRunning
+	attempt.State = model.AttemptStateRunning
+	attempt.StartedAt = c.now()
+	slots[index] = routeSlot{result: result, attempt: attempt, started: true}
+
+	attemptContext := parent
+	cancel := func() {}
+	if budget > 0 {
+		attemptContext, cancel = context.WithTimeout(parent, budget)
 	}
-	if cancelled {
-		neverStarted := total - len(results)
-		if neverStarted < 0 {
-			neverStarted = 0
+	defer cancel()
+	var local net.IP
+	var err error
+	zone := routeZone(state, remote)
+	if discoverer, ok := c.Discoverer.(zonedSourceDiscoverer); ok && zone != "" {
+		local, err = discoverer.SourceIPInZone(attemptContext, remote, zone, state.Target.Port)
+	} else {
+		local, err = c.Discoverer.SourceIP(attemptContext, remote, state.Target.Port)
+	}
+	attempt.FinishedAt = c.now()
+	attempt.Duration = attempt.FinishedAt.Sub(attempt.StartedAt)
+	if err != nil {
+		result.Error = err.Error()
+		attempt.Error = err.Error()
+		attempt.ErrorCode = ErrorDiscoveryFailed
+		result.State = model.AttemptStateCompleted
+		attempt.State = model.AttemptStateCompleted
+		if parent.Err() != nil {
+			result.State = model.AttemptStateCancelled
+			attempt.State = model.AttemptStateCancelled
+			attempt.ErrorCode = ErrorCancelled
+		} else if errors.Is(attemptContext.Err(), context.DeadlineExceeded) {
+			attempt.ErrorCode = ErrorAttemptTimeout
 		}
-		return model.CheckResult{
-			ID:        c.ID(),
-			Name:      c.Name(),
-			Status:    model.StatusCancelled,
-			Summary:   fmt.Sprintf("Route discovery was cancelled after %d of %d started attempt(s) completed; %d of %d address(es) were never started.", completedAttempts, len(results), neverStarted, total),
-			Evidence:  evidence,
-			ErrorCode: ErrorCancelled,
-		}
+		slots[index] = routeSlot{result: result, attempt: attempt, started: true}
+		return
 	}
 
-	status := model.StatusPassed
-	summary := fmt.Sprintf("Discovered a source address for %d of %d remote address(es).", sources, len(results))
-	errorCode := ""
-	if complete < len(results) {
-		status = model.StatusWarning
-		errorCode = ErrorDiscoveryFailed
+	result.LocalIP = append(net.IP(nil), local...)
+	attempt.LocalAddr = local.String()
+	iface, interfaceErr := interfaceFor(interfaces, local)
+	if interfaceErr != nil {
+		result.Error = interfaceErr.Error()
+		attempt.Error = interfaceErr.Error()
+		attempt.ErrorCode = ErrorDiscoveryFailed
+	} else if iface != nil {
+		result.InterfaceName = iface.Name
+		result.InterfaceUp = iface.Flags&net.FlagUp != 0
+		result.MTU = iface.MTU
+		attempt.InterfaceName = result.InterfaceName
+		attempt.InterfaceUp = result.InterfaceUp
+		attempt.MTU = result.MTU
 	}
-	if sources == 0 {
-		summary = "No local source address could be discovered for the resolved addresses."
-	}
-	return model.CheckResult{
-		ID:        c.ID(),
-		Name:      c.Name(),
-		Status:    status,
-		Summary:   summary,
-		Evidence:  evidence,
-		ErrorCode: errorCode,
-	}
+	result.State = model.AttemptStateCompleted
+	attempt.State = model.AttemptStateCompleted
+	slots[index] = routeSlot{result: result, attempt: attempt, started: true}
 }
 
-func startedRoutes(slots []routeSlot) []model.RouteInfo {
-	results := make([]model.RouteInfo, 0, len(slots))
-	for _, slot := range slots {
-		if slot.started {
-			results = append(results, slot.result)
-		}
+func routeZone(state *model.State, remote net.IP) string {
+	if state == nil || remote == nil {
+		return ""
 	}
-	return results
+	if configured, err := netip.ParseAddr(state.Options.ConnectIP); err == nil &&
+		configured.Zone() != "" && remote.Equal(net.IP(configured.AsSlice())) {
+		return configured.Zone()
+	}
+	if state.Target.Zone != "" && remote.Equal(net.ParseIP(state.Target.Host)) {
+		return state.Target.Zone
+	}
+	return ""
 }
 
-func usableAddresses(groups ...[]net.IP) []net.IP {
-	var addresses []net.IP
-	for _, group := range groups {
-		for _, address := range group {
-			if address == nil || address.To16() == nil {
-				continue
-			}
-			addresses = append(addresses, append(net.IP(nil), address...))
-		}
-	}
-	return addresses
-}
-
-func (c *Check) interfaceFor(local net.IP) (*net.Interface, error) {
+func (c *Check) snapshotInterfaces() interfaceSnapshot {
 	interfaces := c.Interfaces
 	if interfaces == nil {
 		interfaces = net.Interfaces
 	}
 	all, err := interfaces()
 	if err != nil {
-		return nil, err
+		return interfaceSnapshot{errors: []string{boundedError(err.Error())}}
 	}
-	for index := range all {
-		addresses, err := all[index].Addrs()
-		if err != nil {
+	addrs := c.InterfaceAddrs
+	if addrs == nil {
+		addrs = func(value net.Interface) ([]net.Addr, error) { return value.Addrs() }
+	}
+	snapshot := interfaceSnapshot{entries: make([]interfaceEntry, 0, len(all))}
+	for _, iface := range all {
+		addresses, addressErr := addrs(iface)
+		if addressErr != nil {
+			if len(snapshot.errors) < 16 {
+				snapshot.errors = append(
+					snapshot.errors,
+					boundedError(fmt.Sprintf("interface %q: %v", iface.Name, addressErr)),
+				)
+			} else {
+				snapshot.omittedErrors++
+			}
 			continue
 		}
+		entry := interfaceEntry{interfaceInfo: iface}
 		for _, address := range addresses {
-			var candidate net.IP
-			switch value := address.(type) {
-			case *net.IPNet:
-				candidate = value.IP
-			case *net.IPAddr:
-				candidate = value.IP
-			default:
-				ip, _, parseErr := net.ParseCIDR(address.String())
-				if parseErr == nil {
-					candidate = ip
-				}
+			if candidate := addressIP(address); candidate != nil {
+				entry.addresses = append(entry.addresses, candidate)
 			}
-			if candidate != nil && candidate.Equal(local) {
-				copy := all[index]
+		}
+		snapshot.entries = append(snapshot.entries, entry)
+	}
+	return snapshot
+}
+
+func boundedError(value string) string {
+	const maximumRunes = 512
+	runes := []rune(value)
+	if len(runes) <= maximumRunes {
+		return value
+	}
+	return string(runes[:maximumRunes]) + "…"
+}
+
+func interfaceFor(snapshot interfaceSnapshot, local net.IP) (*net.Interface, error) {
+	for _, entry := range snapshot.entries {
+		for _, candidate := range entry.addresses {
+			if candidate.Equal(local) {
+				copy := entry.interfaceInfo
 				return &copy, nil
 			}
 		}
 	}
+	if len(snapshot.errors) > 0 {
+		return nil, fmt.Errorf(
+			"no enumerated interface owns local address %s; interface metadata was incomplete",
+			local,
+		)
+	}
 	return nil, fmt.Errorf("no interface owns local address %s", local)
+}
+
+func addressIP(address net.Addr) net.IP {
+	switch value := address.(type) {
+	case *net.IPNet:
+		return append(net.IP(nil), value.IP...)
+	case *net.IPAddr:
+		return append(net.IP(nil), value.IP...)
+	case nil:
+		return nil
+	default:
+		ip, _, err := net.ParseCIDR(address.String())
+		if err == nil {
+			return ip
+		}
+		return net.ParseIP(strings.TrimSpace(address.String()))
+	}
+}
+
+func startedRoutes(slots []routeSlot) ([]model.RouteInfo, []model.NetworkAttempt) {
+	results := make([]model.RouteInfo, 0, len(slots))
+	attempts := make([]model.NetworkAttempt, 0, len(slots))
+	for _, slot := range slots {
+		if slot.started {
+			results = append(results, slot.result)
+			attempts = append(attempts, slot.attempt)
+		}
+	}
+	return results, attempts
+}
+
+func routeAttemptBudget(options model.DiagnoseOptions) time.Duration {
+	if options.ProbeMode != model.ProbeModeAddressMatrix || options.AddressMatrixBudget <= 0 {
+		return options.CheckTimeout
+	}
+	limit := options.AddressLimit
+	if limit <= 0 {
+		limit = model.DefaultDiagnoseOptions("").AddressLimit
+	}
+	budget := options.AddressMatrixBudget / time.Duration(limit)
+	if options.CheckTimeout > 0 && budget > options.CheckTimeout {
+		budget = options.CheckTimeout
+	}
+	if budget <= 0 {
+		return time.Nanosecond
+	}
+	return budget
+}
+
+func routeNetworkRef(index int) *model.NetworkRef {
+	return &model.NetworkRef{
+		PathID:    directPathID,
+		HopID:     originHopID,
+		AttemptID: fmt.Sprintf("attempt-route-%03d", index),
+	}
 }
 
 func family(ip net.IP) string {
@@ -300,4 +409,18 @@ func family(ip net.IP) string {
 		return "ipv4"
 	}
 	return "ipv6"
+}
+
+func network(ip net.IP) string {
+	if ip.To4() != nil {
+		return "udp4"
+	}
+	return "udp6"
+}
+
+func (c *Check) now() time.Time {
+	if c.Now != nil {
+		return c.Now()
+	}
+	return time.Now()
 }
