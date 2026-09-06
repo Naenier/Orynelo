@@ -1,25 +1,33 @@
 package components
 
 import (
+	"fmt"
 	"time"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/Naenier/orynelo/internal/gui/localization"
 )
 
-// TimingSegment is one measured stage in a diagnostic request.
+// TimingSegment is one attributable phase placed on a real elapsed-time axis.
+// Timestamp-free legacy measurements remain visible as unplaced text and are
+// never misrepresented as a percentage of total duration.
 type TimingSegment struct {
-	Name     string
-	Duration time.Duration
-	Measured bool
-	IsTotal  bool
+	Name       string
+	Duration   time.Duration
+	Measured   bool
+	IsTotal    bool
+	StartedAt  time.Time
+	FinishedAt time.Time
+	AttemptID  string
+	Reused     bool
 }
 
-// TimingWaterfall is a lightweight timing visualization made from native Fyne
-// widgets. Text is always present, so timing is not communicated by color alone.
+// TimingWaterfall renders one lane per measured phase using actual offsets.
 type TimingWaterfall struct {
 	*fyne.Container
 	segments []TimingSegment
@@ -34,65 +42,113 @@ func NewTimingWaterfall(texts localization.Catalog) *TimingWaterfall {
 	return w
 }
 
-// SetSegments replaces the displayed measurements.
+// SetSegments replaces the displayed measurements and derives one common
+// origin/span from real timestamps, preserving overlaps and reused attempts.
 func (w *TimingWaterfall) SetSegments(segments []TimingSegment) {
 	w.segments = append(w.segments[:0], segments...)
-
-	var total time.Duration
+	var origin, finish time.Time
 	for _, segment := range segments {
-		if segment.IsTotal && segment.Measured && segment.Duration > 0 {
-			total = segment.Duration
-			break
+		if !segment.Measured || segment.StartedAt.IsZero() || segment.FinishedAt.IsZero() {
+			continue
+		}
+		if origin.IsZero() || segment.StartedAt.Before(origin) {
+			origin = segment.StartedAt
+		}
+		if finish.IsZero() || segment.FinishedAt.After(finish) {
+			finish = segment.FinishedAt
 		}
 	}
-	if total <= 0 {
-		for _, segment := range segments {
-			if segment.Measured && segment.Duration > total {
-				total = segment.Duration
-			}
-		}
+	span := finish.Sub(origin)
+	rows := make([]fyne.CanvasObject, 0, len(segments)+1)
+	if span > 0 {
+		axis := widget.NewLabel(fmt.Sprintf(
+			w.texts.Text(localization.TimingAxisFormat),
+			localization.FormatDuration(w.texts, span),
+		))
+		axis.Alignment = fyne.TextAlignTrailing
+		axis.Importance = widget.LowImportance
+		rows = append(rows, axis)
 	}
-
-	rows := make([]fyne.CanvasObject, 0, len(segments))
 	for _, segment := range segments {
+		if !segment.Measured {
+			continue
+		}
 		duration := segment.Duration
-		if duration < 0 {
-			duration = 0
+		if !segment.StartedAt.IsZero() && !segment.FinishedAt.IsZero() {
+			duration = segment.FinishedAt.Sub(segment.StartedAt)
 		}
-		progress := widget.NewProgressBar()
-		progress.Min = 0
-		progress.Max = 1
-		if segment.Measured && total > 0 {
-			progress.Value = float64(duration) / float64(total)
-			if progress.Value > progress.Max {
-				progress.Value = progress.Max
-			}
+		nameText := segment.Name
+		if segment.AttemptID != "" {
+			nameText += " · " + segment.AttemptID
 		}
-		progress.TextFormatter = func() string {
-			return ""
+		if segment.Reused {
+			nameText += " · " + w.texts.Text(localization.TimingReused)
 		}
-		durationText := w.texts.Text(localization.TimingNotMeasured)
-		if segment.Measured {
-			durationText = formatDuration(duration)
-		}
-		name := widget.NewLabelWithStyle(
-			segment.Name,
-			fyne.TextAlignLeading,
-			fyne.TextStyle{Bold: segment.IsTotal},
-		)
-		measured := widget.NewLabel(durationText)
+		name := widget.NewLabel(nameText)
+		name.Truncation = fyne.TextTruncateEllipsis
+		measured := widget.NewLabel(localization.FormatDuration(w.texts, nonNegativeDuration(duration)))
 		measured.Alignment = fyne.TextAlignTrailing
-		rows = append(
-			rows,
-			container.NewBorder(nil, nil, name, measured, progress),
-		)
+		if span <= 0 || segment.StartedAt.IsZero() || segment.FinishedAt.IsZero() {
+			rows = append(rows, container.NewBorder(nil, nil, name, measured))
+			continue
+		}
+		bar := canvas.NewRectangle(theme.PrimaryColor())
+		bar.CornerRadius = theme.Padding()
+		bar.SetMinSize(fyne.NewSize(2, theme.Padding()*2))
+		rows = append(rows, container.New(waterfallRowLayout{
+			offset:   segment.StartedAt.Sub(origin),
+			duration: duration,
+			span:     span,
+		}, name, bar, measured))
 	}
-
 	if len(rows) == 0 {
 		rows = append(rows, widget.NewLabel(w.texts.Text(localization.TimingNoData)))
 	}
 	w.Objects = rows
 	w.Refresh()
+}
+
+type waterfallRowLayout struct {
+	offset   time.Duration
+	duration time.Duration
+	span     time.Duration
+}
+
+func (l waterfallRowLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	if len(objects) != 3 {
+		return
+	}
+	pad := theme.Padding()
+	left := fyne.Min(float32(220), size.Width*.34)
+	right := fyne.Min(float32(110), size.Width*.22)
+	trackX := left + pad
+	trackWidth := fyne.Max(1, size.Width-left-right-2*pad)
+	objects[0].Move(fyne.NewPos(0, 0))
+	objects[0].Resize(fyne.NewSize(left, size.Height))
+	start, width := float32(0), float32(1)
+	if l.span > 0 {
+		start = float32(float64(l.offset)/float64(l.span)) * trackWidth
+		width = fyne.Max(2, float32(float64(nonNegativeDuration(l.duration))/float64(l.span))*trackWidth)
+	}
+	objects[1].Move(fyne.NewPos(trackX+start, size.Height*.3))
+	objects[1].Resize(fyne.NewSize(fyne.Min(width, trackWidth-start), size.Height*.4))
+	objects[2].Move(fyne.NewPos(size.Width-right, 0))
+	objects[2].Resize(fyne.NewSize(right, size.Height))
+}
+
+func (waterfallRowLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	height := float32(28)
+	for _, object := range objects {
+		height = fyne.Max(height, object.MinSize().Height)
+	}
+	return fyne.NewSize(360, height)
+}
+
+func nonNegativeDuration(value time.Duration) time.Duration {
+	if value < 0 {
+		return 0
+	}
+	return value
 }
 
 // formatDuration renders compact, human-readable timing labels.

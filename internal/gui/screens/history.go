@@ -48,7 +48,7 @@ type HistoryScreen struct {
 	search       *widget.Entry
 	status       *widget.Select
 	order        *widget.Select
-	list         *widget.List
+	list         *components.ActionList
 	listPane     fyne.CanvasObject
 	columnLayout *historyColumnsLayout
 	message      *widget.Label
@@ -94,7 +94,8 @@ func NewHistory(texts localization.Catalog, actions HistoryActions) *HistoryScre
 	s.message.Wrapping = fyne.TextWrapWord
 	s.message.Hide()
 
-	s.list = widget.NewList(
+	s.list = components.NewActionList(
+		s.texts.Text(localization.NavigationHistory),
 		func() int { return len(s.filtered) },
 		func() fyne.CanvasObject {
 			status := components.NewStatusBadge(
@@ -124,9 +125,7 @@ func NewHistory(texts localization.Catalog, actions HistoryActions) *HistoryScre
 			row := s.filtered[id]
 			cell := object.(*fyne.Container)
 			status := cell.Objects[2].(*components.StatusBadge)
-			cell.Objects[0].(*widget.Label).SetText(
-				row.Date.Local().Format("2006-01-02 15:04:05"),
-			)
+			cell.Objects[0].(*widget.Label).SetText(localization.FormatTime(s.texts, row.Date))
 			cell.Objects[1].(*widget.Label).SetText(row.Target)
 			status.Set(
 				row.Status,
@@ -141,6 +140,19 @@ func NewHistory(texts localization.Catalog, actions HistoryActions) *HistoryScre
 			cell.Objects[4].(*widget.Label).SetText(row.Version)
 		},
 	)
+	s.list.ItemAccessibilityLabel = func(id widget.ListItemID) string {
+		if id < 0 || id >= len(s.filtered) {
+			return ""
+		}
+		row := s.filtered[id]
+		return strings.Join([]string{
+			row.Date.Local().Format("2006-01-02 15:04:05"),
+			row.Target,
+			s.texts.Text(localization.StatusKey(row.Status)),
+			formatViewDuration(s.texts, row.Duration),
+			row.Version,
+		}, ", ")
+	}
 	headers := make([]fyne.CanvasObject, 0, 5)
 	for _, text := range []string{
 		s.texts.Text(localization.HistoryColumnDate),
@@ -177,6 +189,12 @@ func NewHistory(texts localization.Catalog, actions HistoryActions) *HistoryScre
 		}
 		s.selected = -1
 		s.updateActionState()
+	}
+	s.list.OnActivated = func(id widget.ListItemID) {
+		if id < 0 || id >= len(s.filtered) || actions.Open == nil {
+			return
+		}
+		actions.Open(s.filtered[id])
 	}
 
 	s.refresh = widget.NewButtonWithIcon(

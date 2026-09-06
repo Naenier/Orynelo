@@ -28,6 +28,9 @@ var (
 	ErrNilTask = errors.New("taskrunner: task is nil")
 	// ErrInvalidOperationClass reports an unsupported scheduling class.
 	ErrInvalidOperationClass = errors.New("taskrunner: invalid operation class")
+	// ErrOperationInProgress prevents a repeated destructive action from being
+	// queued while an earlier mutation in the same scope is still active.
+	ErrOperationInProgress = errors.New("taskrunner: operation is already in progress")
 )
 
 // Dispatcher schedules a callback on the GUI thread. In production Fyne code,
@@ -420,8 +423,26 @@ func (scope *Scope[T]) StartMutationOperation(task OperationTask[T]) (OperationI
 	return scope.start(MutationOperation, task)
 }
 
+// StartExclusiveMutation accepts a mutation only when this scope has no
+// currently loading mutation. It is intended for buttons such as Save,
+// Delete, and Retry where double activation must not duplicate side effects.
+func (scope *Scope[T]) StartExclusiveMutation(task Task[T]) (OperationID, error) {
+	if task == nil {
+		return 0, ErrNilTask
+	}
+	return scope.startExclusive(MutationOperation, func(ctx context.Context, _ OperationID) (T, error) { return task(ctx) })
+}
+
+func (scope *Scope[T]) startExclusive(class OperationClass, task OperationTask[T]) (OperationID, error) {
+	return scope.startWithPolicy(class, task, true)
+}
+
 // start replaces the current generation and schedules its loading transition.
 func (scope *Scope[T]) start(class OperationClass, task OperationTask[T]) (OperationID, error) {
+	return scope.startWithPolicy(class, task, false)
+}
+
+func (scope *Scope[T]) startWithPolicy(class OperationClass, task OperationTask[T], exclusive bool) (OperationID, error) {
 	if task == nil {
 		return 0, ErrNilTask
 	}
@@ -433,6 +454,10 @@ func (scope *Scope[T]) start(class OperationClass, task OperationTask[T]) (Opera
 	if scope.closed {
 		scope.mu.Unlock()
 		return 0, ErrScopeClosed
+	}
+	if exclusive && scope.snapshot.State == StateLoading && scope.snapshot.Class == MutationOperation {
+		scope.mu.Unlock()
+		return 0, ErrOperationInProgress
 	}
 	if scope.cancel != nil {
 		scope.cancel()

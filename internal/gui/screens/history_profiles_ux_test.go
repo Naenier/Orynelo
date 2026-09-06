@@ -9,6 +9,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/Naenier/orynelo/internal/gui/components"
 	"github.com/Naenier/orynelo/internal/gui/localization"
 	"github.com/Naenier/orynelo/internal/gui/presenter"
 )
@@ -272,14 +273,15 @@ func TestProfilesToolbarEmptyStateAndSelectionActions(t *testing.T) {
 
 	item := screen.list.CreateItem()
 	screen.list.UpdateItem(0, item)
-	target := item.(*fyne.Container).Objects[1].(*widget.Label)
+	content := item.(*components.ActionRow).Content.(*fyne.Container)
+	target := content.Objects[1].(*widget.Label)
 	if target.Text != "Target: https://prod.example" {
 		t.Fatalf("profile target row = %q", target.Text)
 	}
 	if target.Truncation != fyne.TextTruncateEllipsis {
 		t.Fatal("long profile targets are not truncated safely")
 	}
-	settings := item.(*fyne.Container).Objects[2].(*widget.Label)
+	settings := content.Objects[2].(*widget.Label)
 	if settings.Text != "Mode Auto · IP Auto · GET" {
 		t.Fatalf("profile settings row = %q", settings.Text)
 	}

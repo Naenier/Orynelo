@@ -131,8 +131,8 @@ func TestCheckDetailsTextIncludesEveryVisibleSection(t *testing.T) {
 	for _, expected := range []string{
 		"TCP connection",
 		"Status: FAILED",
-		"Started: " + started.Local().Format(time.RFC3339),
-		"Duration: 1.5s",
+		"Started: " + localization.FormatTime(localization.English{}, started),
+		"Duration: " + localization.FormatDuration(localization.English{}, 1500*time.Millisecond),
 		"Summary\nThe host refused the connection.",
 		"Evidence\n• dial tcp: connection refused",
 		"Recommendations\n• Verify that the service is listening.",
@@ -142,5 +142,103 @@ func TestCheckDetailsTextIncludesEveryVisibleSection(t *testing.T) {
 		if !strings.Contains(got, expected) {
 			t.Fatalf("CheckDetailsText() missing %q:\n%s", expected, got)
 		}
+	}
+}
+
+func TestDiagnosisPreservesEveryRecommendationAndItsOwnEvidence(t *testing.T) {
+	t.Parallel()
+	value := model.Diagnosis{
+		Summary: model.Summary{
+			Status:       model.StatusFailed,
+			EvidenceRefs: []string{"dns.fact"},
+			Recommendations: []model.Recommendation{{
+				ID: "summary.next_step", CheckID: "dns", Priority: "high", Message: "Fix DNS.",
+			}},
+		},
+		Checks: []model.CheckResult{
+			{
+				ID: "dns", Evidence: []model.Evidence{{ID: "dns.fact"}, {ID: "dns.extra"}},
+				Recommendations: []model.Recommendation{{ID: "dns.retry", Priority: "medium", Message: "Retry DNS."}},
+			},
+			{
+				ID: "tls", Evidence: []model.Evidence{{ID: "tls.fact"}},
+				Recommendations: []model.Recommendation{{ID: "tls.fix", Priority: "low", Message: "Fix TLS."}},
+			},
+		},
+	}
+	got := Diagnosis(localization.English{}, value)
+	if len(got.Recommendations) != 3 {
+		t.Fatalf("recommendations = %#v", got.Recommendations)
+	}
+	if strings.Join(got.Recommendations[0].EvidenceIDs, ",") != "dns.fact" {
+		t.Fatalf("summary evidence = %#v, want only dns.fact", got.Recommendations[0].EvidenceIDs)
+	}
+	if strings.Join(got.Recommendations[1].EvidenceIDs, ",") != "dns.fact,dns.extra" {
+		t.Fatalf("DNS evidence = %#v", got.Recommendations[1].EvidenceIDs)
+	}
+}
+
+func TestDiagnosisBreakPointUsesPrimaryConclusionEvidence(t *testing.T) {
+	t.Parallel()
+	started := time.Date(2026, time.September, 6, 12, 0, 0, 0, time.UTC)
+	value := model.Diagnosis{
+		Summary: model.Summary{Status: model.StatusFailed, EvidenceRefs: []string{"tls.failure"}},
+		Checks: []model.CheckResult{{
+			ID: "tls", Evidence: []model.Evidence{{
+				ID: "tls.failure", NetworkRef: &model.NetworkRef{PathID: "path-1", HopID: "origin", AttemptID: "tls-1"},
+			}},
+		}},
+		NetworkPaths: []model.NetworkPath{{
+			ID: "path-1", Role: model.NetworkPathRoleClientEffective, Kind: model.NetworkPathDirect,
+			Hops: []model.NetworkHop{{
+				ID: "origin", Host: "example.test",
+				Attempts: []model.NetworkAttempt{
+					{ID: "tcp-1", Kind: model.NetworkAttemptTCP, ErrorCode: "TCP_TIMEOUT"},
+					{ID: "tls-1", Kind: model.NetworkAttemptTLS, ErrorCode: "TLS_EXPIRED"},
+				},
+				Timings: []model.PhaseTiming{{
+					NetworkRef: model.NetworkRef{AttemptID: "tls-1"}, Phase: "tls",
+					StartedAt: started, FinishedAt: started.Add(2 * time.Second), Duration: 99 * time.Second,
+				}},
+			}},
+		}},
+	}
+	got := Diagnosis(localization.English{}, value)
+	if got.BreakPoint != "example.test · TLS" {
+		t.Fatalf("BreakPoint = %q", got.BreakPoint)
+	}
+	if len(got.Timing) != 1 || got.Timing[0].Duration != 2*time.Second {
+		t.Fatalf("Timing = %#v, want timestamp-derived two seconds", got.Timing)
+	}
+}
+
+func TestDiagnosisLocalizesStableDomainMessagesWithLegacyFallback(t *testing.T) {
+	t.Parallel()
+	translated := Diagnosis(localization.Russian{}, model.Diagnosis{
+		Summary: model.Summary{
+			Status:      model.StatusFailed,
+			Title:       "TLS certificate expired",
+			Description: "The TLS certificate has expired.",
+		},
+		Checks: []model.CheckResult{{
+			ID: "tls", Name: "TLS handshake and certificate", Status: model.StatusFailed,
+			Summary: "The TLS certificate has expired.",
+		}},
+	})
+	if translated.SummaryTitle != "Срок действия сертификата TLS истёк" ||
+		translated.Checks[0].Name != "Рукопожатие TLS и сертификат" {
+		t.Fatalf("localized diagnosis = %#v", translated)
+	}
+	legacy := localizedDomainText(localization.Russian{}, "", "Legacy English snapshot text")
+	if legacy != "Legacy English snapshot text" {
+		t.Fatalf("legacy fallback = %q", legacy)
+	}
+	byID := localizedDomainText(
+		localization.Russian{},
+		"http.verify_request",
+		"text intentionally differs from the current English copy",
+	)
+	if !strings.Contains(byID, "Проверьте URL") {
+		t.Fatalf("message-ID translation = %q", byID)
 	}
 }

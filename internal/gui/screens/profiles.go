@@ -10,6 +10,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/Naenier/orynelo/internal/gui/components"
 	"github.com/Naenier/orynelo/internal/gui/localization"
 	"github.com/Naenier/orynelo/internal/gui/presenter"
 )
@@ -31,7 +32,7 @@ type ProfilesScreen struct {
 	filtered    []presenter.ProfileView
 	selected    int
 	search      *widget.Entry
-	list        *widget.List
+	list        *components.ActionList
 	message     *widget.Label
 	create      *widget.Button
 	edit        *widget.Button
@@ -61,7 +62,8 @@ func NewProfiles(texts localization.Catalog, actions ProfileActions) *ProfilesSc
 	s.message = widget.NewLabel("")
 	s.message.Wrapping = fyne.TextWrapWord
 	s.message.Hide()
-	s.list = widget.NewList(
+	s.list = components.NewActionList(
+		s.texts.Text(localization.NavigationProfiles),
 		func() int { return len(s.filtered) },
 		func() fyne.CanvasObject {
 			name := widget.NewLabelWithStyle(
@@ -96,6 +98,22 @@ func NewProfiles(texts localization.Catalog, actions ProfileActions) *ProfilesSc
 			))
 		},
 	)
+	s.list.ItemAccessibilityLabel = func(id widget.ListItemID) string {
+		if id < 0 || id >= len(s.filtered) {
+			return ""
+		}
+		profile := s.filtered[id]
+		return strings.Join([]string{
+			profile.Name,
+			profile.Target,
+			fmt.Sprintf(
+				s.texts.Text(localization.ProfilesSummaryFormat),
+				profileModeLabel(s.texts, profile.Mode),
+				profileIPLabel(s.texts, profile.IPVersion),
+				strings.ToUpper(profile.Method),
+			),
+		}, ", ")
+	}
 	s.list.OnSelected = func(id widget.ListItemID) {
 		s.selected = id
 		s.SetMessage("")
@@ -107,6 +125,12 @@ func NewProfiles(texts localization.Catalog, actions ProfileActions) *ProfilesSc
 		}
 		s.selected = -1
 		s.updateActionState()
+	}
+	s.list.OnActivated = func(id widget.ListItemID) {
+		if id < 0 || id >= len(s.filtered) || actions.Run == nil {
+			return
+		}
+		actions.Run(s.filtered[id])
 	}
 	s.search.OnChanged = func(string) { s.applySearch() }
 
