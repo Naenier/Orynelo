@@ -46,8 +46,7 @@ func NewAbout(texts localization.Catalog, info buildinfo.Info) fyne.CanvasObject
 		friendlyOperatingSystem(info.OS),
 		friendlyArchitecture(info.Arch),
 	)
-	build := container.NewGridWithColumns(
-		2,
+	build := container.NewVBox(
 		newAboutFact(texts.Text(localization.AboutVersion), version),
 		newAboutFact(texts.Text(localization.AboutPlatform), platform),
 		newAboutFact(texts.Text(localization.AboutGitCommit), commit),
@@ -132,7 +131,8 @@ func NewAbout(texts localization.Catalog, info buildinfo.Info) fyne.CanvasObject
 			container.NewVBox(name, subtitle),
 		),
 		buildCard,
-		container.NewGridWithColumns(2, projectLinks, acknowledgementsCard),
+		projectLinks,
+		acknowledgementsCard,
 	)
 
 	return container.NewVScroll(container.New(
@@ -224,7 +224,7 @@ func friendlyBuildDate(texts localization.Catalog, value string) string {
 	if err != nil {
 		return value
 	}
-	return parsed.Format("2 Jan 2006, 15:04 MST")
+	return localization.FormatTime(texts, parsed)
 }
 
 // friendlyOperatingSystem maps Go operating-system identifiers to display names.
@@ -295,5 +295,6 @@ func (layout aboutPanelLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 		}
 	}
 	minimum.Width = fyne.Min(minimum.Width, layout.maxWidth)
+	minimum.Height += 2 * theme.Padding()
 	return minimum
 }

@@ -1,14 +1,13 @@
 package components
 
 import (
-	"math"
 	"strings"
 	"testing"
 	"time"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/test"
-	"fyne.io/fyne/v2/widget"
 
 	"github.com/Naenier/orynelo/internal/gui/localization"
 )
@@ -39,28 +38,34 @@ func TestStatusIconKeepsAccessibleDescriptionWithoutDuplicateText(t *testing.T) 
 	}
 }
 
-func TestTimingWaterfallUsesElapsedTotalAsDenominator(t *testing.T) {
+func TestTimingWaterfallUsesActualOffsetsAndPreservesOverlap(t *testing.T) {
 	test.NewTempApp(t)
 	waterfall := NewTimingWaterfall(localization.English{})
+	started := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
 	waterfall.SetSegments([]TimingSegment{
-		{Name: "DNS", Duration: 2 * time.Second, Measured: true},
-		{Name: "TCP", Duration: 3 * time.Second, Measured: true},
-		{Name: "TLS", Duration: 12 * time.Second, Measured: true},
-		{Name: "Total", Duration: 10 * time.Second, Measured: true, IsTotal: true},
+		{Name: "DNS", AttemptID: "dns-1", Duration: 2 * time.Second, Measured: true, StartedAt: started, FinishedAt: started.Add(2 * time.Second)},
+		{Name: "TCP", AttemptID: "tcp-1", Duration: 3 * time.Second, Measured: true, StartedAt: started.Add(time.Second), FinishedAt: started.Add(4 * time.Second)},
+		{Name: "TLS", AttemptID: "tls-1", Duration: 2 * time.Second, Measured: true, StartedAt: started.Add(time.Second), FinishedAt: started.Add(3 * time.Second), Reused: true},
 	})
 
-	want := []float64{0.2, 0.3, 1, 1}
-	for index, object := range waterfall.Objects {
-		row := object.(*fyne.Container)
-		progress := row.Objects[0].(*widget.ProgressBar)
-		if math.Abs(progress.Value-want[index]) > 0.0001 {
-			t.Errorf("segment %d value = %f, want %f", index, progress.Value, want[index])
-		}
+	if len(waterfall.Objects) != 4 { // one shared axis and three attempt lanes
+		t.Fatalf("objects = %d, want 4", len(waterfall.Objects))
 	}
-	totalRow := waterfall.Objects[3].(*fyne.Container)
-	totalDuration := totalRow.Objects[2].(*widget.Label)
-	if totalDuration.Text != "10s" {
-		t.Fatalf("total duration = %q, want 10s", totalDuration.Text)
+	dns := waterfall.Objects[1].(*fyne.Container)
+	tcp := waterfall.Objects[2].(*fyne.Container)
+	tls := waterfall.Objects[3].(*fyne.Container)
+	for _, row := range []*fyne.Container{dns, tcp, tls} {
+		row.Resize(fyne.NewSize(1000, 32))
+		row.Layout.Layout(row.Objects, row.Size())
+	}
+	dnsBar := dns.Objects[1].(*canvas.Rectangle)
+	tcpBar := tcp.Objects[1].(*canvas.Rectangle)
+	tlsBar := tls.Objects[1].(*canvas.Rectangle)
+	if tcpBar.Position().X <= dnsBar.Position().X {
+		t.Fatalf("TCP offset %f must follow DNS offset %f", tcpBar.Position().X, dnsBar.Position().X)
+	}
+	if tlsBar.Position().X != tcpBar.Position().X {
+		t.Fatalf("parallel attempts have different offsets: %f and %f", tlsBar.Position().X, tcpBar.Position().X)
 	}
 }
 
@@ -72,9 +77,7 @@ func TestTimingWaterfallDistinguishesUnmeasuredStage(t *testing.T) {
 		{Name: "Total", Duration: time.Second, Measured: true, IsTotal: true},
 	})
 
-	dnsRow := waterfall.Objects[0].(*fyne.Container)
-	dnsDuration := dnsRow.Objects[2].(*widget.Label)
-	if dnsDuration.Text != "Not measured" {
-		t.Fatalf("DNS duration = %q, want Not measured", dnsDuration.Text)
+	if len(waterfall.Objects) != 1 {
+		t.Fatalf("unmeasured phase should not create a misleading lane: %d objects", len(waterfall.Objects))
 	}
 }

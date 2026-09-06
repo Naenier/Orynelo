@@ -50,31 +50,43 @@ type ReportRenderer func(
 	mode privacy.Mode,
 ) ([]byte, error)
 
+// LocalizedReportRenderer renders a human-readable report in an explicitly
+// selected language while leaving canonical JSON language-neutral.
+type LocalizedReportRenderer func(
+	ctx context.Context,
+	format string,
+	diagnosis model.Diagnosis,
+	mode privacy.Mode,
+	language string,
+) ([]byte, error)
+
 // Dependencies contains application infrastructure adapters.
 type Dependencies struct {
-	Runner       DiagnosticRunner
-	Persistence  Persistence
-	ConfigStore  ConfigurationStore
-	Config       Config
-	Build        model.BuildInfo
-	LogFile      string
-	Logger       *slog.Logger
-	RenderReport ReportRenderer
-	SetLogLevel  func(string) error
-	Warnings     []StartupWarning
+	Runner                DiagnosticRunner
+	Persistence           Persistence
+	ConfigStore           ConfigurationStore
+	Config                Config
+	Build                 model.BuildInfo
+	LogFile               string
+	Logger                *slog.Logger
+	RenderReport          ReportRenderer
+	RenderLocalizedReport LocalizedReportRenderer
+	SetLogLevel           func(string) error
+	Warnings              []StartupWarning
 }
 
 // Service is the common application layer used by both interfaces.
 type Service struct {
-	runner       DiagnosticRunner
-	persistence  Persistence
-	configStore  ConfigurationStore
-	build        model.BuildInfo
-	logFile      string
-	logger       *slog.Logger
-	renderReport ReportRenderer
-	setLogLevel  func(string) error
-	warnings     []StartupWarning
+	runner                DiagnosticRunner
+	persistence           Persistence
+	configStore           ConfigurationStore
+	build                 model.BuildInfo
+	logFile               string
+	logger                *slog.Logger
+	renderReport          ReportRenderer
+	renderLocalizedReport LocalizedReportRenderer
+	setLogLevel           func(string) error
+	warnings              []StartupWarning
 
 	mu       sync.RWMutex
 	config   Config
@@ -105,16 +117,17 @@ func New(dependencies Dependencies) (*Service, error) {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	return &Service{
-		runner:       dependencies.Runner,
-		persistence:  guardPersistence(dependencies.Persistence),
-		configStore:  dependencies.ConfigStore,
-		config:       dependencies.Config,
-		build:        dependencies.Build,
-		logFile:      dependencies.LogFile,
-		logger:       logger,
-		renderReport: dependencies.RenderReport,
-		setLogLevel:  dependencies.SetLogLevel,
-		warnings:     cloneStartupWarnings(dependencies.Warnings),
+		runner:                dependencies.Runner,
+		persistence:           guardPersistence(dependencies.Persistence),
+		configStore:           dependencies.ConfigStore,
+		config:                dependencies.Config,
+		build:                 dependencies.Build,
+		logFile:               dependencies.LogFile,
+		logger:                logger,
+		renderReport:          dependencies.RenderReport,
+		renderLocalizedReport: dependencies.RenderLocalizedReport,
+		setLogLevel:           dependencies.SetLogLevel,
+		warnings:              cloneStartupWarnings(dependencies.Warnings),
 	}, nil
 }
 
@@ -605,6 +618,31 @@ func (s *Service) RenderReportContext(
 			"error.report_render_failed",
 			nil,
 		)
+	}
+	return content, nil
+}
+
+// RenderLocalizedReportContext renders a report using an independent
+// human-report language selection. JSON remains canonical in every language.
+func (s *Service) RenderLocalizedReportContext(
+	ctx context.Context,
+	format string,
+	diagnosis model.Diagnosis,
+	mode privacy.Mode,
+	language string,
+) ([]byte, error) {
+	language = strings.ToLower(strings.TrimSpace(language))
+	if language != "ru" && language != "en" {
+		return nil, NewError(ErrorCategoryValidation, "APP_REPORT_LANGUAGE_INVALID", "error.report_language_invalid", map[string]string{"field": "reportLanguage"})
+	}
+	if s.renderLocalizedReport == nil {
+		return s.RenderReportContext(ctx, format, diagnosis, mode)
+	}
+	content, err := callAdapter(ctx, "report", "render", func(ctx context.Context) ([]byte, error) {
+		return s.renderLocalizedReport(ctx, format, diagnosis, mode, language)
+	})
+	if err != nil {
+		return nil, operationError(err, ErrorCategoryInternal, "APP_REPORT_RENDER_FAILED", "error.report_render_failed", nil)
 	}
 	return content, nil
 }

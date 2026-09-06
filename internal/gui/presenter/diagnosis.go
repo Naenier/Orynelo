@@ -81,23 +81,28 @@ func Diagnosis(texts localization.Catalog, value model.Diagnosis) DiagnosisView 
 			},
 		)
 	}
-	summaryRecommendations := make(
-		[]string,
-		0,
-		len(value.Summary.Recommendations),
-	)
-	for _, recommendation := range value.Summary.Recommendations {
-		summaryRecommendations = append(
-			summaryRecommendations,
-			recommendation.Message,
-		)
+	if actual := networkTiming(texts, value.NetworkPaths); len(actual) > 0 {
+		orderedTiming = actual
 	}
+	recommendations := diagnosisRecommendations(texts, value)
+	summaryRecommendations := make([]string, 0, len(recommendations))
+	for _, recommendation := range recommendations {
+		summaryRecommendations = append(summaryRecommendations, recommendation.Message)
+	}
+	paths, primaryPath, breakPoint := diagnosisPaths(texts, value)
 	return DiagnosisView{
 		ID:                     value.ID,
 		Target:                 value.Target.Normalized,
-		SummaryTitle:           value.Summary.Title,
-		SummaryDetail:          value.Summary.Description,
+		SummaryTitle:           localizedDomainText(texts, "summary.title", value.Summary.Title),
+		SummaryDetail:          localizedDomainText(texts, "summary.description", value.Summary.Description),
 		SummaryRecommendations: summaryRecommendations,
+		Recommendations:        recommendations,
+		Paths:                  paths,
+		PrimaryPath:            primaryPath,
+		BreakPoint:             breakPoint,
+		StartedAt:              value.StartedAt,
+		FinishedAt:             value.FinishedAt,
+		Version:                value.Build.Version,
 		OverallStatus:          string(value.Summary.Status),
 		Checks:                 checks,
 		Timing:                 orderedTiming,
@@ -109,7 +114,7 @@ func Check(texts localization.Catalog, value model.CheckResult) CheckView {
 	texts = localization.Normalize(texts)
 	evidence := make([]string, 0, len(value.Evidence))
 	for _, item := range value.Evidence {
-		line := item.Message
+		line := localizedDomainText(texts, item.Code, item.Message)
 		if len(item.Details) > 0 {
 			keys := make([]string, 0, len(item.Details))
 			for key := range item.Details {
@@ -125,8 +130,11 @@ func Check(texts localization.Catalog, value model.CheckResult) CheckView {
 		evidence = append(evidence, line)
 	}
 	recommendations := make([]string, 0, len(value.Recommendations))
+	recommendationItems := make([]RecommendationView, 0, len(value.Recommendations))
 	for _, recommendation := range value.Recommendations {
-		recommendations = append(recommendations, recommendation.Message)
+		message := localizedDomainText(texts, recommendation.ID, recommendation.Message)
+		recommendations = append(recommendations, message)
+		recommendationItems = append(recommendationItems, recommendationView(texts, recommendation, evidenceIDs(value.Evidence)))
 	}
 	structured, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
@@ -156,18 +164,210 @@ func Check(texts localization.Catalog, value model.CheckResult) CheckView {
 		),
 	)
 	return CheckView{
-		ID:              value.ID,
-		Name:            value.Name,
-		Status:          string(value.Status),
-		Summary:         value.Summary,
-		StartedAt:       value.StartedAt,
-		FinishedAt:      value.FinishedAt,
-		Duration:        value.Duration,
-		Evidence:        evidence,
-		Recommendations: recommendations,
-		Technical:       strings.Join(technical, "\n"),
-		RawStructured:   string(structured),
+		ID:                  value.ID,
+		Name:                localizedCheckName(texts, value.ID, value.Name),
+		Status:              string(value.Status),
+		Summary:             localizedDomainText(texts, value.ErrorCode, value.Summary),
+		StartedAt:           value.StartedAt,
+		FinishedAt:          value.FinishedAt,
+		Duration:            value.Duration,
+		Evidence:            evidence,
+		Recommendations:     recommendations,
+		EvidenceGroups:      evidenceGroups(texts, value.Evidence),
+		RecommendationItems: recommendationItems,
+		Technical:           strings.Join(technical, "\n"),
+		RawStructured:       string(structured),
 	}
+}
+
+func evidenceGroups(texts localization.Catalog, values []model.Evidence) []EvidenceGroupView {
+	groups := make([]EvidenceGroupView, 0)
+	indexes := make(map[string]int)
+	for _, evidence := range values {
+		pathID, hopID, attemptID := "", "", ""
+		if evidence.NetworkRef != nil {
+			pathID, hopID, attemptID = evidence.NetworkRef.PathID, evidence.NetworkRef.HopID, evidence.NetworkRef.AttemptID
+		}
+		key := pathID + "\x00" + hopID + "\x00" + attemptID
+		index, ok := indexes[key]
+		if !ok {
+			index = len(groups)
+			indexes[key] = index
+			groups = append(groups, EvidenceGroupView{PathID: pathID, HopID: hopID, AttemptID: attemptID})
+		}
+		keys := make([]string, 0, len(evidence.Details))
+		for key := range evidence.Details {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		item := EvidenceItemView{ID: evidence.ID, Code: evidence.Code, Message: localizedDomainText(texts, evidence.Code, evidence.Message)}
+		for _, key := range keys {
+			full := evidence.Details[key]
+			lower := strings.ToLower(key)
+			kind := "text"
+			switch {
+			case strings.Contains(lower, "duration"), strings.Contains(lower, "latency"), strings.Contains(lower, "ttfb"):
+				kind = "duration"
+			case strings.Contains(lower, "time"), strings.Contains(lower, "date"), strings.HasSuffix(lower, "at"):
+				kind = "time"
+			case strings.Contains(lower, "ip"), strings.Contains(lower, "address"):
+				kind = "address"
+			case strings.Contains(lower, "certificate"), strings.Contains(lower, "issuer"), strings.Contains(lower, "subject"):
+				kind = "certificate"
+			case strings.Contains(lower, "header"):
+				kind = "header"
+			}
+			display := formatEvidenceDisplay(texts, kind, full)
+			collapsed := len([]rune(display)) > 160
+			if collapsed {
+				display = string([]rune(display)[:157]) + "…"
+			}
+			redacted := strings.Contains(full, "[REDACTED]") || strings.Contains(full, "<redacted>")
+			item.Values = append(item.Values, EvidenceValueView{Key: key, Display: display, Full: full, Kind: kind, Redacted: redacted, Collapsed: collapsed})
+		}
+		groups[index].Items = append(groups[index].Items, item)
+	}
+	return groups
+}
+
+func formatEvidenceDisplay(texts localization.Catalog, kind, value string) string {
+	value = strings.TrimSpace(value)
+	switch kind {
+	case "duration":
+		if duration, err := time.ParseDuration(value); err == nil {
+			return localization.FormatDuration(texts, duration)
+		}
+	case "time":
+		if timestamp, err := time.Parse(time.RFC3339Nano, value); err == nil {
+			return localization.FormatTime(texts, timestamp)
+		}
+	}
+	return value
+}
+
+func evidenceIDs(values []model.Evidence) []string {
+	ids := make([]string, 0, len(values))
+	for _, value := range values {
+		if value.ID != "" {
+			ids = append(ids, value.ID)
+		}
+	}
+	return ids
+}
+
+func recommendationView(texts localization.Catalog, value model.Recommendation, refs []string) RecommendationView {
+	return RecommendationView{ID: value.ID, Priority: value.Priority, Message: localizedDomainText(texts, value.ID, value.Message), CheckID: value.CheckID, EvidenceIDs: append([]string(nil), refs...)}
+}
+
+func diagnosisRecommendations(texts localization.Catalog, value model.Diagnosis) []RecommendationView {
+	result := make([]RecommendationView, 0)
+	seen := make(map[string]struct{})
+	appendRecommendation := func(recommendation model.Recommendation, refs []string) {
+		key := recommendation.ID + "\x00" + recommendation.CheckID + "\x00" + recommendation.Message
+		if _, ok := seen[key]; ok || strings.TrimSpace(recommendation.Message) == "" {
+			return
+		}
+		seen[key] = struct{}{}
+		result = append(result, recommendationView(texts, recommendation, refs))
+	}
+	for _, recommendation := range value.Summary.Recommendations {
+		refs := value.Summary.EvidenceRefs
+		if recommendation.CheckID != "" {
+			refs = referencedEvidenceForCheck(value, recommendation.CheckID, refs)
+		}
+		appendRecommendation(recommendation, refs)
+	}
+	for _, check := range value.Checks {
+		refs := evidenceIDs(check.Evidence)
+		for _, recommendation := range check.Recommendations {
+			appendRecommendation(recommendation, refs)
+		}
+	}
+	sort.SliceStable(result, func(i, j int) bool { return priorityRank(result[i].Priority) < priorityRank(result[j].Priority) })
+	return result
+}
+
+func priorityRank(priority string) int {
+	switch strings.ToLower(strings.TrimSpace(priority)) {
+	case "critical", "high":
+		return 0
+	case "medium", "normal":
+		return 1
+	case "low":
+		return 2
+	default:
+		return 3
+	}
+}
+
+func diagnosisPaths(texts localization.Catalog, value model.Diagnosis) ([]PathView, string, string) {
+	paths := make([]PathView, 0, len(value.NetworkPaths))
+	primary, broken := "", ""
+	summaryRefs := make(map[string]struct{}, len(value.Summary.EvidenceRefs))
+	for _, reference := range value.Summary.EvidenceRefs {
+		summaryRefs[reference] = struct{}{}
+	}
+	summaryAttempts := make(map[string]struct{})
+	for _, check := range value.Checks {
+		for _, evidence := range check.Evidence {
+			if _, ok := summaryRefs[evidence.ID]; ok && evidence.NetworkRef != nil && evidence.NetworkRef.AttemptID != "" {
+				summaryAttempts[evidence.NetworkRef.AttemptID] = struct{}{}
+			}
+		}
+	}
+	for _, path := range value.NetworkPaths {
+		view := PathView{ID: path.ID, Role: string(path.Role), Kind: string(path.Kind), Sequence: path.Sequence}
+		view.Label = localizedPathRole(texts, path.Role) + " · " + localizedPathKind(texts, path.Kind)
+		for _, hop := range path.Hops {
+			label := strings.TrimSpace(hop.Host)
+			if label == "" {
+				label = strings.TrimSpace(hop.RemoteAddr)
+			}
+			if label == "" {
+				label = localizedHopKind(texts, hop.Kind)
+			}
+			hopView := HopView{ID: hop.ID, Label: label, Reused: hop.Reused}
+			for _, attempt := range hop.Attempts {
+				hopView.Attempts = append(hopView.Attempts, AttemptView{ID: attempt.ID, Kind: string(attempt.Kind), State: string(attempt.State), StartedAt: attempt.StartedAt, FinishedAt: attempt.FinishedAt, Duration: attempt.Duration, Reused: attempt.Reused})
+				_, supportsSummary := summaryAttempts[attempt.ID]
+				if broken == "" && path.Role == model.NetworkPathRoleClientEffective &&
+					attempt.ErrorCode != "" && (len(summaryAttempts) == 0 || supportsSummary) {
+					broken = label + " · " + localizedAttemptKind(texts, attempt.Kind)
+				}
+			}
+			view.Hops = append(view.Hops, hopView)
+		}
+		if primary == "" && path.Role == model.NetworkPathRoleClientEffective {
+			primary = view.Label
+		}
+		paths = append(paths, view)
+	}
+	if broken == "" {
+		broken = fallbackBreakPoint(value)
+	}
+	return paths, primary, broken
+}
+
+func networkTiming(texts localization.Catalog, paths []model.NetworkPath) []TimingView {
+	result := make([]TimingView, 0)
+	for _, path := range paths {
+		for _, hop := range path.Hops {
+			for _, timing := range hop.Timings {
+				if timing.StartedAt.IsZero() || timing.FinishedAt.IsZero() {
+					continue
+				}
+				duration := timing.FinishedAt.Sub(timing.StartedAt)
+				result = append(result, TimingView{Name: localizedTimingPhase(texts, timing.Phase), Duration: duration, Measured: true, StartedAt: timing.StartedAt, FinishedAt: timing.FinishedAt, AttemptID: timing.AttemptID, Reused: hop.Reused})
+			}
+		}
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].StartedAt.Equal(result[j].StartedAt) {
+			return result[i].AttemptID < result[j].AttemptID
+		}
+		return result[i].StartedAt.Before(result[j].StartedAt)
+	})
+	return result
 }
 
 // CheckDetailsText formats every user-visible detail of a diagnostic step for
@@ -220,23 +420,50 @@ func CheckDetailsText(texts localization.Catalog, value CheckView) string {
 	}, "\n\n")
 }
 
+// DiagnosisSummaryText creates a standalone clipboard summary containing the
+// target, timestamps, status, observed path, main reason, every action, and
+// producing application version.
+func DiagnosisSummaryText(texts localization.Catalog, value DiagnosisView) string {
+	texts = localization.Normalize(texts)
+	version := strings.TrimSpace(value.Version)
+	if version == "" {
+		version = texts.Text(localization.CommonUnavailable)
+	}
+	lines := []string{
+		texts.Text(localization.AppName) + " " + version,
+		fmt.Sprintf(texts.Text(localization.DiagnoseTargetFormat), value.Target),
+		fmt.Sprintf(texts.Text(localization.TechnicalStatusFormat), texts.Text(localization.StatusKey(value.OverallStatus))),
+		fmt.Sprintf(texts.Text(localization.DiagnoseStartedFormat), formatDetailTime(texts, value.StartedAt)),
+		fmt.Sprintf(texts.Text(localization.DiagnoseFinishedFormat), formatDetailTime(texts, value.FinishedAt)),
+	}
+	if value.PrimaryPath != "" {
+		lines = append(lines, fmt.Sprintf(texts.Text(localization.DiagnoseActualPathFormat), value.PrimaryPath))
+	}
+	if value.BreakPoint != "" {
+		lines = append(lines, fmt.Sprintf(texts.Text(localization.DiagnoseBreakPointFormat), value.BreakPoint))
+	}
+	lines = append(lines, "", value.SummaryTitle, value.SummaryDetail)
+	if len(value.Recommendations) > 0 {
+		lines = append(lines, "", texts.Text(localization.DiagnoseRecommendations))
+		for _, recommendation := range value.Recommendations {
+			prefix := localization.PriorityLabel(texts, recommendation.Priority)
+			if prefix != "" {
+				prefix += " · "
+			}
+			lines = append(lines, fmt.Sprintf(texts.Text(localization.CommonListItemFormat), prefix+recommendation.Message))
+		}
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
 // formatDetailTime renders a timestamp for clipboard-oriented check details.
 func formatDetailTime(texts localization.Catalog, value time.Time) string {
-	if value.IsZero() {
-		return texts.Text(localization.CommonUnavailable)
-	}
-	return value.Local().Format(time.RFC3339)
+	return localization.FormatTime(texts, value)
 }
 
 // formatDetailDuration renders a duration for clipboard-oriented check details.
 func formatDetailDuration(texts localization.Catalog, value time.Duration) string {
-	if value <= 0 {
-		return texts.Text(localization.CommonUnavailable)
-	}
-	if value < time.Second {
-		return value.Round(time.Microsecond).String()
-	}
-	return value.Round(time.Millisecond).String()
+	return localization.FormatDuration(texts, value)
 }
 
 // formatDetailList appends a labeled list to a check-detail text buffer.

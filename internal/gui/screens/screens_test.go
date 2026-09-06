@@ -1,6 +1,8 @@
 package screens
 
 import (
+	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -54,7 +56,7 @@ func TestDiagnoseUsesCatalogWithoutChangingDomainValues(t *testing.T) {
 		t.Fatalf("Input() error = %v", err)
 	}
 	if input.Mode != "tcp" || input.IPVersion != "6" ||
-		input.Verbosity != "verbose" || input.Method != "OPTIONS" {
+		input.Verbosity != "verbose" || input.Method != "" {
 		t.Fatalf("localized selections produced %#v", input)
 	}
 }
@@ -86,14 +88,12 @@ func TestDiagnoseStageThreeControlsProduceRuntimeInput(t *testing.T) {
 	}
 	if input.Mode != "tls" || input.ProbeMode != "address_matrix" ||
 		input.AddressLimit != 6 || input.AddressMatrixBudget != 3*time.Second ||
-		!input.ExpectedStatusSet || input.ExpectedStatusMin != 201 ||
-		input.ExpectedStatusMax != 204 || input.LatencyThreshold != 750*time.Millisecond ||
+		input.ExpectedStatusSet || input.ExpectedStatusMin != 0 ||
+		input.ExpectedStatusMax != 0 || input.LatencyThreshold != 750*time.Millisecond ||
 		input.ConnectIP != "192.0.2.44" || input.ServerName != "node.example.test" ||
-		input.HTTPHost != "service.example.test:8443" ||
+		input.HTTPHost != "" ||
 		input.CustomCABundlePath != "/runtime/private/ca.pem" ||
-		input.RequestHeaders["authorization"] != "Bearer gui-one-time-secret" ||
-		input.RequestHeaders["x-incident"] != "INC-42" ||
-		!input.CollectDNSDetails || !input.InspectBody {
+		len(input.RequestHeaders) != 0 || !input.CollectDNSDetails || input.InspectBody {
 		t.Fatalf("Input() = %#v", input)
 	}
 }
@@ -115,6 +115,48 @@ func TestDiagnoseTargetPreviewNeverShowsCredentialsOrSecretQueryValues(t *testin
 		!strings.Contains(preview, "token=[REDACTED]") ||
 		!strings.Contains(preview, "view=full") {
 		t.Fatalf("target preview lost safe effective context: %q", preview)
+	}
+}
+
+func TestDiagnoseContextHidesIrrelevantProtocolControls(t *testing.T) {
+	test.NewTempApp(t)
+	screen := NewDiagnose(localization.English{}, DiagnoseActions{})
+	screen.setAdvancedExpanded(true)
+
+	screen.target.SetText("tcp://example.test:443")
+	if screen.tlsFields.Visible() || screen.httpFields.Visible() || !screen.transportFields.Visible() {
+		t.Fatal("TCP context exposes TLS/HTTP controls or hides transport controls")
+	}
+
+	screen.target.SetText("tls://example.test:443")
+	if !screen.tlsFields.Visible() || screen.httpFields.Visible() {
+		t.Fatal("TLS context does not expose exactly its protocol controls")
+	}
+
+	screen.target.SetText("https://example.test")
+	if !screen.tlsFields.Visible() || !screen.httpFields.Visible() {
+		t.Fatal("HTTPS context does not expose TLS and HTTP controls")
+	}
+}
+
+func TestDiagnosePersistsOnlyNonSensitiveUIState(t *testing.T) {
+	test.NewTempApp(t)
+	screen := NewDiagnose(localization.English{}, DiagnoseActions{})
+	screen.target.SetText("https://secret-user:secret-password@example.test/?token=secret")
+	screen.ApplyUIState(DiagnoseUIState{
+		AdvancedExpanded: true,
+		ResultSplit:      0.37,
+		ExplorerSplit:    0.61,
+	})
+	state := screen.UIState()
+	if !state.AdvancedExpanded || state.ResultSplit != 0.37 || state.ExplorerSplit != 0.61 {
+		t.Fatalf("UIState() = %#v", state)
+	}
+	serialized := fmt.Sprintf("%#v", state)
+	for _, secret := range []string{"secret-user", "secret-password", "token"} {
+		if strings.Contains(serialized, secret) {
+			t.Fatalf("layout state exposed %q: %s", secret, serialized)
+		}
 	}
 }
 
@@ -233,34 +275,30 @@ func TestDiagnoseRedirectPolicyControlsAreExplicit(t *testing.T) {
 	}
 }
 
-func TestDiagnoseLeavesTimeoutRelationshipToApplicationResolver(t *testing.T) {
+func TestDiagnoseValidatesTimeoutRelationshipInline(t *testing.T) {
 	test.NewTempApp(t)
 	screen := NewDiagnose(localization.English{}, DiagnoseActions{})
 	screen.target.SetText("https://example.test")
 	screen.timeout.SetText("2s")
 	screen.checkTimeout.SetText("3s")
 
-	input, err := screen.Input()
-	if err != nil {
-		t.Fatalf("Input() error = %v", err)
-	}
-	if input.Timeout != 2*time.Second || input.CheckTimeout != 3*time.Second {
-		t.Fatalf("Input() = %#v", input)
+	_, err := screen.Input()
+	var typed *FormError
+	if !errors.As(err, &typed) || typed.Field != "checkTimeout" {
+		t.Fatalf("Input() error = %#v, want checkTimeout FormError", err)
 	}
 }
 
-func TestDiagnoseLeavesTimeoutLimitToApplicationResolver(t *testing.T) {
+func TestDiagnoseValidatesTimeoutLimitInline(t *testing.T) {
 	test.NewTempApp(t)
 	screen := NewDiagnose(localization.English{}, DiagnoseActions{})
 	screen.target.SetText("https://example.test")
 	screen.timeout.SetText("25h")
 
-	input, err := screen.Input()
-	if err != nil {
-		t.Fatalf("Input() error = %v", err)
-	}
-	if input.Timeout != 25*time.Hour {
-		t.Fatalf("Input().Timeout = %v, want 25h", input.Timeout)
+	_, err := screen.Input()
+	var typed *FormError
+	if !errors.As(err, &typed) || typed.Field != "timeout" {
+		t.Fatalf("Input() error = %#v, want timeout FormError", err)
 	}
 }
 
@@ -497,6 +535,12 @@ func TestDiagnoseResultKeepsExplorerUsableAtMinimumContentSize(t *testing.T) {
 	test.LaidOutObjects(screen.Root)
 	screen.Root.Resize(fyne.NewSize(830, 620))
 	test.LaidOutObjects(screen.Root)
+	if screen.explorer.Horizontal {
+		t.Fatal("narrow Diagnose layout did not switch to a vertical explorer")
+	}
+	if !screen.postActionsOverflow.Visible() || screen.postActionsWide.Visible() {
+		t.Fatal("narrow Diagnose layout did not switch to the overflow action menu")
+	}
 
 	minimum := screen.Root.MinSize()
 	if minimum.Width > 830 || minimum.Height > 620 {
@@ -723,7 +767,8 @@ func TestHistoryStatusCellUsesAccessibleBadge(t *testing.T) {
 
 	row := screen.list.CreateItem()
 	screen.list.UpdateItem(0, row)
-	badge := row.(*fyne.Container).Objects[2].(*components.StatusBadge)
+	content := row.(*components.ActionRow).Content.(*fyne.Container)
+	badge := content.Objects[2].(*components.StatusBadge)
 	if accessible := badge.AccessibilityLabel(); !strings.Contains(accessible, "WARNING") {
 		t.Fatalf("AccessibilityLabel() = %q", accessible)
 	}

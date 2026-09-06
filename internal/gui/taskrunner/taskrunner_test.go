@@ -822,3 +822,34 @@ func TestStateValidationAndInputErrors(t *testing.T) {
 	runner.Close()
 	runner.Wait()
 }
+
+func TestStartExclusiveMutationRejectsDuplicateWhileLoading(t *testing.T) {
+	t.Parallel()
+	runner, err := New(context.Background(), func(callback func()) { callback() }, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope, err := NewScope[int](runner, "exclusive", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	if _, err := scope.StartExclusiveMutation(func(context.Context) (int, error) {
+		close(started)
+		<-release
+		return 1, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if _, err := scope.StartExclusiveMutation(func(context.Context) (int, error) { return 2, nil }); !errors.Is(err, ErrOperationInProgress) {
+		t.Fatalf("duplicate error = %v, want %v", err, ErrOperationInProgress)
+	}
+	close(release)
+	runner.Wait()
+	runner.Close()
+	if got := scope.Snapshot(); got.State != StateSuccess || got.Value != 1 {
+		t.Fatalf("snapshot = %#v", got)
+	}
+}
