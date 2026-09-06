@@ -1,0 +1,11 @@
+language=en
+appearance=light
+viewport=wide
+explorer=horizontal
+wide_actions=true
+overflow_actions=false
+fits=true
+theme_fixed=true
+run=Run diagnostics
+timeline=Diagnostic steps
+details=Selected step details
