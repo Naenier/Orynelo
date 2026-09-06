@@ -1,0 +1,17 @@
+---
+description: Shared coding instructions and project context for Orynelo
+alwaysApply: true
+---
+
+# Orynelo repository guidance
+
+Read and follow [AGENTS.md](../../AGENTS.md) at the repository root before
+working. It contains the shared instructions for all coding agents.
+Use [docs/agents/README.md](../../docs/agents/README.md) to find the project
+map, development workflow, and guardrails relevant to the task.
+
+Preserve the shared Go application layer, bounded diagnostic work, privacy
+projection, report compatibility, and Fyne UI-thread lifecycle.
+Keep changes within the active task. An explicit instruction to skip checks
+also excludes tests, linters, builds, and post-edit inspection commands.
+Maintain detailed guidance in the shared files, not in this adapter.

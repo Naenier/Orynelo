@@ -1,0 +1,11 @@
+language=ru
+appearance=dark
+viewport=wide
+explorer=horizontal
+wide_actions=true
+overflow_actions=false
+fits=true
+theme_fixed=true
+run=Запустить диагностику
+timeline=Этапы диагностики
+details=Сведения о выбранном этапе
