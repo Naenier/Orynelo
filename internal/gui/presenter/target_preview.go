@@ -9,6 +9,51 @@ import (
 	"github.com/Naenier/orynelo/internal/privacy"
 )
 
+// DiagnoseContext identifies which protocol-specific controls are applicable
+// to the effective target selected in the Diagnose form.
+type DiagnoseContext string
+
+const (
+	DiagnoseContextUnknown DiagnoseContext = "unknown"
+	DiagnoseContextTCP     DiagnoseContext = "tcp"
+	DiagnoseContextTLS     DiagnoseContext = "tls"
+	DiagnoseContextHTTP    DiagnoseContext = "http"
+	DiagnoseContextHTTPS   DiagnoseContext = "https"
+)
+
+// TargetContext parses the effective target with the same rules used by the
+// diagnostic runner and returns the protocol context used to shape the form.
+// Invalid and incomplete targets deliberately return Unknown so editing never
+// flashes an unrelated set of advanced controls.
+func TargetContext(raw, modeValue string) DiagnoseContext {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return DiagnoseContextUnknown
+	}
+	parsed, err := targetcheck.Parse(raw)
+	if err != nil {
+		return DiagnoseContextUnknown
+	}
+	switch model.DiagnosticMode(strings.ToLower(strings.TrimSpace(modeValue))) {
+	case model.DiagnosticModeTCP:
+		return DiagnoseContextTCP
+	case model.DiagnosticModeTLS:
+		return DiagnoseContextTLS
+	}
+	switch parsed.Mode {
+	case model.TargetModeTCP:
+		return DiagnoseContextTCP
+	case model.TargetModeTLS:
+		return DiagnoseContextTLS
+	case model.TargetModeHTTP:
+		return DiagnoseContextHTTP
+	case model.TargetModeHTTPS:
+		return DiagnoseContextHTTPS
+	default:
+		return DiagnoseContextUnknown
+	}
+}
+
 // TargetPreview returns the same privacy-safe effective target interpretation
 // shown before a GUI run. It performs parsing only and never starts I/O.
 func TargetPreview(raw, modeValue string) (string, error) {

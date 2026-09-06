@@ -1,6 +1,7 @@
 package screens
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -45,6 +46,12 @@ func NewSettings(
 		texts.Text(localization.OptionDark):   "dark",
 	}
 	themeLabels := reverseLabels(themeValues)
+	languageValues := map[string]string{
+		texts.Text(localization.OptionSystem):  "system",
+		texts.Text(localization.OptionRussian): "ru",
+		texts.Text(localization.OptionEnglish): "en",
+	}
+	languageLabels := reverseLabels(languageValues)
 	logValues := map[string]string{
 		texts.Text(localization.OptionDebug): "debug",
 		texts.Text(localization.OptionInfo):  "info",
@@ -87,6 +94,18 @@ func NewSettings(
 	}, nil)
 	appearance.Horizontal = true
 	appearance.SetSelected(themeLabels[initial.Appearance.Theme])
+	language := widget.NewSelect([]string{
+		languageLabels["system"],
+		languageLabels["ru"],
+		languageLabels["en"],
+	}, nil)
+	language.SetSelected(languageLabels[initial.Appearance.Language])
+	reportLanguage := widget.NewSelect([]string{
+		languageLabels["system"],
+		languageLabels["ru"],
+		languageLabels["en"],
+	}, nil)
+	reportLanguage.SetSelected(languageLabels[initial.Appearance.ReportLanguage])
 
 	logLevel := widget.NewSelect([]string{
 		logLabels["debug"],
@@ -104,33 +123,21 @@ func NewSettings(
 		var err error
 		cfg.Diagnostics.DefaultTimeout, err = parseSettingsDuration(timeout.Text)
 		if err != nil {
-			return application.Config{}, fmt.Errorf(
-				texts.Text(localization.SettingsInvalidDefaultTimeout),
-				err,
-			)
+			return application.Config{}, errors.New(texts.Text(localization.SettingsInvalidDefaultTimeout))
 		}
 		cfg.Diagnostics.CheckTimeout, err = parseSettingsDuration(checkTimeout.Text)
 		if err != nil {
-			return application.Config{}, fmt.Errorf(
-				texts.Text(localization.SettingsInvalidCheckTimeout),
-				err,
-			)
+			return application.Config{}, errors.New(texts.Text(localization.SettingsInvalidCheckTimeout))
 		}
 		cfg.Diagnostics.MaxRedirects, err = strconv.Atoi(strings.TrimSpace(redirects.Text))
 		if err != nil {
-			return application.Config{}, fmt.Errorf(
-				texts.Text(localization.SettingsInvalidRedirects),
-				err,
-			)
+			return application.Config{}, errors.New(texts.Text(localization.SettingsInvalidRedirects))
 		}
 		cfg.Diagnostics.CertificateWarningThreshold, err = parseSettingsDuration(
 			certificateWarning.Text,
 		)
 		if err != nil {
-			return application.Config{}, fmt.Errorf(
-				texts.Text(localization.SettingsInvalidCertificate),
-				err,
-			)
+			return application.Config{}, errors.New(texts.Text(localization.SettingsInvalidCertificate))
 		}
 		cfg.Diagnostics.PreferredIPVersion = ipValues[ipVersion.Selected]
 		cfg.Network.UseSystemProxy = useProxy.Checked
@@ -138,15 +145,14 @@ func NewSettings(
 		cfg.History.Enabled = historyEnabled.Checked
 		cfg.History.MaxEntries, err = strconv.Atoi(strings.TrimSpace(historyLimit.Text))
 		if err != nil {
-			return application.Config{}, fmt.Errorf(
-				texts.Text(localization.SettingsInvalidHistoryLimit),
-				err,
-			)
+			return application.Config{}, errors.New(texts.Text(localization.SettingsInvalidHistoryLimit))
 		}
 		cfg.Appearance.Theme = themeValues[appearance.Selected]
+		cfg.Appearance.Language = languageValues[language.Selected]
+		cfg.Appearance.ReportLanguage = languageValues[reportLanguage.Selected]
 		cfg.Logging.Level = logValues[logLevel.Selected]
 		if err := cfg.Validate(); err != nil {
-			return application.Config{}, err
+			return application.Config{}, errors.New(texts.Text(localization.SettingsInvalidConfiguration))
 		}
 		return cfg, nil
 	}
@@ -285,6 +291,12 @@ func NewSettings(
 		lastAppliedTheme = selected
 		markDirty()
 	}
+	language.OnChanged = func(string) {
+		markDirty()
+	}
+	reportLanguage.OnChanged = func(string) {
+		markDirty()
+	}
 	logLevel.OnChanged = func(string) {
 		markDirty()
 	}
@@ -341,7 +353,16 @@ func NewSettings(
 	appearanceCard := widget.NewCard(
 		texts.Text(localization.SettingsAppearance),
 		texts.Text(localization.SettingsAppearanceSubtitle),
-		appearance,
+		container.NewVBox(
+			appearance,
+			widget.NewForm(
+				widget.NewFormItem(texts.Text(localization.SettingsLanguage), language),
+				widget.NewFormItem(
+					texts.Text(localization.SettingsReportLanguage),
+					reportLanguage,
+				),
+			),
+		),
 	)
 	logging := widget.NewCard(
 		texts.Text(localization.SettingsLogging),
@@ -365,12 +386,12 @@ func NewSettings(
 	)
 
 	content := container.NewVBox(
-		container.NewGridWithColumns(
-			2,
-			container.NewVBox(diagnostics, appearanceCard),
-			container.NewVBox(network, history),
-		),
-		container.NewGridWithColumns(2, logging, privacy),
+		diagnostics,
+		appearanceCard,
+		network,
+		history,
+		logging,
+		privacy,
 	)
 	scroll := container.NewVScroll(newReadableWidth(content, settingsReadableWidth))
 	footer := widget.NewCard(
@@ -388,7 +409,7 @@ func NewSettings(
 	)
 }
 
-const settingsReadableWidth float32 = 980
+const settingsReadableWidth float32 = 620
 
 // parseSettingsDuration accepts the duration syntax exposed by the settings form.
 func parseSettingsDuration(value string) (time.Duration, error) {

@@ -8,6 +8,7 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/dialog"
+	fynelang "fyne.io/fyne/v2/lang"
 	"fyne.io/fyne/v2/storage"
 
 	"github.com/Naenier/orynelo/internal/application"
@@ -39,6 +40,18 @@ type reportWriteResult struct {
 	Session     uint64
 	Destination fyne.URI
 	Atomic      bool
+}
+
+// localizedReportBackend is an optional Stage 4 extension. Keeping it out of
+// Backend preserves compatibility with lightweight GUI fakes and embedders.
+type localizedReportBackend interface {
+	RenderLocalizedReportContext(
+		context.Context,
+		string,
+		model.Diagnosis,
+		privacy.Mode,
+		string,
+	) ([]byte, error)
 }
 
 // buildTaskScopes creates independently replaceable asynchronous operation
@@ -106,12 +119,32 @@ func (c *controller) loadConfiguration() {
 // applyConfiguration updates controller defaults, theme, and optionally the
 // settings screen from one configuration snapshot.
 func (c *controller) applyConfiguration(cfg application.Config, rebuildSettings bool) {
+	resolvedLanguage := localization.ResolveLanguage(
+		localization.Language(cfg.Appearance.Language),
+		string(fynelang.SystemLocale()),
+	)
+	languageChanged := localization.LanguageOf(c.texts) != resolvedLanguage
 	c.mu.Lock()
 	c.configuration = cfg
 	c.configLoaded = true
 	c.mu.Unlock()
 	if c.diagnoseCoordinator != nil {
 		c.diagnoseCoordinator.SetConfiguration(cfg)
+	}
+	if languageChanged {
+		current := c.currentScreen
+		uiState := c.diagnose.UIState()
+		c.texts = localization.ForLanguage(resolvedLanguage)
+		c.buildScreens(cfg)
+		c.diagnose.ApplyUIState(uiState)
+		c.buildWindow()
+		c.registerShortcuts()
+		c.registerMenu()
+		if c.haveDiagnosis {
+			c.diagnose.SetProfile(profileViewFromDiagnosis(c.lastDiagnosis))
+			c.diagnose.ShowDiagnosis(presenter.Diagnosis(c.texts, c.lastDiagnosis))
+		}
+		c.showScreen(current)
 	}
 	if err := apptheme.Apply(c.texts, c.app, cfg.Appearance.Theme); err != nil {
 		c.showUserError(guiBoundaryError(
@@ -159,9 +192,14 @@ func (c *controller) observeHistory(state HistoryViewModel) {
 			c.history.SetLoading(true)
 		case taskrunner.StateSuccess:
 			c.history.SetRows(state.Rows)
+			c.history.SetMessage(c.texts.Text(localization.HistoryRefreshSuccess))
 		case taskrunner.StateError:
 			c.history.SetLoading(false)
-			c.history.SetMessage(c.texts.Text(localization.HistoryLoadErrorPrefix) + c.userFacingError(state.LoadErr))
+			prefix := c.texts.Text(localization.HistoryLoadErrorPrefix)
+			if state.Stale {
+				prefix = c.texts.Text(localization.CommonStaleData) + " " + prefix
+			}
+			c.history.SetMessage(prefix + c.userFacingError(state.LoadErr))
 		case taskrunner.StateCancelled:
 			c.history.SetLoading(false)
 		}
@@ -242,9 +280,14 @@ func (c *controller) observeProfiles(state ProfilesViewModel) {
 			c.profiles.SetLoading(true)
 		case taskrunner.StateSuccess:
 			c.profiles.SetProfiles(state.Profiles)
+			c.profiles.SetMessage(c.texts.Text(localization.ProfilesRefreshSuccess))
 		case taskrunner.StateError:
 			c.profiles.SetLoading(false)
-			c.profiles.SetMessage(c.texts.Text(localization.ProfilesLoadErrorPrefix) + c.userFacingError(state.LoadErr))
+			prefix := c.texts.Text(localization.ProfilesLoadErrorPrefix)
+			if state.Stale {
+				prefix = c.texts.Text(localization.CommonStaleData) + " " + prefix
+			}
+			c.profiles.SetMessage(prefix + c.userFacingError(state.LoadErr))
 		case taskrunner.StateCancelled:
 			c.profiles.SetLoading(false)
 		}
@@ -253,9 +296,15 @@ func (c *controller) observeProfiles(state ProfilesViewModel) {
 		case taskrunner.StateLoading:
 			c.profiles.SetMessage(c.texts.Text(localization.CommonSaving))
 		case taskrunner.StateSuccess:
-			c.profiles.SetMessage("")
+			c.profiles.SetMessage(c.texts.Text(localization.ProfilesSaveSuccessMessage))
 			if c.currentScreen == "profiles" {
 				c.profiles.Reload()
+			} else {
+				dialog.ShowInformation(
+					c.texts.Text(localization.ProfilesSaveSuccessTitle),
+					c.texts.Text(localization.ProfilesSaveSuccessMessage),
+					c.window,
+				)
 			}
 		case taskrunner.StateError:
 			prefix := ""
@@ -350,10 +399,19 @@ func (c *controller) prepareReport(
 	format string,
 	mode privacy.Mode,
 	filename string,
+	language string,
 ) {
 	session := c.beginReportSession()
 	_, err := c.reportPrepareTask.StartRead(func(ctx context.Context) (reportPrepareResult, error) {
-		content, renderErr := c.backend.RenderReportContext(ctx, format, diagnosis, mode)
+		var content []byte
+		var renderErr error
+		if renderer, ok := c.backend.(localizedReportBackend); ok && format != "json" {
+			content, renderErr = renderer.RenderLocalizedReportContext(
+				ctx, format, diagnosis, mode, language,
+			)
+		} else {
+			content, renderErr = c.backend.RenderReportContext(ctx, format, diagnosis, mode)
+		}
 		return reportPrepareResult{Session: session, Filename: filename, Content: content}, renderErr
 	})
 	if err != nil {
@@ -594,6 +652,9 @@ func (c *controller) userFacingError(err error) string {
 	}
 	texts := localization.Normalize(c.texts)
 	guidance := texts.Text(key)
+	if message, ok := localization.Message(texts, string(view.MessageID)); ok {
+		guidance = message
+	}
 	if field := view.Arguments["field"]; field != "" {
 		guidance += "\n" + fmt.Sprintf(
 			texts.Text(localization.ErrorFieldFormat),
@@ -626,6 +687,42 @@ func applicationErrorFieldLabel(texts localization.Catalog, field string) string
 		return texts.Text(localization.CommonHTTPMethod)
 	case "reportVerbosity":
 		return texts.Text(localization.DiagnoseReportVerbosity)
+	case "probeMode":
+		return texts.Text(localization.DiagnoseProbeMode)
+	case "addressLimit":
+		return texts.Text(localization.DiagnoseAddressLimit)
+	case "addressMatrixBudget":
+		return texts.Text(localization.DiagnoseMatrixBudget)
+	case "expectedStatus":
+		return texts.Text(localization.DiagnoseExpectedStatus)
+	case "latencyThreshold":
+		return texts.Text(localization.DiagnoseLatencyThreshold)
+	case "connectIP":
+		return texts.Text(localization.DiagnoseConnectIP)
+	case "serverName":
+		return texts.Text(localization.DiagnoseServerName)
+	case "httpHost":
+		return texts.Text(localization.DiagnoseHTTPHost)
+	case "customCA":
+		return texts.Text(localization.DiagnoseCABundle)
+	case "requestHeaders":
+		return texts.Text(localization.DiagnoseRequestHeaders)
+	case "appearance":
+		return texts.Text(localization.SettingsAppearance)
+	case "destination":
+		return texts.Text(localization.DialogExportFilename)
+	case "privacyMode":
+		return texts.Text(localization.DialogExportPrivacyTitle)
+	case "reportLanguage":
+		return texts.Text(localization.SettingsReportLanguage)
+	case "search":
+		return texts.Text(localization.HistorySearchPlaceholder)
+	case "status":
+		return texts.Text(localization.HistoryColumnOverallStatus)
+	case "name":
+		return texts.Text(localization.ProfilesName)
+	case "format":
+		return texts.Text(localization.CommonExport)
 	default:
 		return field
 	}

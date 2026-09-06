@@ -230,6 +230,23 @@ func TestUserFacingValidationErrorNamesSafeField(t *testing.T) {
 	}
 }
 
+func TestUserFacingApplicationErrorUsesRussianMessageID(t *testing.T) {
+	t.Parallel()
+
+	err := application.NewError(
+		application.ErrorCategoryStorage,
+		"APP_HISTORY_LIST_FAILED",
+		"error.history_list_failed",
+		nil,
+	)
+	message := (&controller{texts: localization.Russian{}}).userFacingError(err)
+	if !strings.Contains(message, "Не удалось загрузить историю") ||
+		!strings.Contains(message, "APP_HISTORY_LIST_FAILED") ||
+		strings.Contains(message, "error.history_list_failed") {
+		t.Fatalf("Russian message-ID rendering = %q", message)
+	}
+}
+
 func TestReportWriteBoundaryPreservesCauseButDisplaysTypedStorageError(t *testing.T) {
 	t.Parallel()
 

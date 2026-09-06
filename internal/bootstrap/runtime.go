@@ -236,6 +236,22 @@ func openRuntimeWithOptions(
 			}
 			return report.Render(diagnosis, parsed, mode)
 		},
+		RenderLocalizedReport: func(
+			ctx context.Context,
+			format string,
+			diagnosis model.Diagnosis,
+			mode privacy.Mode,
+			language string,
+		) ([]byte, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			parsed, err := report.ParseFormat(format)
+			if err != nil {
+				return nil, err
+			}
+			return report.RenderLocalized(diagnosis, parsed, language, mode)
+		},
 	})
 	if err != nil {
 		if database != nil {

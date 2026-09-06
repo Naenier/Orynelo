@@ -327,6 +327,7 @@ type HistoryViewModel struct {
 	LoadState taskrunner.State
 	Rows      []presenter.HistoryView
 	LoadErr   error
+	Stale     bool
 
 	ReadState     taskrunner.State
 	ReadAction    HistoryReadAction
@@ -414,7 +415,7 @@ func (coordinator *HistoryCoordinator) Read(action HistoryReadAction, id string)
 
 // Mutate serializes deletion of one diagnosis or clearing all history.
 func (coordinator *HistoryCoordinator) Mutate(action HistoryMutationAction, id string) error {
-	_, err := coordinator.mutation.StartMutation(func(ctx context.Context) (historyMutationResult, error) {
+	_, err := coordinator.mutation.StartExclusiveMutation(func(ctx context.Context) (historyMutationResult, error) {
 		result := historyMutationResult{Action: action}
 		if action == HistoryMutationClear {
 			return result, coordinator.backend.ClearHistory(ctx)
@@ -445,6 +446,9 @@ func (coordinator *HistoryCoordinator) observeLoad(snapshot taskrunner.Snapshot[
 	coordinator.state.LoadErr = snapshot.Err
 	if snapshot.State == taskrunner.StateSuccess {
 		coordinator.state.Rows = append([]presenter.HistoryView(nil), snapshot.Value...)
+		coordinator.state.Stale = false
+	} else if snapshot.State == taskrunner.StateError && len(coordinator.state.Rows) > 0 {
+		coordinator.state.Stale = true
 	}
 	state, observer := cloneHistoryViewModel(coordinator.state), coordinator.observer
 	coordinator.mu.Unlock()
@@ -513,6 +517,7 @@ type ProfilesViewModel struct {
 	LoadState taskrunner.State
 	Profiles  []presenter.ProfileView
 	LoadErr   error
+	Stale     bool
 
 	MutationState taskrunner.State
 	Mutation      ProfileMutationAction
@@ -579,7 +584,7 @@ func (coordinator *ProfilesCoordinator) Load() error {
 
 // Save serializes profile creation, update, or duplication.
 func (coordinator *ProfilesCoordinator) Save(action ProfileMutationAction, profile model.Profile) error {
-	_, err := coordinator.mutation.StartMutation(func(ctx context.Context) (profileMutationResult, error) {
+	_, err := coordinator.mutation.StartExclusiveMutation(func(ctx context.Context) (profileMutationResult, error) {
 		saved, saveErr := coordinator.backend.SaveProfile(ctx, profile)
 		return profileMutationResult{Action: action, Saved: saved}, saveErr
 	})
@@ -588,7 +593,7 @@ func (coordinator *ProfilesCoordinator) Save(action ProfileMutationAction, profi
 
 // Delete serializes removal of one profile.
 func (coordinator *ProfilesCoordinator) Delete(id int64) error {
-	_, err := coordinator.mutation.StartMutation(func(ctx context.Context) (profileMutationResult, error) {
+	_, err := coordinator.mutation.StartExclusiveMutation(func(ctx context.Context) (profileMutationResult, error) {
 		return profileMutationResult{Action: ProfileMutationDelete}, coordinator.backend.DeleteProfile(ctx, id)
 	})
 	return err
@@ -614,6 +619,9 @@ func (coordinator *ProfilesCoordinator) observeLoad(snapshot taskrunner.Snapshot
 	coordinator.state.LoadErr = snapshot.Err
 	if snapshot.State == taskrunner.StateSuccess {
 		coordinator.state.Profiles = append([]presenter.ProfileView(nil), snapshot.Value...)
+		coordinator.state.Stale = false
+	} else if snapshot.State == taskrunner.StateError && len(coordinator.state.Profiles) > 0 {
+		coordinator.state.Stale = true
 	}
 	state, observer := cloneProfilesViewModel(coordinator.state), coordinator.observer
 	coordinator.mu.Unlock()
@@ -711,7 +719,7 @@ func (coordinator *SettingsCoordinator) Load() error {
 
 // Save serializes configuration persistence.
 func (coordinator *SettingsCoordinator) Save(config application.Config) error {
-	_, err := coordinator.save.StartMutation(func(ctx context.Context) (application.Config, error) {
+	_, err := coordinator.save.StartExclusiveMutation(func(ctx context.Context) (application.Config, error) {
 		return config, coordinator.backend.SaveConfigurationContext(ctx, config)
 	})
 	return err

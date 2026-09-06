@@ -43,9 +43,11 @@ type HistoryConfig struct {
 	MaxEntries int  `yaml:"maxEntries"`
 }
 
-// AppearanceConfig controls the desktop theme.
+// AppearanceConfig controls the desktop theme and localized presentation.
 type AppearanceConfig struct {
-	Theme string `yaml:"theme"`
+	Theme          string `yaml:"theme"`
+	Language       string `yaml:"language"`
+	ReportLanguage string `yaml:"reportLanguage"`
 }
 
 // LoggingConfig controls application logging.
@@ -72,8 +74,12 @@ func DefaultConfig() Config {
 			Enabled:    true,
 			MaxEntries: 200,
 		},
-		Appearance: AppearanceConfig{Theme: "system"},
-		Logging:    LoggingConfig{Level: "info"},
+		Appearance: AppearanceConfig{
+			Theme:          "system",
+			Language:       "system",
+			ReportLanguage: "system",
+		},
+		Logging: LoggingConfig{Level: "info"},
 	}
 }
 
@@ -117,6 +123,12 @@ func (c Config) Validate() error {
 	default:
 		problems = append(problems, `appearance.theme must be "system", "light", or "dark"`)
 	}
+	if !validLanguagePreference(c.Appearance.Language) {
+		problems = append(problems, `appearance.language must be "system", "ru", or "en"`)
+	}
+	if !validLanguagePreference(c.Appearance.ReportLanguage) {
+		problems = append(problems, `appearance.reportLanguage must be "system", "ru", or "en"`)
+	}
 	switch c.Logging.Level {
 	case "debug", "info", "warn", "error":
 	default:
@@ -127,6 +139,15 @@ func (c Config) Validate() error {
 		return fmt.Errorf("invalid configuration: %s", strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+func validLanguagePreference(value string) bool {
+	switch value {
+	case "system", "ru", "en":
+		return true
+	default:
+		return false
+	}
 }
 
 func containsControl(value string) bool {

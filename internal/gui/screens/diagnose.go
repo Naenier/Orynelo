@@ -28,6 +28,29 @@ type DiagnoseActions struct {
 	ExportMarkdown func()
 	SaveProfile    func()
 	CopyStep       func(presenter.CheckView)
+	CopyText       func(string)
+}
+
+// FormError identifies the exact Diagnose control that rejected an input.
+// Keeping the stable field ID separate from the localized message lets the
+// screen reveal hidden advanced controls and focus the field deterministically.
+type FormError struct {
+	Field   string
+	Message string
+}
+
+// DiagnoseUIState contains the non-sensitive layout preferences that may be
+// persisted between sessions.
+type DiagnoseUIState struct {
+	AdvancedExpanded bool
+	ResultSplit      float64
+	ExplorerSplit    float64
+}
+
+func (e *FormError) Error() string { return e.Message }
+
+func formError(field, message string) error {
+	return &FormError{Field: field, Message: message}
 }
 
 // DiagnoseScreen owns the mutable widgets of the main diagnostic screen.
@@ -64,12 +87,20 @@ type DiagnoseScreen struct {
 	run                    *widget.Button
 	cancel                 *widget.Button
 	postActions            *fyne.Container
+	postActionsWide        *fyne.Container
+	postActionsOverflow    *widget.Button
 	inputError             *widget.Label
 	inputErrorRow          *fyne.Container
 	inputViewport          *container.Scroll
 	inputCard              *widget.Card
 	advancedToggle         *widget.Button
 	advancedFields         *fyne.Container
+	advancedGeneral        *fyne.Container
+	transportFields        *fyne.Container
+	tlsFields              *fyne.Container
+	httpFields             *fyne.Container
+	contextHelp            *widget.Label
+	formEntries            map[string]*widget.Entry
 	inputCollapsed         float32
 	advancedExpanded       bool
 	idleState              fyne.CanvasObject
@@ -83,6 +114,8 @@ type DiagnoseScreen struct {
 	detailsCard            *widget.Card
 	summaryTitle           *widget.Label
 	summaryTarget          *widget.Label
+	summaryPath            *widget.Label
+	summaryBreak           *widget.Label
 	summaryDetail          *widget.Label
 	summaryStatus          *fyne.Container
 	summaryNextStep        *fyne.Container
@@ -96,10 +129,10 @@ type DiagnoseScreen struct {
 	detailStatus           *fyne.Container
 	detailTiming           *widget.Label
 	detailSummary          *widget.Label
-	detailEvidence         *widget.Label
+	detailEvidence         *fyne.Container
 	detailRecommend        *widget.Label
 	detailTechnical        *widget.Label
-	detailRaw              *widget.Entry
+	detailRaw              *components.RawJSONViewer
 	detailsViewport        *container.Scroll
 	recommendSection       *fyne.Container
 	technicalSections      *widget.Accordion
@@ -200,6 +233,14 @@ func (s *DiagnoseScreen) buildInputs() {
 	s.targetPreview.Importance = widget.LowImportance
 	s.target.OnChanged = func(string) { s.updateTargetPreview() }
 	s.mode.OnChanged = func(string) { s.updateTargetPreview() }
+	s.formEntries = map[string]*widget.Entry{
+		"target": s.target, "timeout": s.timeout, "checkTimeout": s.checkTimeout,
+		"maxRedirects": s.maxRedirects, "addressLimit": s.addressLimit,
+		"addressMatrixBudget": s.matrixBudget, "expectedStatus": s.expectedStatus,
+		"latencyThreshold": s.latencyThreshold, "connectIP": s.connectIP,
+		"serverName": s.serverName, "httpHost": s.httpHost,
+		"customCABundlePath": s.caBundle, "requestHeaders": s.requestHeaders,
+	}
 	s.inputError = widget.NewLabel("")
 	s.inputError.Wrapping = fyne.TextWrapWord
 	s.inputErrorRow = container.NewBorder(
@@ -250,31 +291,58 @@ func (s *DiagnoseScreen) buildInputs() {
 		field(s.texts.Text(localization.CommonIP), s.ipVersion),
 		field(s.texts.Text(localization.CommonTimeout), s.timeout),
 	)
-	s.advancedFields = container.NewVBox(
+	s.contextHelp = widget.NewLabel("")
+	s.contextHelp.Wrapping = fyne.TextWrapWord
+	s.contextHelp.Importance = widget.LowImportance
+	s.advancedGeneral = container.NewVBox(
 		s.autoExplanation,
 		container.NewGridWithColumns(2,
-			field(s.texts.Text(localization.CommonHTTPMethod), s.method),
 			field(s.texts.Text(localization.CommonPerCheckTimeout), s.checkTimeout),
-			field(s.texts.Text(localization.CommonMaximumRedirects), s.maxRedirects),
 			field(s.texts.Text(localization.DiagnoseReportVerbosity), s.verbosity),
 			field(s.texts.Text(localization.DiagnoseProbeMode), s.probeMode),
 			field(s.texts.Text(localization.DiagnoseAddressLimit), s.addressLimit),
 			field(s.texts.Text(localization.DiagnoseMatrixBudget), s.matrixBudget),
-			field(s.texts.Text(localization.DiagnoseExpectedStatus), s.expectedStatus),
 			field(s.texts.Text(localization.DiagnoseLatencyThreshold), s.latencyThreshold),
+		),
+	)
+	s.transportFields = container.NewVBox(
+		widget.NewLabelWithStyle(s.texts.Text(localization.DiagnoseTransportOptions), fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		container.NewGridWithColumns(2,
 			field(s.texts.Text(localization.DiagnoseConnectIP), s.connectIP),
+			field(s.texts.Text(localization.DiagnoseCollectDNSDetails), s.collectDNSDetails),
+		),
+	)
+	s.tlsFields = container.NewVBox(
+		widget.NewLabelWithStyle(s.texts.Text(localization.DiagnoseTLSOptions), fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		widget.NewLabel(s.texts.Text(localization.DiagnoseCertificateExplanation)),
+		container.NewGridWithColumns(2,
 			field(s.texts.Text(localization.DiagnoseServerName), s.serverName),
-			field(s.texts.Text(localization.DiagnoseHTTPHost), s.httpHost),
 			field(s.texts.Text(localization.DiagnoseCABundle), s.caBundle),
+		),
+		s.insecure,
+	)
+	s.httpFields = container.NewVBox(
+		widget.NewLabelWithStyle(s.texts.Text(localization.DiagnoseHTTPOptions), fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		container.NewGridWithColumns(2,
+			field(s.texts.Text(localization.CommonHTTPMethod), s.method),
+			field(s.texts.Text(localization.CommonMaximumRedirects), s.maxRedirects),
+			field(s.texts.Text(localization.DiagnoseExpectedStatus), s.expectedStatus),
+			field(s.texts.Text(localization.DiagnoseHTTPHost), s.httpHost),
 		),
 		field(s.texts.Text(localization.DiagnoseRequestHeaders), s.requestHeaders),
 		container.NewVBox(
-			container.NewHBox(s.noProxy, s.insecure),
+			s.noProxy,
 			s.allowInsecureRedirects,
 			s.allowPrivateRedirects,
-			s.collectDNSDetails,
 			s.inspectBody,
 		),
+	)
+	s.advancedFields = container.NewVBox(
+		s.contextHelp,
+		s.advancedGeneral,
+		s.transportFields,
+		s.tlsFields,
+		s.httpFields,
 	)
 	s.advancedFields.Hide()
 	s.advancedToggle = widget.NewButtonWithIcon(
@@ -309,12 +377,17 @@ func (s *DiagnoseScreen) buildInputs() {
 		s.inputViewport,
 		s.content,
 	)
+	s.updateContextFields()
 }
 
 // buildResults constructs the summary, timeline, details, and action areas.
 func (s *DiagnoseScreen) buildResults() {
 	s.summaryTarget = widget.NewLabel("")
 	s.summaryTarget.Truncation = fyne.TextTruncateEllipsis
+	s.summaryPath = widget.NewLabel("")
+	s.summaryPath.Wrapping = fyne.TextWrapWord
+	s.summaryBreak = widget.NewLabel("")
+	s.summaryBreak.Wrapping = fyne.TextWrapWord
 	s.summaryTitle = widget.NewLabelWithStyle(
 		s.texts.Text(localization.DiagnoseReadyTitle),
 		fyne.TextAlignLeading,
@@ -347,8 +420,10 @@ func (s *DiagnoseScreen) buildResults() {
 		"",
 		container.NewVBox(
 			s.summaryTarget,
+			s.summaryPath,
 			summaryHeading,
 			s.summaryDetail,
+			s.summaryBreak,
 			s.summaryNextStep,
 		),
 	)
@@ -415,18 +490,14 @@ func (s *DiagnoseScreen) buildResults() {
 	s.detailTiming = widget.NewLabel("")
 	s.detailSummary = widget.NewLabel("")
 	s.detailSummary.Wrapping = fyne.TextWrapWord
-	s.detailEvidence = widget.NewLabel(s.texts.Text(localization.DiagnoseNoEvidenceSelected))
-	s.detailEvidence.Wrapping = fyne.TextWrapWord
+	s.detailEvidence = container.NewVBox(widget.NewLabel(s.texts.Text(localization.DiagnoseNoEvidenceSelected)))
 	s.detailRecommend = widget.NewLabel(
 		s.texts.Text(localization.DiagnoseNoRecommendationsSelected),
 	)
 	s.detailRecommend.Wrapping = fyne.TextWrapWord
 	s.detailTechnical = widget.NewLabel("")
 	s.detailTechnical.Wrapping = fyne.TextWrapWord
-	s.detailRaw = widget.NewMultiLineEntry()
-	s.detailRaw.Wrapping = fyne.TextWrapWord
-	s.detailRaw.SetMinRowsVisible(6)
-	s.detailRaw.Disable()
+	s.detailRaw = components.NewRawJSONViewer(s.texts, s.actions.CopyText)
 	copyStep := widget.NewButtonWithIcon(
 		s.texts.Text(localization.DiagnoseCopyStep),
 		theme.ContentCopyIcon(),
@@ -514,7 +585,7 @@ func (s *DiagnoseScreen) buildResults() {
 		s.triggerRun,
 	)
 	runAgain.Importance = widget.HighImportance
-	s.postActions = container.NewGridWithColumns(
+	s.postActionsWide = container.NewGridWithColumns(
 		5,
 		runAgain,
 		widget.NewButtonWithIcon(
@@ -546,6 +617,48 @@ func (s *DiagnoseScreen) buildResults() {
 			},
 		),
 	)
+	var overflow *widget.Button
+	overflow = widget.NewButtonWithIcon(
+		s.texts.Text(localization.CommonMore), theme.MoreHorizontalIcon(), func() {
+			app := fyne.CurrentApp()
+			if app == nil || app.Driver() == nil {
+				return
+			}
+			canvas := app.Driver().CanvasForObject(overflow)
+			if canvas == nil {
+				return
+			}
+			menu := fyne.NewMenu("",
+				fyne.NewMenuItem(s.texts.Text(localization.DiagnoseRunAgain), s.triggerRun),
+				fyne.NewMenuItem(s.texts.Text(localization.DiagnoseCopySummary), func() {
+					if s.actions.CopySummary != nil {
+						s.actions.CopySummary()
+					}
+				}),
+				fyne.NewMenuItem(s.texts.Text(localization.DiagnoseExportJSON), func() {
+					if s.actions.ExportJSON != nil {
+						s.actions.ExportJSON()
+					}
+				}),
+				fyne.NewMenuItem(s.texts.Text(localization.DiagnoseExportMarkdown), func() {
+					if s.actions.ExportMarkdown != nil {
+						s.actions.ExportMarkdown()
+					}
+				}),
+				fyne.NewMenuItem(s.texts.Text(localization.DiagnoseSaveAsProfile), func() {
+					if s.actions.SaveProfile != nil {
+						s.actions.SaveProfile()
+					}
+				}),
+			)
+			widget.NewPopUpMenu(menu, canvas).ShowAtRelativePosition(
+				fyne.NewPos(0, overflow.Size().Height), overflow,
+			)
+		},
+	)
+	s.postActionsOverflow = overflow
+	s.postActionsOverflow.Hide()
+	s.postActions = container.NewStack(s.postActionsWide, s.postActionsOverflow)
 	s.postActions.Hide()
 	s.activity = widget.NewProgressBarInfinite()
 	s.activity.Hide()
@@ -583,9 +696,14 @@ func (s *DiagnoseScreen) triggerRun() {
 	}
 	input, err := s.Input()
 	if err != nil {
-		s.inputError.SetText(err.Error())
-		s.inputErrorRow.Show()
-		s.inputViewport.ScrollToBottom()
+		var typed *FormError
+		if errors.As(err, &typed) {
+			s.showFormError(typed)
+		} else {
+			s.inputError.SetText(err.Error())
+			s.inputErrorRow.Show()
+			s.inputViewport.ScrollToBottom()
+		}
 		if s.actions.InputError != nil {
 			s.actions.InputError(err)
 		}
@@ -601,68 +719,100 @@ func (s *DiagnoseScreen) triggerRun() {
 
 // Input validates and returns the current Diagnose controls.
 func (s *DiagnoseScreen) Input() (presenter.DiagnoseInput, error) {
+	target := strings.TrimSpace(s.target.Text)
+	if target == "" {
+		return presenter.DiagnoseInput{}, formError(
+			"target", s.texts.Text(localization.DiagnoseTargetRequired),
+		)
+	}
+	context := presenter.TargetContext(target, s.modeValue())
+	if context == presenter.DiagnoseContextUnknown {
+		return presenter.DiagnoseInput{}, formError(
+			"target", s.texts.Text(localization.DiagnoseInvalidTarget),
+		)
+	}
 	timeout, err := time.ParseDuration(strings.TrimSpace(s.timeout.Text))
-	if err != nil {
-		return presenter.DiagnoseInput{}, errors.New(
-			s.texts.Text(localization.DiagnoseInvalidTimeout),
+	if err != nil || timeout <= 0 || timeout > 24*time.Hour {
+		return presenter.DiagnoseInput{}, formError(
+			"timeout", s.texts.Text(localization.DiagnoseInvalidTimeout),
 		)
 	}
 	checkTimeout, err := time.ParseDuration(strings.TrimSpace(s.checkTimeout.Text))
-	if err != nil {
-		return presenter.DiagnoseInput{}, errors.New(
-			s.texts.Text(localization.DiagnoseInvalidCheckTimeout),
+	if err != nil || checkTimeout <= 0 || checkTimeout > timeout {
+		return presenter.DiagnoseInput{}, formError(
+			"checkTimeout", s.texts.Text(localization.DiagnoseInvalidCheckTimeout),
 		)
 	}
-	redirects, err := strconv.Atoi(strings.TrimSpace(s.maxRedirects.Text))
-	if err != nil {
-		return presenter.DiagnoseInput{}, errors.New(
-			s.texts.Text(localization.DiagnoseInvalidRedirects),
-		)
+	isHTTP := context == presenter.DiagnoseContextHTTP || context == presenter.DiagnoseContextHTTPS
+	isTLS := context == presenter.DiagnoseContextTLS || context == presenter.DiagnoseContextHTTPS
+	redirects := 0
+	if isHTTP {
+		redirects, err = strconv.Atoi(strings.TrimSpace(s.maxRedirects.Text))
+		if err != nil || redirects < 0 || redirects > 50 {
+			return presenter.DiagnoseInput{}, formError(
+				"maxRedirects", s.texts.Text(localization.DiagnoseInvalidRedirects),
+			)
+		}
 	}
 	addressLimit, err := strconv.Atoi(strings.TrimSpace(s.addressLimit.Text))
 	if err != nil || addressLimit < 1 || addressLimit > 16 {
-		return presenter.DiagnoseInput{}, errors.New(
-			s.texts.Text(localization.DiagnoseInvalidAddressLimit),
+		return presenter.DiagnoseInput{}, formError(
+			"addressLimit", s.texts.Text(localization.DiagnoseInvalidAddressLimit),
 		)
 	}
 	matrixBudget, err := time.ParseDuration(strings.TrimSpace(s.matrixBudget.Text))
 	if err != nil || matrixBudget <= 0 {
-		return presenter.DiagnoseInput{}, errors.New(
-			s.texts.Text(localization.DiagnoseInvalidMatrixBudget),
+		return presenter.DiagnoseInput{}, formError(
+			"addressMatrixBudget", s.texts.Text(localization.DiagnoseInvalidMatrixBudget),
 		)
 	}
-	expectedMin, expectedMax, expectedSet, err := parseExpectedStatus(s.expectedStatus.Text)
-	if err != nil {
-		return presenter.DiagnoseInput{}, errors.New(
-			s.texts.Text(localization.DiagnoseInvalidExpectedStatus),
-		)
+	expectedMin, expectedMax, expectedSet := 0, 0, false
+	if isHTTP {
+		expectedMin, expectedMax, expectedSet, err = parseExpectedStatus(s.expectedStatus.Text)
+		if err != nil {
+			return presenter.DiagnoseInput{}, formError(
+				"expectedStatus", s.texts.Text(localization.DiagnoseInvalidExpectedStatus),
+			)
+		}
 	}
 	latency := time.Duration(0)
 	if strings.TrimSpace(s.latencyThreshold.Text) != "" {
 		latency, err = time.ParseDuration(strings.TrimSpace(s.latencyThreshold.Text))
 		if err != nil || latency <= 0 {
-			return presenter.DiagnoseInput{}, errors.New(
-				s.texts.Text(localization.DiagnoseInvalidLatencyThreshold),
+			return presenter.DiagnoseInput{}, formError(
+				"latencyThreshold", s.texts.Text(localization.DiagnoseInvalidLatencyThreshold),
 			)
 		}
 	}
-	headerLines := strings.Split(strings.ReplaceAll(s.requestHeaders.Text, "\r\n", "\n"), "\n")
-	headers, _, err := application.ParseTransientHeaders(headerLines)
-	if err != nil {
-		return presenter.DiagnoseInput{}, err
+	var headers map[string]string
+	if isHTTP {
+		headerLines := strings.Split(strings.ReplaceAll(s.requestHeaders.Text, "\r\n", "\n"), "\n")
+		headers, _, err = application.ParseTransientHeaders(headerLines)
+		if err != nil {
+			return presenter.DiagnoseInput{}, formError(
+				"requestHeaders", s.texts.Text(localization.DiagnoseInvalidRequestHeaders),
+			)
+		}
 	}
-	target := strings.TrimSpace(s.target.Text)
+	serverName, httpHost, caBundle := "", "", ""
+	if isTLS {
+		serverName = strings.TrimSpace(s.serverName.Text)
+		caBundle = strings.TrimSpace(s.caBundle.Text)
+	}
+	if isHTTP {
+		httpHost = strings.TrimSpace(s.httpHost.Text)
+	}
 	return presenter.DiagnoseInput{
 		Target:                 target,
 		Mode:                   s.modeValue(),
 		IPVersion:              s.ipVersionValue(),
 		Timeout:                timeout,
 		CheckTimeout:           checkTimeout,
-		Method:                 s.methodValue(),
-		NoProxy:                s.noProxy.Checked,
-		Insecure:               s.insecure.Checked,
-		AllowInsecureRedirects: s.allowInsecureRedirects.Checked,
-		AllowPrivateRedirects:  s.allowPrivateRedirects.Checked,
+		Method:                 conditionalString(isHTTP, s.methodValue()),
+		NoProxy:                isHTTP && s.noProxy.Checked,
+		Insecure:               isTLS && s.insecure.Checked,
+		AllowInsecureRedirects: isHTTP && s.allowInsecureRedirects.Checked,
+		AllowPrivateRedirects:  isHTTP && s.allowPrivateRedirects.Checked,
 		MaxRedirects:           redirects,
 		Verbosity:              s.verbosityValue(),
 		ProbeMode:              s.probeModeValue(),
@@ -673,13 +823,45 @@ func (s *DiagnoseScreen) Input() (presenter.DiagnoseInput, error) {
 		ExpectedStatusSet:      expectedSet,
 		LatencyThreshold:       latency,
 		ConnectIP:              strings.TrimSpace(s.connectIP.Text),
-		ServerName:             strings.TrimSpace(s.serverName.Text),
-		HTTPHost:               strings.TrimSpace(s.httpHost.Text),
-		CustomCABundlePath:     strings.TrimSpace(s.caBundle.Text),
+		ServerName:             serverName,
+		HTTPHost:               httpHost,
+		CustomCABundlePath:     caBundle,
 		RequestHeaders:         headers,
 		CollectDNSDetails:      s.collectDNSDetails.Checked,
-		InspectBody:            s.inspectBody.Checked,
+		InspectBody:            isHTTP && s.inspectBody.Checked,
 	}, nil
+}
+
+func conditionalString(condition bool, value string) string {
+	if condition {
+		return value
+	}
+	return ""
+}
+
+// showFormError reveals and focuses the failing control while retaining a
+// visible inline explanation for keyboard and assistive-technology users.
+func (s *DiagnoseScreen) showFormError(err *FormError) {
+	if err == nil {
+		return
+	}
+	if err.Field != "target" && err.Field != "timeout" {
+		s.setAdvancedExpanded(true)
+	}
+	for _, entry := range s.formEntries {
+		entry.SetValidationError(nil)
+	}
+	if entry := s.formEntries[err.Field]; entry != nil {
+		entry.SetValidationError(err)
+		if app := fyne.CurrentApp(); app != nil && app.Driver() != nil {
+			if canvas := app.Driver().CanvasForObject(entry); canvas != nil {
+				canvas.Focus(entry)
+			}
+		}
+	}
+	s.inputError.SetText(err.Message)
+	s.inputErrorRow.Show()
+	s.inputViewport.ScrollToBottom()
 }
 
 // FocusTarget implements Ctrl+L.
@@ -791,7 +973,6 @@ func (s *DiagnoseScreen) SetRunning(running bool) {
 	s.running = running
 	s.setInputsEnabled(!running)
 	if running {
-		s.setAdvancedExpanded(false)
 		s.inputViewport.ScrollToTop()
 		s.overviewViewport.ScrollToTop()
 		s.idleState.Hide()
@@ -807,6 +988,8 @@ func (s *DiagnoseScreen) SetRunning(running bool) {
 			s.texts.Text(localization.DiagnoseTargetFormat),
 			strings.TrimSpace(s.target.Text),
 		))
+		s.summaryPath.SetText("")
+		s.summaryBreak.SetText("")
 		s.summaryTitle.SetText(s.texts.Text(localization.DiagnoseRunningTitle))
 		s.summaryDetail.SetText(s.texts.Text(localization.DiagnoseRunningDetail))
 		s.summaryStatus.RemoveAll()
@@ -891,27 +1074,51 @@ func (s *DiagnoseScreen) ShowDiagnosis(diagnosis presenter.DiagnosisView) {
 		s.texts.Text(localization.DiagnoseTargetFormat),
 		diagnosis.Target,
 	))
+	s.summaryPath.SetText("")
+	s.summaryBreak.SetText("")
 	s.summaryTitle.SetText(diagnosis.SummaryTitle)
 	s.summaryDetail.SetText(diagnosis.SummaryDetail)
 	s.summaryStatus.RemoveAll()
 	s.summaryStatus.Add(
 		components.StatusLabel(s.texts, diagnosis.OverallStatus, diagnosis.SummaryTitle),
 	)
-	if len(diagnosis.SummaryRecommendations) > 0 {
-		s.summaryNextText.SetText(diagnosis.SummaryRecommendations[0])
+	recommendations := diagnosis.Recommendations
+	if len(recommendations) == 0 && len(diagnosis.SummaryRecommendations) > 0 {
+		recommendations = make([]presenter.RecommendationView, 0, len(diagnosis.SummaryRecommendations))
+		for _, message := range diagnosis.SummaryRecommendations {
+			recommendations = append(recommendations, presenter.RecommendationView{
+				Priority: "high",
+				Message:  message,
+			})
+		}
+	}
+	if len(recommendations) > 0 {
+		s.showSummaryRecommendations(recommendations)
 		s.summaryNextStep.Show()
 	} else {
 		s.summaryNextText.SetText("")
 		s.summaryNextStep.Hide()
 	}
+	s.summaryPath.SetText("")
+	if diagnosis.PrimaryPath != "" {
+		s.summaryPath.SetText(fmt.Sprintf(s.texts.Text(localization.DiagnoseActualPathFormat), diagnosis.PrimaryPath))
+	}
+	s.summaryBreak.SetText("")
+	if diagnosis.BreakPoint != "" {
+		s.summaryBreak.SetText(fmt.Sprintf(s.texts.Text(localization.DiagnoseBreakPointFormat), diagnosis.BreakPoint))
+	}
 	if hasTimingBreakdown(diagnosis.Timing) {
 		segments := make([]components.TimingSegment, 0, len(diagnosis.Timing))
 		for _, timing := range diagnosis.Timing {
 			segments = append(segments, components.TimingSegment{
-				Name:     timing.Name,
-				Duration: timing.Duration,
-				Measured: timing.Measured,
-				IsTotal:  timing.IsTotal,
+				Name:       timing.Name,
+				Duration:   timing.Duration,
+				Measured:   timing.Measured,
+				IsTotal:    timing.IsTotal,
+				StartedAt:  timing.StartedAt,
+				FinishedAt: timing.FinishedAt,
+				AttemptID:  timing.AttemptID,
+				Reused:     timing.Reused,
 			})
 		}
 		s.waterfall.SetSegments(segments)
@@ -936,6 +1143,53 @@ func (s *DiagnoseScreen) ShowDiagnosis(diagnosis presenter.DiagnosisView) {
 		s.clearDetails()
 	}
 	s.resultPanels.Refresh()
+}
+
+func (s *DiagnoseScreen) showSummaryRecommendations(values []presenter.RecommendationView) {
+	if len(values) > 0 {
+		s.summaryNextText.SetText(values[0].Message)
+	}
+	s.summaryNextStep.RemoveAll()
+	s.summaryNextStep.Add(widget.NewSeparator())
+	s.summaryNextStep.Add(widget.NewLabelWithStyle(
+		s.texts.Text(localization.DiagnoseRecommendedNextStep),
+		fyne.TextAlignLeading,
+		fyne.TextStyle{Bold: true},
+	))
+	for _, value := range values {
+		recommendation := value
+		priority := localization.PriorityLabel(s.texts, recommendation.Priority)
+		labelText := recommendation.Message
+		if priority != "" {
+			labelText = priority + " · " + labelText
+		}
+		label := widget.NewLabel(labelText)
+		label.Wrapping = fyne.TextWrapWord
+		copyButton := widget.NewButtonWithIcon(s.texts.Text(localization.CommonCopy), theme.ContentCopyIcon(), func() {
+			if s.actions.CopyText != nil {
+				s.actions.CopyText(recommendation.Message)
+			}
+		})
+		copyButton.Importance = widget.LowImportance
+		s.summaryNextStep.Add(container.NewBorder(nil, nil, nil, copyButton, label))
+		links := make([]string, 0, 2)
+		if recommendation.CheckID != "" {
+			links = append(links, fmt.Sprintf(
+				s.texts.Text(localization.RecommendationCheckFormat), recommendation.CheckID,
+			))
+		}
+		if len(recommendation.EvidenceIDs) > 0 {
+			links = append(links, fmt.Sprintf(
+				s.texts.Text(localization.RecommendationEvidenceFormat),
+				strings.Join(recommendation.EvidenceIDs, ", "),
+			))
+		}
+		if len(links) > 0 {
+			linked := widget.NewLabel(strings.Join(links, " · "))
+			linked.Importance = widget.LowImportance
+			s.summaryNextStep.Add(linked)
+		}
+	}
 }
 
 // ShowError ends a run with a user-readable error.
@@ -1005,11 +1259,8 @@ func (s *DiagnoseScreen) showCheck(check presenter.CheckView) {
 		formatViewDuration(s.texts, check.Duration),
 	))
 	s.detailSummary.SetText(check.Summary)
-	s.detailEvidence.SetText(joinDisplayLines(
-		s.texts,
-		check.Evidence,
-		s.texts.Text(localization.DiagnoseNoEvidenceRecorded),
-	))
+	s.detailEvidence.RemoveAll()
+	s.detailEvidence.Add(components.EvidenceGroups(s.texts, check.EvidenceGroups, s.actions.CopyText))
 	s.detailRecommend.SetText(joinDisplayLines(
 		s.texts,
 		check.Recommendations,
@@ -1086,7 +1337,8 @@ func (s *DiagnoseScreen) clearDetails() {
 	s.detailStatus.RemoveAll()
 	s.detailTiming.SetText("")
 	s.detailSummary.SetText("")
-	s.detailEvidence.SetText(s.texts.Text(localization.DiagnoseNoEvidenceSelected))
+	s.detailEvidence.RemoveAll()
+	s.detailEvidence.Add(widget.NewLabel(s.texts.Text(localization.DiagnoseNoEvidenceSelected)))
 	s.detailRecommend.SetText(
 		s.texts.Text(localization.DiagnoseNoRecommendationsSelected),
 	)
@@ -1102,20 +1354,37 @@ func (s *DiagnoseScreen) setAdvancedExpanded(expanded bool) {
 	if expanded {
 		s.advancedFields.Show()
 		s.advancedToggle.SetIcon(theme.MenuDropUpIcon())
-		if s.resultPanels != nil {
-			s.resultPanels.Offset = 0.50
-		}
 	} else {
 		s.advancedFields.Hide()
 		s.advancedToggle.SetIcon(theme.MenuDropDownIcon())
 		s.inputViewport.ScrollToTop()
-		if s.resultPanels != nil {
-			s.resultPanels.Offset = 0.53
-		}
 	}
 	s.Root.Refresh()
 	if expanded {
 		s.inputViewport.ScrollToBottom()
+	}
+}
+
+// UIState returns only layout state; it never includes diagnostic inputs.
+func (s *DiagnoseScreen) UIState() DiagnoseUIState {
+	state := DiagnoseUIState{AdvancedExpanded: s.advancedExpanded}
+	if s.resultPanels != nil {
+		state.ResultSplit = s.resultPanels.Offset
+	}
+	if s.explorer != nil {
+		state.ExplorerSplit = s.explorer.Offset
+	}
+	return state
+}
+
+// ApplyUIState restores validated splitter positions and advanced visibility.
+func (s *DiagnoseScreen) ApplyUIState(state DiagnoseUIState) {
+	s.setAdvancedExpanded(state.AdvancedExpanded)
+	if s.resultPanels != nil && state.ResultSplit >= 0.15 && state.ResultSplit <= 0.85 {
+		s.resultPanels.Offset = state.ResultSplit
+	}
+	if s.explorer != nil && state.ExplorerSplit >= 0.15 && state.ExplorerSplit <= 0.85 {
+		s.explorer.Offset = state.ExplorerSplit
 	}
 }
 
@@ -1131,6 +1400,34 @@ func (layout diagnoseRootLayout) Layout(
 ) {
 	if len(objects) < 2 || layout.screen == nil {
 		return
+	}
+	if layout.screen.explorer != nil {
+		wantHorizontal := size.Width >= 900
+		if layout.screen.explorer.Horizontal != wantHorizontal {
+			layout.screen.explorer.Horizontal = wantHorizontal
+			if wantHorizontal {
+				layout.screen.explorer.Offset = 0.40
+			} else {
+				layout.screen.explorer.Offset = 0.42
+			}
+		}
+	}
+	if layout.screen.postActionsWide != nil && layout.screen.postActionsOverflow != nil {
+		if size.Width < 900 {
+			if layout.screen.postActionsWide.Visible() {
+				layout.screen.postActionsWide.Hide()
+			}
+			if !layout.screen.postActionsOverflow.Visible() {
+				layout.screen.postActionsOverflow.Show()
+			}
+		} else {
+			if layout.screen.postActionsOverflow.Visible() {
+				layout.screen.postActionsOverflow.Hide()
+			}
+			if !layout.screen.postActionsWide.Visible() {
+				layout.screen.postActionsWide.Show()
+			}
+		}
 	}
 	padding := theme.Padding()
 	contentHeight := layout.screen.inputCard.MinSize().Height
@@ -1213,21 +1510,12 @@ func hasTimingBreakdown(timing []presenter.TimingView) bool {
 
 // formatViewDuration renders a localized duration for the screen.
 func formatViewDuration(texts localization.Catalog, duration time.Duration) string {
-	if duration <= 0 {
-		return texts.Text(localization.CommonUnavailable)
-	}
-	if duration < time.Second {
-		return duration.Round(time.Microsecond).String()
-	}
-	return duration.Round(time.Millisecond).String()
+	return localization.FormatDuration(texts, duration)
 }
 
 // formatViewTime renders a localized timestamp for the screen.
 func formatViewTime(texts localization.Catalog, value time.Time) string {
-	if value.IsZero() {
-		return texts.Text(localization.CommonUnavailable)
-	}
-	return value.Local().Format(time.RFC3339)
+	return localization.FormatTime(texts, value)
 }
 
 // joinDisplayLines removes empty values and returns localized fallback text.
@@ -1306,6 +1594,7 @@ func (s *DiagnoseScreen) updateTargetPreview() {
 		}
 	}
 	raw := strings.TrimSpace(s.target.Text)
+	s.updateContextFields()
 	if raw == "" {
 		s.targetPreview.SetText("")
 		return
@@ -1319,6 +1608,38 @@ func (s *DiagnoseScreen) updateTargetPreview() {
 		s.texts.Text(localization.DiagnoseTargetPreview),
 		preview,
 	))
+}
+
+// updateContextFields keeps only protocol-applicable advanced controls visible.
+func (s *DiagnoseScreen) updateContextFields() {
+	if s.transportFields == nil || s.tlsFields == nil || s.httpFields == nil {
+		return
+	}
+	context := presenter.TargetContext(s.target.Text, s.modeValue())
+	s.transportFields.Show()
+	s.tlsFields.Hide()
+	s.httpFields.Hide()
+	message := localization.DiagnoseContextUnknown
+	switch context {
+	case presenter.DiagnoseContextTCP:
+		message = localization.DiagnoseContextTCP
+	case presenter.DiagnoseContextTLS:
+		message = localization.DiagnoseContextTLS
+		s.tlsFields.Show()
+	case presenter.DiagnoseContextHTTP:
+		message = localization.DiagnoseContextHTTP
+		s.httpFields.Show()
+	case presenter.DiagnoseContextHTTPS:
+		message = localization.DiagnoseContextHTTPS
+		s.tlsFields.Show()
+		s.httpFields.Show()
+	}
+	if s.contextHelp != nil {
+		s.contextHelp.SetText(s.texts.Text(message))
+	}
+	if s.Root != nil {
+		s.Root.Refresh()
+	}
 }
 
 func parseExpectedStatus(value string) (int, int, bool, error) {

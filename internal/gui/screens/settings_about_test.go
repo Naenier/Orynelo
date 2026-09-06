@@ -301,7 +301,9 @@ func TestAboutFormatsMetadataAndProvidesSupportActions(t *testing.T) {
 	root.Resize(fyne.NewSize(1400, 800))
 	test.LaidOutObjects(root)
 
-	settingsAboutFindLabel(t, root, "28 Jul 2026, 12:41 UTC")
+	settingsAboutFindLabel(t, root, localization.FormatTime(
+		localization.English{}, time.Date(2026, time.July, 28, 12, 41, 33, 0, time.UTC),
+	))
 	settingsAboutFindLabel(t, root, "Linux/x86-64")
 	settingsAboutFindLabel(t, root, "Local changes included")
 	settingsAboutFindLabel(t, root, "MIT")

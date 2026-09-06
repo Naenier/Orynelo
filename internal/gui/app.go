@@ -18,6 +18,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/driver/desktop"
+	fynelang "fyne.io/fyne/v2/lang"
 	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
@@ -41,8 +42,12 @@ import (
 const (
 	defaultWidth  = 1280
 	defaultHeight = 820
-	minimumWidth  = 1050
-	minimumHeight = 680
+	minimumWidth  = 720
+	minimumHeight = 560
+
+	preferenceDiagnoseAdvanced = "ui.diagnose.advanced"
+	preferenceDiagnoseResult   = "ui.diagnose.result_split"
+	preferenceDiagnoseExplorer = "ui.diagnose.explorer_split"
 )
 
 // controller owns the desktop window, navigation, lifecycle, and dialogs. Use-
@@ -70,6 +75,8 @@ type controller struct {
 	secondaryStatusTip string
 	pageTitle          *widget.Label
 	navigationButtons  map[string]*widget.Button
+	navigation         *fyne.Container
+	shortcuts          []fyne.Shortcut
 
 	mu            sync.Mutex
 	closing       bool
@@ -98,8 +105,12 @@ func Run(ctx context.Context, backend Backend, info buildinfo.Info) {
 	}
 	fyneApp := app.NewWithID("io.github.naenier.orynelo")
 	fyneApp.SetIcon(fyne.NewStaticResource("Icon.png", appassets.IconPNG()))
-	texts := localization.English{}
 	cfg := application.DefaultConfig()
+	language := localization.ResolveLanguage(
+		localization.Language(cfg.Appearance.Language),
+		string(fynelang.SystemLocale()),
+	)
+	texts := localization.ForLanguage(language)
 	_ = apptheme.Apply(texts, fyneApp, cfg.Appearance.Theme)
 
 	window := fyneApp.NewWindow(texts.Text(localization.AppName))
@@ -122,12 +133,14 @@ func Run(ctx context.Context, backend Backend, info buildinfo.Info) {
 	}
 	c.tasks = tasks
 	c.buildScreens(cfg)
+	c.restoreUIState()
 	if err := c.buildTaskScopes(); err != nil {
 		tasks.Close()
 		return
 	}
 	c.buildWindow()
 	c.registerShortcuts()
+	c.registerMenu()
 	window.SetCloseIntercept(c.closeWindow)
 	c.showScreen("diagnose")
 	c.showStartupWarnings()
@@ -165,12 +178,17 @@ func (c *controller) showStartupWarnings() {
 	if len(warnings) == 0 {
 		return
 	}
+	texts := localization.Normalize(c.texts)
 	lines := make([]string, 0, len(warnings)+1)
-	lines = append(lines, "Diagnostics are available, but some local features are disabled:")
+	lines = append(lines, texts.Text(localization.StartupLimitedStateIntro))
 	for _, warning := range warnings {
-		lines = append(lines, fmt.Sprintf("• %s (%s)", warning.Code, warning.Message))
+		message, ok := localization.Message(texts, string(warning.Message))
+		if !ok {
+			message = texts.Text(localization.ErrorInternalGuidance)
+		}
+		lines = append(lines, fmt.Sprintf(texts.Text(localization.StartupWarningFormat), message, warning.Code))
 	}
-	dialog.ShowInformation("Limited local state", strings.Join(lines, "\n"), c.window)
+	dialog.ShowInformation(texts.Text(localization.StartupLimitedStateTitle), strings.Join(lines, "\n"), c.window)
 }
 
 // buildScreens constructs every top-level screen and wires user actions back
@@ -188,8 +206,9 @@ func (c *controller) buildScreens(cfg application.Config) {
 		SaveProfile:    c.saveLastAsProfile,
 		CopyStep: func(check presenter.CheckView) {
 			text := presenter.CheckDetailsText(c.texts, check)
-			c.app.Clipboard().SetContent(privacy.Standard().Text(text))
+			c.copyText(text)
 		},
+		CopyText: c.copyText,
 	})
 	c.diagnose.SetDefaults(
 		cfg.Diagnostics.DefaultTimeout,
@@ -254,10 +273,20 @@ func (c *controller) buildWindow() {
 			fyne.TextStyle{Bold: true},
 		),
 	)
+	navigationToggle := widget.NewButtonWithIcon(c.texts.Text(localization.NavigationToggle), theme.MenuIcon(), func() {
+		if c.navigation == nil {
+			return
+		}
+		if c.navigation.Visible() {
+			c.navigation.Hide()
+		} else {
+			c.navigation.Show()
+		}
+	})
 	header := container.NewBorder(
 		nil,
 		nil,
-		sidebarHeader,
+		container.NewHBox(navigationToggle, sidebarHeader),
 		container.NewHBox(c.headerStatus, c.header),
 		c.pageTitle,
 	)
@@ -295,10 +324,11 @@ func (c *controller) buildWindow() {
 		}),
 	}
 	navigation := container.NewGridWrap(fyne.NewSize(176, 44), buttons...)
+	c.navigation = navigation
 	body := container.NewBorder(
 		nil,
 		nil,
-		container.NewPadded(navigation),
+		container.NewPadded(c.navigation),
 		nil,
 		container.NewPadded(c.content),
 	)
@@ -329,21 +359,45 @@ func compactHeaderVersion(value string) string {
 
 // registerShortcuts installs the desktop keyboard navigation and action map.
 func (c *controller) registerShortcuts() {
-	add := func(key fyne.KeyName, modifier fyne.KeyModifier, handler func()) {
-		c.window.Canvas().AddShortcut(
-			&desktop.CustomShortcut{KeyName: key, Modifier: modifier},
-			func(fyne.Shortcut) { handler() },
-		)
+	for _, shortcut := range c.shortcuts {
+		c.window.Canvas().RemoveShortcut(shortcut)
 	}
-	add(fyne.KeyL, fyne.KeyModifierControl, func() {
+	c.shortcuts = c.shortcuts[:0]
+	add := func(key fyne.KeyName, modifier fyne.KeyModifier, handler func()) {
+		shortcut := &desktop.CustomShortcut{KeyName: key, Modifier: modifier}
+		c.window.Canvas().AddShortcut(shortcut, func(fyne.Shortcut) { handler() })
+		c.shortcuts = append(c.shortcuts, shortcut)
+	}
+	modifier := fyne.KeyModifierShortcutDefault
+	add(fyne.KeyL, modifier, func() {
 		c.showScreen("diagnose")
 		c.diagnose.FocusTarget(c.window.Canvas())
 	})
-	add(fyne.KeyReturn, fyne.KeyModifierControl, c.triggerDiagnosticShortcut)
-	add(fyne.KeyEnter, fyne.KeyModifierControl, c.triggerDiagnosticShortcut)
+	add(fyne.KeyReturn, modifier, c.triggerDiagnosticShortcut)
+	add(fyne.KeyEnter, modifier, c.triggerDiagnosticShortcut)
 	add(fyne.KeyEscape, 0, c.cancelDiagnostic)
-	add(fyne.KeyE, fyne.KeyModifierControl, func() { c.exportLast("markdown") })
-	add(fyne.KeyComma, fyne.KeyModifierControl, func() { c.showScreen("settings") })
+	add(fyne.KeyE, modifier, func() { c.exportLast("markdown") })
+	add(fyne.KeyComma, modifier, func() { c.showScreen("settings") })
+}
+
+func (c *controller) registerMenu() {
+	shortcut := func(key fyne.KeyName) fyne.Shortcut {
+		return &desktop.CustomShortcut{KeyName: key, Modifier: fyne.KeyModifierShortcutDefault}
+	}
+	run := fyne.NewMenuItem(c.texts.Text(localization.DiagnoseRun), c.triggerDiagnosticShortcut)
+	run.Shortcut = shortcut(fyne.KeyEnter)
+	export := fyne.NewMenuItem(c.texts.Text(localization.DiagnoseExportMarkdown), func() { c.exportLast("markdown") })
+	export.Shortcut = shortcut(fyne.KeyE)
+	settings := fyne.NewMenuItem(c.texts.Text(localization.NavigationSettings), func() { c.showScreen("settings") })
+	settings.Shortcut = shortcut(fyne.KeyComma)
+	shortcuts := fyne.NewMenuItem(c.texts.Text(localization.MenuKeyboardShortcuts), func() {
+		dialog.ShowInformation(c.texts.Text(localization.MenuKeyboardShortcuts), c.texts.Text(localization.MenuKeyboardShortcutsBody), c.window)
+	})
+	c.window.SetMainMenu(fyne.NewMainMenu(
+		fyne.NewMenu(c.texts.Text(localization.MenuFile), run, export),
+		fyne.NewMenu(c.texts.Text(localization.MenuNavigate), settings),
+		fyne.NewMenu(c.texts.Text(localization.MenuHelp), shortcuts),
+	))
 }
 
 // showScreen activates one top-level page and cancels work owned by the page
@@ -457,6 +511,7 @@ func (c *controller) closeWindow() {
 	}
 	c.closing = true
 	c.mu.Unlock()
+	c.saveUIState()
 	if c.tasks != nil {
 		c.tasks.Close()
 	}
@@ -646,8 +701,21 @@ func (c *controller) copySummary() {
 		return
 	}
 	diagnosis := privacy.Standard().Diagnosis(c.lastDiagnosis)
-	text := diagnosis.Summary.Title + "\n\n" + diagnosis.Summary.Description
-	c.app.Clipboard().SetContent(privacy.Standard().Text(text))
+	text := presenter.DiagnosisSummaryText(c.texts, presenter.Diagnosis(c.texts, diagnosis))
+	c.copyText(text)
+}
+
+func (c *controller) copyText(value string) {
+	value = privacy.Standard().Text(value)
+	if strings.TrimSpace(value) == "" {
+		return
+	}
+	c.app.Clipboard().SetContent(value)
+	dialog.ShowInformation(
+		c.texts.Text(localization.DiagnoseCopiedTitle),
+		c.texts.Text(localization.DiagnoseCopiedMessage),
+		c.window,
+	)
 }
 
 // exportLast starts export for the most recent completed diagnosis.
@@ -672,11 +740,37 @@ func (c *controller) exportDiagnosis(diagnosis model.Diagnosis, format string) {
 	choice.SetSelected(standardLabel)
 	filename := widget.NewEntry()
 	filename.SetText(c.texts.Text(localization.DialogReportFilenameBase) + extension)
-	content := container.NewVBox(
+	contentItems := []fyne.CanvasObject{
 		widget.NewLabel(c.texts.Text(localization.DialogExportPrivacyBody)),
 		choice,
 		widget.NewForm(widget.NewFormItem(c.texts.Text(localization.DialogExportFilename), filename)),
-	)
+	}
+	reportLanguage := widget.NewRadioGroup(nil, nil)
+	languageValues := map[string]string{
+		c.texts.Text(localization.OptionSystem):  "system",
+		c.texts.Text(localization.OptionRussian): "ru",
+		c.texts.Text(localization.OptionEnglish): "en",
+	}
+	if format != "json" {
+		reportLanguage.Options = []string{
+			c.texts.Text(localization.OptionSystem),
+			c.texts.Text(localization.OptionRussian),
+			c.texts.Text(localization.OptionEnglish),
+		}
+		selected := c.texts.Text(localization.OptionSystem)
+		for label, value := range languageValues {
+			if value == c.configuration.Appearance.ReportLanguage {
+				selected = label
+				break
+			}
+		}
+		reportLanguage.SetSelected(selected)
+		contentItems = append(contentItems,
+			widget.NewLabel(c.texts.Text(localization.DialogExportLanguage)),
+			reportLanguage,
+		)
+	}
+	content := container.NewVBox(contentItems...)
 	dialog.NewCustomConfirm(
 		c.texts.Text(localization.DialogExportPrivacyTitle),
 		c.texts.Text(localization.DialogExportContinue),
@@ -692,10 +786,17 @@ func (c *controller) exportDiagnosis(diagnosis model.Diagnosis, format string) {
 			}
 			name, err := normalizeExportFilename(filename.Text, extension)
 			if err != nil {
-				dialog.ShowError(err, c.window)
+				dialog.ShowError(errors.New(c.texts.Text(localization.DialogExportFilenameInvalid)), c.window)
 				return
 			}
-			c.exportDiagnosisWithPrivacy(diagnosis, format, mode, name)
+			language := "en"
+			if format != "json" {
+				language = languageValues[reportLanguage.Selected]
+				language = string(localization.ResolveLanguage(
+					localization.Language(language), string(fynelang.SystemLocale()),
+				))
+			}
+			c.exportDiagnosisWithPrivacy(diagnosis, format, mode, name, language)
 		},
 		c.window,
 	).Show()
@@ -708,8 +809,35 @@ func (c *controller) exportDiagnosisWithPrivacy(
 	format string,
 	mode privacy.Mode,
 	filename string,
+	language string,
 ) {
-	c.prepareReport(diagnosis, format, mode, filename)
+	c.prepareReport(diagnosis, format, mode, filename, language)
+}
+
+// restoreUIState restores only non-sensitive layout preferences. Diagnostic
+// inputs and other potentially private values are deliberately excluded.
+func (c *controller) restoreUIState() {
+	if c.app == nil || c.diagnose == nil {
+		return
+	}
+	preferences := c.app.Preferences()
+	c.diagnose.ApplyUIState(screens.DiagnoseUIState{
+		AdvancedExpanded: preferences.BoolWithFallback(preferenceDiagnoseAdvanced, false),
+		ResultSplit:      preferences.FloatWithFallback(preferenceDiagnoseResult, 0.53),
+		ExplorerSplit:    preferences.FloatWithFallback(preferenceDiagnoseExplorer, 0.40),
+	})
+}
+
+// saveUIState persists only advanced visibility and splitter positions.
+func (c *controller) saveUIState() {
+	if c.app == nil || c.diagnose == nil {
+		return
+	}
+	state := c.diagnose.UIState()
+	preferences := c.app.Preferences()
+	preferences.SetBool(preferenceDiagnoseAdvanced, state.AdvancedExpanded)
+	preferences.SetFloat(preferenceDiagnoseResult, float64(state.ResultSplit))
+	preferences.SetFloat(preferenceDiagnoseExplorer, float64(state.ExplorerSplit))
 }
 
 // exportExtension returns the canonical file extension for a report format.
